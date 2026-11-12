@@ -152,3 +152,163 @@ def test_world_cup_2027_tournament_via_api():
     assert report["champion"] in wc["teams"]
     assert len(report["pools"]) == 6
     assert report["bracket"][0]["stage"] == "round-of-16"
+
+
+def test_squad_mode_tournament_run_end_to_end():
+    client = _client()
+    squad_player_ids = {}
+    for code in ["ENG", "FRA", "IRE", "SCO"]:
+        players = client.get(f"/api/pool/{code}?season=2026").get_json()
+        squad_player_ids[code] = [p["id"] for p in players]
+
+    res = client.post("/api/tournament/run", json={
+        "type": "custom", "format": "round_robin",
+        "squad_player_ids": squad_player_ids, "seed": 4,
+    })
+    assert res.status_code == 200
+    report = res.get_json()
+    assert report["name"] == "Round-robin"
+    assert len(report["results"]) == 6
+    assert report["team_of_tournament"]
+
+
+def test_live_match_start_substitute_continue_until_finished():
+    client = _client()
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+
+    start = client.post("/api/match/live/start", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "seed": 11,
+    }).get_json()
+    assert start["finished"] is False
+    assert start["minute"] >= 20
+    session_id = start["session_id"]
+
+    bench_player_id = start["home"]["bench"][0]["id"]
+    position = start["home"]["lineup"][0]["position"]
+    sub = client.post(f"/api/match/live/{session_id}/substitute", json={
+        "team": "home", "position": position, "bench_player_id": bench_player_id,
+    }).get_json()
+    assert "error" not in sub
+    assert any(p["id"] == bench_player_id for p in sub["home"]["lineup"])
+
+    state = sub
+    guard = 0
+    while not state["finished"] and guard < 10:
+        state = client.post(f"/api/match/live/{session_id}/continue", json={}).get_json()
+        guard += 1
+    assert state["finished"] is True
+    assert "result" in state
+    assert state["result"]["scoreline"]
+
+
+def test_live_match_substitute_rejects_unknown_session():
+    client = _client()
+    res = client.post("/api/match/live/does-not-exist/substitute", json={
+        "team": "home", "position": "Hooker", "bench_player_id": 1,
+    })
+    assert res.status_code == 404
+
+
+def _play_out_live_match(client, live_state):
+    """Drives a `live_match` (or single-friendly live match state) through
+    `.../continue` until finished, returns the final state."""
+    state = live_state
+    guard = 0
+    while not state["finished"] and guard < 20:
+        state = client.post(f"/api/match/live/{state['session_id']}/continue", json={}).get_json()
+        guard += 1
+    assert state["finished"] is True
+    return state
+
+
+def _drive_tournament_session(client, state):
+    """Resolves an interactive tournament session to completion: whenever
+    paused on my_team's own fixture, plays that live match straight through
+    (no manual subs - that path is already covered by the live-match tests)
+    and resumes, repeating until the session finishes. Returns
+    (final_state, pause_count)."""
+    pause_count = 0
+    while state["status"] == "paused":
+        pause_count += 1
+        _play_out_live_match(client, state["live_match"])
+        state = client.post(f"/api/tournament/{state['session_id']}/resume").get_json()
+    return state, pause_count
+
+
+def test_interactive_tournament_pauses_on_my_team_and_resumes_to_a_final_report():
+    client = _client()
+    team_ids = {
+        "A": _build_minimal_team(client, "ENG", "A"),
+        "B": _build_minimal_team(client, "FRA", "B"),
+        "C": _build_minimal_team(client, "IRE", "C"),
+        "D": _build_minimal_team(client, "WAL", "D"),
+    }
+    start = client.post("/api/tournament/start", json={
+        "type": "custom", "team_ids": team_ids, "format": "round_robin",
+        "my_team": "A", "seed": 1,
+    }).get_json()
+    assert start["status"] == "paused"
+    assert "A" in (start["home"], start["away"])
+
+    final_state, pause_count = _drive_tournament_session(client, start)
+    assert final_state["status"] == "finished"
+    assert pause_count == 3  # "A" plays each of the other 3 teams once in a round robin
+    report = final_state["report"]
+    assert report["standings"] is not None
+    assert len(report["results"]) == 6
+
+
+def test_interactive_tournament_without_my_team_runs_straight_through():
+    client = _client()
+    team_ids = {
+        "A": _build_minimal_team(client, "ENG", "A"),
+        "B": _build_minimal_team(client, "FRA", "B"),
+        "C": _build_minimal_team(client, "IRE", "C"),
+        "D": _build_minimal_team(client, "WAL", "D"),
+    }
+    # No my_team at all.
+    start = client.post("/api/tournament/start", json={
+        "type": "custom", "team_ids": team_ids, "format": "round_robin", "seed": 2,
+    }).get_json()
+    assert start["status"] == "finished"
+    assert len(start["report"]["results"]) == 6
+
+    # my_team given, but it isn't even one of this tournament's teams.
+    start2 = client.post("/api/tournament/start", json={
+        "type": "custom", "team_ids": team_ids, "format": "round_robin",
+        "my_team": "Not In This Tournament", "seed": 2,
+    }).get_json()
+    assert start2["status"] == "finished"
+
+
+def test_tournament_run_endpoint_still_works_unchanged():
+    client = _client()
+    team_ids = {
+        "A": _build_minimal_team(client, "ENG", "A"),
+        "B": _build_minimal_team(client, "FRA", "B"),
+        "C": _build_minimal_team(client, "IRE", "C"),
+        "D": _build_minimal_team(client, "WAL", "D"),
+    }
+    report = client.post("/api/tournament/run", json={
+        "type": "custom", "team_ids": team_ids, "format": "round_robin", "seed": 3,
+    }).get_json()
+    assert report["standings"] is not None
+    assert len(report["results"]) == 6
+
+
+def test_tournament_resume_rejects_unknown_or_not_paused_session():
+    client = _client()
+    assert client.post("/api/tournament/does-not-exist/resume").status_code == 404
+
+    team_ids = {
+        "A": _build_minimal_team(client, "ENG", "A"),
+        "B": _build_minimal_team(client, "FRA", "B"),
+    }
+    start = client.post("/api/tournament/start", json={
+        "type": "custom", "team_ids": team_ids, "format": "round_robin", "seed": 4,
+    }).get_json()
+    assert start["status"] == "finished"
+    # Already finished - resuming it again should be rejected, not hang.
+    res = client.post(f"/api/tournament/{start['session_id']}/resume")
+    assert res.status_code == 400

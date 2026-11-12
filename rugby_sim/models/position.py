@@ -86,16 +86,23 @@ CATEGORY_POSITION_GROUPS: dict[str, set] = {
 # player makes to team sub-ratings (scrum, lineout, defense, attack, ...).
 POSITION_PROFILES: dict[Position, dict[str, float]] = {
     Position.LOOSEHEAD_PROP: {
-        "scrummaging": 3.0, "strength": 2.0, "tackling": 1.0,
-        "fitness": 1.0, "discipline": 1.0,
+        # Real-world distinction from tighthead: the head position in the
+        # scrum (bound under the opposing hooker) rewards a lower, more
+        # mobile engagement over a pure strength contest, and looseheads
+        # are typically more involved around the field in open play.
+        "scrummaging": 2.5, "strength": 1.5, "tackling": 1.5,
+        "fitness": 1.5, "agility": 0.5, "discipline": 1.0,
     },
     Position.HOOKER: {
         "lineout_throwing": 2.5, "scrummaging": 2.0, "tackling": 1.5,
         "handling": 1.0, "fitness": 1.0, "game_intelligence": 1.0,
     },
     Position.TIGHTHEAD_PROP: {
-        "scrummaging": 3.0, "strength": 2.0, "tackling": 1.0,
-        "fitness": 1.0, "discipline": 1.0,
+        # The scrum's main anchor (bound over the opposing loosehead) -
+        # weighted more toward raw scrummaging power than loosehead, less
+        # toward general mobility.
+        "scrummaging": 3.5, "strength": 2.5, "tackling": 0.8,
+        "fitness": 0.8, "discipline": 1.0,
     },
     Position.LOCK_1: {
         "lineout_jumping": 2.5, "strength": 2.0, "tackling": 1.5,

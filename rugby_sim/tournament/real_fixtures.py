@@ -11,6 +11,22 @@ alone, each named tournament below is defined by its **team set** + a
 `competition_id`, where present, is kept for the record but isn't the sole
 filter. This is a heuristic, not a guarantee - always worth spot-checking
 an unfamiliar season's result count against the expected number of fixtures.
+
+There used to be a `"rugby_world_cup"` entry here too - removed. Its team
+set was a superset of `rugby_championship`'s 4 teams and its month window
+("09"/"10") overlapped `rugby_championship`'s ("08"/"09"/"10"), so in any
+season with no real World Cup (every season this dataset covers except
+2023 - the next real edition is 2027, which already has its own dedicated
+`Tournament.run_world_cup_2027`), a September/October Rugby Championship
+match between Argentina/Australia/New Zealand/South Africa was silently
+mislabeled as a "Rugby World Cup" fixture. Even for the real 2023 edition
+it only ever recovered 12 of the 20 real participants, and the dedup-by-
+team-pair step could drop or conflate an actual World Cup match with an
+earlier Rugby Championship match between the same two sides. The real
+2023 World Cup (and every other professional-era edition) is properly
+covered - full real squads, full real pool draw - by
+`Tournament.run_historical_world_cup`, so this broken entry wasn't filling
+a real gap.
 """
 
 from __future__ import annotations
@@ -58,15 +74,6 @@ TOURNAMENTS = {
             "Japan", "Fiji",
         },
         months={"11"},
-    ),
-    "rugby_world_cup": TournamentTemplate(
-        name="Rugby World Cup",
-        teams={
-            "England", "France", "Ireland", "Scotland", "Wales", "Italy",
-            "New Zealand", "Australia", "South Africa", "Argentina",
-            "Japan", "Fiji",
-        },
-        months={"09", "10"},
     ),
 }
 

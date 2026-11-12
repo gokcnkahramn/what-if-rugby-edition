@@ -280,13 +280,69 @@ def _draft_team(fixed_label: Optional[str] = None, suggested_code_override: Opti
     return team
 
 
+SUB_CHECKPOINTS = [20, 40, 60, 70]
+
+
 def _run_single_match():
     home = _draft_team()
     away = _draft_team()
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
-    result = MatchEngine(home, away, seed=seed).run()
+
+    live_idx = _choose_index(
+        "Pause the match partway through to make substitutions yourself?",
+        ["No - just simulate the full 80 minutes", "Yes - pause a few times during the match"],
+    )
+    engine = MatchEngine(home, away, seed=seed)
+    if live_idx == 1:
+        result = engine.run_interactive(SUB_CHECKPOINTS, _on_match_checkpoint)
+    else:
+        result = engine.run()
     result.print_report()
+
+
+def _on_match_checkpoint(engine: MatchEngine, minute: int) -> None:
+    """Pauses a live-run match at one checkpoint: shows the score so far
+    and lets the user make zero or more manual substitutions (pick a team,
+    a position to change, and which bench player comes on) before play
+    resumes toward the next checkpoint."""
+    result = engine.result
+    print(f"\n--- {minute}' (paused) --- {result.scoreline()}")
+    for team in (engine.home, engine.away):
+        bench = engine.bench_for(team)
+        bench_desc = ", ".join(p.name for p in bench) if bench else "(none left)"
+        print(f"  {team.name} bench: {bench_desc}")
+
+    while True:
+        make_sub = _prompt("Make a substitution now? (y/N)", default="n").lower()
+        if make_sub not in ("y", "yes"):
+            break
+        _prompt_one_substitution(engine)
+
+
+def _prompt_one_substitution(engine: MatchEngine) -> None:
+    team_idx = _choose_index("  Which team?", [engine.home.name, engine.away.name])
+    team = engine.home if team_idx == 0 else engine.away
+    bench = engine.bench_for(team)
+    if not bench:
+        print("  No bench players left for that team.")
+        return
+
+    active = engine.active_lineup(team)
+    position_options = [f"{pos.value} ({slot.player.name})" for pos, slot in active.items()]
+    positions = list(active.keys())
+    pos_idx = _choose_index("  Which position comes off?", position_options)
+    position = positions[pos_idx]
+
+    bench_labels = [f"{p.name} - fit {p.rating_at(position)} at {position.value}" for p in bench]
+    bench_idx = _choose_index("  Which bench player comes on?", bench_labels)
+    chosen = bench[bench_idx]
+
+    ok = engine.apply_substitution(team, position, bench_player=chosen)
+    if ok:
+        print(f"  {chosen.name} is on for {team.name} at {position.value}.")
+    else:
+        print("  Could not make that substitution (bench empty or 8-sub cap reached).")
 
 
 WORLD_CUP_2027_LABEL = "rugby_world_cup_2027 (real pool draw, no fixtures exist yet)"
@@ -307,6 +363,39 @@ def _ask_fixture_mode() -> str:
     ]
     idx = _choose_index("Fixture order", options)
     return "specific" if idx == 0 else "random"
+
+
+def _ask_squad_mode() -> bool:
+    """Shared choice for every tournament-building flow: a fixed lineup for
+    the whole tournament (the original behavior - draft one XV per team,
+    it never changes), or a fresh auto-drafted lineup before every single
+    match, built from that team's full pool. The second option is what
+    makes an in-match injury or red card actually matter past the match it
+    happened in - an injured/sent-off player sits out the team's next
+    match (see `tournament/availability.py`), which a fixed lineup can
+    never reflect since it's the same 15 names every time regardless of
+    what happened last match."""
+    idx = _choose_index(
+        "Squad mode for every team in this tournament",
+        [
+            "Fixed lineup - draft one XV per team, reused for every match (original behavior)",
+            "Fresh squad every match - auto-draft a new best XV before each match from each "
+            "team's full pool (an injury/red card sidelines that player for the next match)",
+        ],
+    )
+    return idx == 1
+
+
+def _pick_team_pool(label: str) -> List[Player]:
+    """Squads-mode's equivalent of `_draft_team` - gets a player *pool* for
+    this team (same by-nation/free-pool/legends/historical-squad choices
+    as `_pick_pools_for_team`), but doesn't draft one fixed lineup from it -
+    a fresh lineup gets auto-drafted from this pool before every match."""
+    print(f"\n=== Pool for: {label} (fresh auto-drafted lineup every match) ===")
+    pool = _pick_pools_for_team()
+    if not pool:
+        raise SystemExit(f"No players available for {label}, aborting.")
+    return pool
 
 
 def _run_real_tournament():
@@ -335,13 +424,18 @@ def _run_real_tournament():
     team_names = sorted({f.home for f in fixtures} | {f.away for f in fixtures})
     print(f"Teams in this competition: {', '.join(team_names)}")
 
+    fresh_each_match = _ask_squad_mode()
     teams: Dict[str, Team] = {}
+    squads: Dict[str, List[Player]] = {}
     for name in team_names:
-        teams[name] = _draft_team(fixed_label=name)
+        if fresh_each_match:
+            squads[name] = _pick_team_pool(name)
+        else:
+            teams[name] = _draft_team(fixed_label=name)
 
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
-    report = Tournament(teams).run_real(key, season=season, seed=seed)
+    report = Tournament(teams=teams, squads=squads).run_real(key, season=season, seed=seed)
     report.print_report()
 
 
@@ -357,14 +451,19 @@ def _run_world_cup_2027():
         print(f"  Pool {pool_name}: {', '.join(pool_teams)}")
 
     fixture_mode = _ask_fixture_mode()
+    fresh_each_match = _ask_squad_mode()
 
     teams: Dict[str, Team] = {}
+    squads: Dict[str, List[Player]] = {}
     for name in ALL_TEAMS_2027:
-        teams[name] = _draft_team(fixed_label=name, suggested_code_override=CODE_BY_NATION.get(name))
+        if fresh_each_match:
+            squads[name] = _pick_team_pool(name)
+        else:
+            teams[name] = _draft_team(fixed_label=name, suggested_code_override=CODE_BY_NATION.get(name))
 
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
-    report = Tournament(teams).run_world_cup_2027(fixture_mode=fixture_mode, seed=seed)
+    report = Tournament(teams=teams, squads=squads).run_world_cup_2027(fixture_mode=fixture_mode, seed=seed)
     report.print_report()
 
 
@@ -409,13 +508,18 @@ def _run_historical_world_cup():
     for pool_name, team_names in pools.items():
         print(f"  {pool_name}: {', '.join(team_names)}")
 
+    fresh_each_match = _ask_squad_mode()
     teams: Dict[str, Team] = {}
+    squads_for_tournament: Dict[str, List[Player]] = {}
     for team_name, squad in squads.items():
-        teams[team_name] = _draft_team_from_fixed_pool(team_name, squad)
+        if fresh_each_match:
+            squads_for_tournament[team_name] = squad
+        else:
+            teams[team_name] = _draft_team_from_fixed_pool(team_name, squad)
 
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
-    report = Tournament(teams).run_historical_world_cup(year, seed=seed)
+    report = Tournament(teams=teams, squads=squads_for_tournament).run_historical_world_cup(year, seed=seed)
     report.print_report()
 
 
@@ -440,30 +544,46 @@ def _run_historical_six_nations():
     squads = get_six_nations_year_data(year)
     print(f"\n{year} Six Nations Championship: {', '.join(squads.keys())}")
 
+    fresh_each_match = _ask_squad_mode()
     teams: Dict[str, Team] = {}
+    squads_for_tournament: Dict[str, List[Player]] = {}
     for team_name, squad in squads.items():
-        teams[team_name] = _draft_team_from_fixed_pool(team_name, squad)
+        if fresh_each_match:
+            squads_for_tournament[team_name] = squad
+        else:
+            teams[team_name] = _draft_team_from_fixed_pool(team_name, squad)
 
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
-    report = Tournament(teams).run_historical_six_nations(year, seed=seed)
+    report = Tournament(teams=teams, squads=squads_for_tournament).run_historical_six_nations(year, seed=seed)
     report.print_report()
 
 
 def _run_custom_tournament():
     n_raw = _prompt("How many teams", default="4")
     n = int(n_raw) if n_raw.isdigit() else 4
+    fresh_each_match = _ask_squad_mode()
     teams: Dict[str, Team] = {}
+    squads: Dict[str, List[Player]] = {}
     for i in range(n):
-        team = _draft_team()
-        teams[team.name] = team
+        if fresh_each_match:
+            name = _prompt(f"Team {i + 1} name")
+            squads[name] = _pick_team_pool(name)
+        else:
+            team = _draft_team()
+            teams[team.name] = team
 
     fixture_mode = _ask_fixture_mode()
     if fixture_mode == "random":
         import random
-        names = list(teams.keys())
-        random.shuffle(names)
-        teams = {name: teams[name] for name in names}
+        if fresh_each_match:
+            names = list(squads.keys())
+            random.shuffle(names)
+            squads = {name: squads[name] for name in names}
+        else:
+            names = list(teams.keys())
+            random.shuffle(names)
+            teams = {name: teams[name] for name in names}
 
     fmt_options = ["round_robin", "round_robin_home_away", "pool_knockout"]
     fmt_idx = _choose_index("Pick a format", fmt_options)
@@ -475,7 +595,7 @@ def _run_custom_tournament():
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
 
-    report = CustomTournament(teams, format=fmt).run(pool_count=pool_count, seed=seed)
+    report = CustomTournament(teams=teams, format=fmt, squads=squads).run(pool_count=pool_count, seed=seed)
     report.print_report()
 
 

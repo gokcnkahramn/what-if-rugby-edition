@@ -66,3 +66,61 @@ def test_no_more_than_max_substitutions_per_team():
     finally:
         me.P_INJURY_PER_DRIVE = original
     assert result.stats["Home"].substitutions <= MAX_SUBSTITUTIONS
+
+
+def test_advance_to_and_finish_produce_the_same_shape_as_run():
+    home = _team_with_bench("Home")
+    away = _team_with_bench("Away")
+    engine = MatchEngine(home, away, seed=42)
+    engine.advance_to(20)
+    # drives are 1-4 minutes each, so a checkpoint can overshoot slightly -
+    # "at least 20" is the actual contract, not an exact minute
+    assert 20 <= engine.minute <= 20 + 4
+    assert not engine.is_finished()
+    result = engine.finish()
+    assert result.player_of_the_match is not None or result.player_stats == []
+    assert result.score_home >= 0 and result.score_away >= 0
+
+    # a second call to finish() must not double-finalize (e.g. double-count
+    # territory % or re-run Player of the Match selection differently)
+    result_again = engine.finish()
+    assert result_again is result
+    assert result_again.score_home == result.score_home
+
+
+def test_run_interactive_allows_a_manual_substitution_at_a_checkpoint():
+    home = _team_with_bench("Home")
+    away = _team_with_bench("Away")
+    home.lineup.add_bench(ENGLAND_SAMPLE[0])
+    engine = MatchEngine(home, away, seed=7)
+
+    checkpoints_seen = []
+
+    def on_checkpoint(eng, minute):
+        checkpoints_seen.append(minute)
+        if len(checkpoints_seen) == 2:  # the "40" checkpoint
+            starting_hooker = eng.active_lineup(home)[Position.HOOKER].player
+            made_sub = eng.apply_substitution(home, Position.HOOKER, bench_player=ENGLAND_SAMPLE[0])
+            assert made_sub is True
+            assert eng.active_lineup(home)[Position.HOOKER].player is ENGLAND_SAMPLE[0]
+            assert eng.active_lineup(home)[Position.HOOKER].player is not starting_hooker
+
+    result = engine.run_interactive([20, 40, 60], on_checkpoint)
+    # checkpoints can overshoot slightly (1-4 minute drive granularity) but
+    # must be reached in order and each at or past its target
+    assert len(checkpoints_seen) == 3
+    for target, seen in zip([20, 40, 60], checkpoints_seen):
+        assert target <= seen <= target + 4
+    assert result.stats["Home"].substitutions >= 1
+    sub_events = [e for e in result.events if "Substitution" in e.text]
+    assert sub_events
+
+
+def test_apply_substitution_rejects_a_player_not_on_the_bench():
+    home = _team_with_bench("Home")
+    away = _team_with_bench("Away")
+    home.lineup.add_bench(ENGLAND_SAMPLE[0])
+    engine = MatchEngine(home, away, seed=1)
+    engine.start()
+    not_on_bench = ENGLAND_SAMPLE[1]
+    assert engine.apply_substitution(home, Position.HOOKER, bench_player=not_on_bench) is False

@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..models.team import Team, Lineup, SquadSlot
 from ..models.position import Position, BACKS, CATEGORY_POSITION_GROUPS
@@ -117,6 +117,13 @@ class MatchResult:
     stats: Dict[str, TeamMatchStats] = field(default_factory=dict)
     player_stats: List[PlayerMatchStats] = field(default_factory=list)
     player_of_the_match: Optional[Player] = None
+    # Specific players involved in an injury or a card this match - (team_name,
+    # Player) / (team_name, Player, "yellow"|"red") - not just the team-level
+    # counts in `stats`. Exists so a tournament can carry a layoff/suspension
+    # forward to that player's *next* match (see `tournament/availability.py`);
+    # a single match report has no use for this itself.
+    injured_players: List[Tuple[str, Player]] = field(default_factory=list)
+    carded_players: List[Tuple[str, Player, str]] = field(default_factory=list)
 
     @property
     def winner(self) -> Optional[Team]:
@@ -170,18 +177,43 @@ class MatchEngine:
         self._bench: Dict[str, List] = {}
         self._subs_used: Dict[str, int] = {home.name: 0, away.name: 0}
         self._player_stats: Dict[tuple, PlayerMatchStats] = {}  # keyed by (team_name, id(player))
+        self._minute = 0
+        self._territory_ticks: Dict[str, int] = {}
+        self.result: Optional[MatchResult] = None
+        self._started = False
+        self._finalized = False
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def run(self) -> MatchResult:
+    @property
+    def minute(self) -> int:
+        return self._minute
+
+    def active_lineup(self, team: Team) -> Dict[Position, SquadSlot]:
+        """The per-match working XV (reflects injuries/subs so far) for a
+        team already in this match - for showing "who's on" when deciding
+        a manual substitution."""
+        return dict(self._active.get(team.name, {}))
+
+    def bench_for(self, team: Team) -> List[Player]:
+        return list(self._bench.get(team.name, []))
+
+    def is_finished(self) -> bool:
+        return self._started and self._minute >= MATCH_MINUTES and not self._has_live_advantage(self.result, self._minute)
+
+    def start(self) -> None:
+        """Validates both lineups and sets up the per-match working state
+        (a copy of each starting XV - the original `Lineup` is never
+        mutated, so the same `Team` can be reused for another match).
+        Safe to call more than once; only the first call does anything."""
+        if self._started:
+            return
         for team in (self.home, self.away):
             problems = team.lineup.validate()
             if problems:
                 raise ValueError(f"{team.name} lineup invalid: {problems}")
 
-        # Independent working copies of the starting XV: injuries/subs
-        # mutate these, never the original Lineup (so a Team can be reused).
         for team in (self.home, self.away):
             self._active[team.name] = {
                 pos: SquadSlot(position=slot.position, player=slot.player)
@@ -189,39 +221,80 @@ class MatchEngine:
             }
             self._bench[team.name] = list(team.lineup.bench)
 
-        result = MatchResult(home=self.home, away=self.away)
-        result.stats[self.home.name] = TeamMatchStats()
-        result.stats[self.away.name] = TeamMatchStats()
+        self.result = MatchResult(home=self.home, away=self.away)
+        self.result.stats[self.home.name] = TeamMatchStats()
+        self.result.stats[self.away.name] = TeamMatchStats()
+        self._minute = 0
+        self._territory_ticks = {self.home.name: 0, self.away.name: 0}
+        self._started = True
 
-        minute = 0
-        territory_ticks = {self.home.name: 0, self.away.name: 0}
+    def _advance_one_drive(self) -> None:
+        attacking, defending = self._pick_attacking_team(self._territory_ticks)
+        self._territory_ticks[attacking.name] += 1
 
-        while minute < MATCH_MINUTES:
-            attacking, defending = self._pick_attacking_team(territory_ticks)
-            territory_ticks[attacking.name] += 1
+        drive_minutes = self.rng.randint(1, 4)
+        self._minute = min(MATCH_MINUTES, self._minute + drive_minutes)
 
-            drive_minutes = self.rng.randint(1, 4)
-            minute = min(MATCH_MINUTES, minute + drive_minutes)
+        self._expire_cards(attacking, self._minute)
+        self._expire_cards(defending, self._minute)
 
-            self._expire_cards(attacking, minute)
-            self._expire_cards(defending, minute)
+        self._resolve_drive(attacking, defending, self._minute, self.result)
+        self._maybe_personnel_change(self._minute, self.result)
 
-            self._resolve_drive(attacking, defending, minute, result)
-            self._maybe_personnel_change(minute, result)
+    def advance_to(self, minute: int) -> MatchResult:
+        """Plays drives until at least `minute` has elapsed, or the match
+        is already over - the building block for a pausable match: reach
+        a checkpoint, optionally call `apply_substitution` (or make an
+        injury/tactical change happen naturally), then call this again for
+        the next checkpoint. `run()` is the backward-compatible one-shot
+        version of this same machinery."""
+        if not self._started:
+            self.start()
+        while self._minute < minute and not self.is_finished():
+            self._advance_one_drive()
+        return self.result
 
-            if minute >= MATCH_MINUTES and not self._has_live_advantage(result, minute):
+    def run_interactive(self, checkpoint_minutes: List[int], on_checkpoint) -> MatchResult:
+        """Plays the match up to each minute in `checkpoint_minutes` (in
+        order), calling `on_checkpoint(self, self.minute)` at each one
+        before continuing - the hook a caller uses to pause, show the
+        score/lineup so far, and optionally apply a manual substitution.
+        Finishes the match (any remaining time + finalizing stats) after
+        the last checkpoint."""
+        self.start()
+        for target in sorted(checkpoint_minutes):
+            if self.is_finished():
                 break
+            self.advance_to(target)
+            on_checkpoint(self, self._minute)
+        return self.finish()
 
-        total_ticks = sum(territory_ticks.values()) or 1
-        for team in (self.home, self.away):
-            result.stats[team.name].territory_pct = (
-                100 * territory_ticks[team.name] / total_ticks
-            )
+    def finish(self) -> MatchResult:
+        """Plays out any remaining time and finalizes the `MatchResult`
+        (territory %, player stats, Player of the Match). Safe to call
+        more than once - finalizing only happens the first time."""
+        if not self._started:
+            self.start()
+        while not self.is_finished():
+            self._advance_one_drive()
 
-        result.player_stats = list(self._player_stats.values())
-        result.player_of_the_match = self._compute_player_of_the_match()
+        if not self._finalized:
+            total_ticks = sum(self._territory_ticks.values()) or 1
+            for team in (self.home, self.away):
+                self.result.stats[team.name].territory_pct = (
+                    100 * self._territory_ticks[team.name] / total_ticks
+                )
+            self.result.player_stats = list(self._player_stats.values())
+            self.result.player_of_the_match = self._compute_player_of_the_match()
+            self._finalized = True
+        return self.result
 
-        return result
+    def run(self) -> MatchResult:
+        """One-shot: play the full match and return the finalized report -
+        unchanged behavior from before `start`/`advance_to`/`finish` existed
+        to support pausing mid-match."""
+        self.start()
+        return self.finish()
 
     def _credit(self, team: Team, player, **increments) -> None:
         # Keyed by (team, player identity), not just player identity: the
@@ -254,18 +327,35 @@ class MatchEngine:
         best = max(self._player_stats.values(), key=lambda ps: ps.pom_score)
         return best.player if best.pom_score > 0 else None
 
-    def apply_substitution(self, team: Team, position: Position) -> bool:
-        """Manually bring on the best-fitting available bench player at
-        `position`, outside the automatic injury/tactical-sub rolls (e.g.
-        for a future interactive "make a sub now" control). Returns False
-        if the team has no bench player left or has used all 8 replacements."""
+    def apply_substitution(self, team: Team, position: Position, bench_player: Optional[Player] = None) -> bool:
+        """Manually bring a bench player on at `position` - the interactive
+        "pause the match, make a substitution" control. `bench_player`
+        picks exactly who comes on (must actually be on this team's bench
+        right now); omit it to fall back to the best-fitting bench player
+        for that slot, same as the old auto-only behavior. Returns False if
+        the team has no bench player left, has used all 8 replacements, or
+        `bench_player` isn't actually on the bench."""
         bench = self._bench.get(team.name)
         if not bench or self._subs_used[team.name] >= MAX_SUBSTITUTIONS:
             return False
-        replacement = max(bench, key=lambda p: p.rating_at(position))
+        if bench_player is not None:
+            if bench_player not in bench:
+                return False
+            replacement = bench_player
+        else:
+            replacement = max(bench, key=lambda p: p.rating_at(position))
+        outgoing = self._active[team.name].get(position)
         bench.remove(replacement)
         self._subs_used[team.name] += 1
         self._active[team.name][position] = SquadSlot(position=position, player=replacement)
+        if self.result is not None:
+            self.result.stats[team.name].substitutions += 1
+            self.result.events.append(self._event(
+                self._minute, team,
+                f"Substitution: {replacement.name} replaces "
+                f"{outgoing.player.name if outgoing else '(empty slot)'} ({team.name}, {position.value}).",
+                self.result,
+            ))
         return True
 
     # ------------------------------------------------------------------
@@ -314,6 +404,7 @@ class MatchEngine:
         position, slot = self.rng.choice(slots)
         injured = slot.player
         result.stats[team.name].injuries += 1
+        result.injured_players.append((team.name, injured))
 
         bench = self._bench[team.name]
         if bench and self._subs_used[team.name] < MAX_SUBSTITUTIONS:
@@ -451,8 +542,10 @@ class MatchEngine:
                 result,
             ))
         elif take(p_card):
-            self._issue_card(defending, minute, result)
-            result.events.append(self._event(minute, defending, f"{defending.name} concede a crucial penalty and are shown a card.", result))
+            is_red, carded_player = self._issue_card(defending, minute, result)
+            card_word = "red card" if is_red else "yellow card"
+            who = f"{carded_player.name} ({defending.name})" if carded_player else defending.name
+            result.events.append(self._event(minute, defending, f"{who} is shown a {card_word}.", result))
         elif take(p_pen_conceded_by_atk):
             self._score_penalty_chance(defending, attacking, minute, result)
         elif take(p_error):
@@ -462,14 +555,23 @@ class MatchEngine:
         else:
             result.events.append(self._event(minute, attacking, f"{attacking.name} work through the phases but {defending.name}'s defense holds firm.", result))
 
-    def _issue_card(self, team: Team, minute: int, result: MatchResult):
+    def _issue_card(self, team: Team, minute: int, result: MatchResult) -> Tuple[bool, Optional[Player]]:
         is_red = self.rng.random() < 0.12
         duration = MATCH_MINUTES if is_red else 10
         self._carded[team.name].append(minute + duration)
+
+        slots = list(self._active[team.name].values())
+        carded_player = self.rng.choice(slots).player if slots else None
+
         if is_red:
             result.stats[team.name].red_cards += 1
+            if carded_player is not None:
+                result.carded_players.append((team.name, carded_player, "red"))
         else:
             result.stats[team.name].yellow_cards += 1
+            if carded_player is not None:
+                result.carded_players.append((team.name, carded_player, "yellow"))
+        return is_red, carded_player
 
     def _best_kicker(self, team: Team):
         best_slot = max(

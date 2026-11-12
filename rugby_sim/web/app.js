@@ -5,6 +5,20 @@
 
 let POSITIONS = [];
 let UNIONS = [];
+let LOGOS = {};         // code -> "/logos/CODE.png"
+let NAME_TO_CODE = {};  // real nation name (incl. historical aliases) -> code
+
+function logoCodeFor(codeOrName) {
+  if (LOGOS[codeOrName]) return codeOrName;
+  return NAME_TO_CODE[codeOrName] || null;
+}
+function logoImgHtml(codeOrName, size) {
+  size = size || 20;
+  const code = logoCodeFor(codeOrName);
+  const src = code ? LOGOS[code] : null;
+  if (!src) return `<span class="logo-ph" style="display:inline-block;width:${size}px"></span>`;
+  return `<img src="${src}" alt="" class="logo-img" style="width:${size}px;height:${size}px;object-fit:contain;vertical-align:middle;margin-right:4px">`;
+}
 // Real rugbydata coverage is 2022-2026 (see README) - a dropdown of known-
 // good seasons instead of a free-text field, so you're never guessing
 // which years actually have data.
@@ -107,6 +121,7 @@ class TeamBuilder {
     if (this.mode === "nation") {
       area.innerHTML = `
         <div class="row">
+          <span id="${this.side}-union-logo">${logoImgHtml(null, 28)}</span>
           <select id="${this.side}-union"></select>
           ${seasonSelectHtml(`${this.side}-season`)}
           <button id="${this.side}-load">Load pool</button>
@@ -114,6 +129,10 @@ class TeamBuilder {
         </div>`;
       const sel = document.getElementById(`${this.side}-union`);
       sel.innerHTML = UNIONS.map(u => `<option value="${u.code}">${u.code} - ${u.name}</option>`).join("");
+      const logoSpan = document.getElementById(`${this.side}-union-logo`);
+      const updateLogo = () => { logoSpan.innerHTML = logoImgHtml(sel.value, 28); };
+      sel.onchange = updateLogo;
+      updateLogo();
       document.getElementById(`${this.side}-load`).onclick = async () => {
         const code = sel.value, season = document.getElementById(`${this.side}-season`).value || "2026";
         const status = document.getElementById(`${this.side}-load-status`);
@@ -133,7 +152,7 @@ class TeamBuilder {
           <span class="muted" id="${this.side}-load-status"></span>
         </div>`;
       const list = document.getElementById(`${this.side}-union-list`);
-      list.innerHTML = UNIONS.map(u => `<button data-code="${u.code}">${u.code}</button>`).join("");
+      list.innerHTML = UNIONS.map(u => `<button data-code="${u.code}">${logoImgHtml(u.code, 18)}${u.code}</button>`).join("");
       list.querySelectorAll("button").forEach(btn => {
         btn.onclick = async () => {
           const season = document.getElementById(`${this.side}-season`).value || "2026";
@@ -165,15 +184,21 @@ class TeamBuilder {
           </select>
           <select id="${this.side}-hist-year"></select>
           <select id="${this.side}-hist-team"><option>(load a year first)</option></select>
+          <span id="${this.side}-hist-logo">${logoImgHtml(null, 24)}</span>
           <button id="${this.side}-hist-add">Add this squad</button>
           <span class="muted" id="${this.side}-hist-status"></span>
-        </div>`;
+        </div>
+        <p class="muted">Historical-year squads show that union's current crest - same logo
+        across eras, see README (sourcing an exact historical-year logo per team isn't practical
+        at this scale).</p>`;
       const compSel = document.getElementById(`${this.side}-hist-comp`);
       const yearSel = document.getElementById(`${this.side}-hist-year`);
       const teamSel = document.getElementById(`${this.side}-hist-team`);
+      const histLogoSpan = document.getElementById(`${this.side}-hist-logo`);
       const status = document.getElementById(`${this.side}-hist-status`);
       let yearData = null; // {year, squads: {name: [players]}}
 
+      const updateHistLogo = () => { histLogoSpan.innerHTML = logoImgHtml(teamSel.value, 24); };
       const loadYears = async () => {
         const path = compSel.value === "rwc" ? "/api/historical_rwc/years" : "/api/historical_six_nations/years";
         const res = await api(path);
@@ -189,9 +214,11 @@ class TeamBuilder {
         const teamNames = Object.keys(res.squads).sort();
         teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
         status.textContent = `${teamNames.length} teams loaded for ${year}.`;
+        updateHistLogo();
       };
       compSel.onchange = loadYears;
       yearSel.onchange = loadYearData;
+      teamSel.onchange = updateHistLogo;
       document.getElementById(`${this.side}-hist-add`).onclick = () => {
         if (!yearData) return;
         const squad = yearData.squads[teamSel.value] || [];
@@ -226,7 +253,11 @@ class TeamBuilder {
     this.selectedPosition = pos;
     this.renderPitch();
     const used = this.usedIds();
-    const available = this.pool.filter(p => !used.has(p.id) || this.slots[pos] === p.id);
+    // Exclude bench picks too - without this, a player already sent to the
+    // bench could still be clicked into a starting slot, putting the same
+    // person in the squad twice (bench *and* starting XV).
+    const available = this.pool.filter(p =>
+      (!used.has(p.id) && !this.bench.has(p.id)) || this.slots[pos] === p.id);
     const ranked = await api("/api/rank", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({player_ids: available.map(p => p.id), position: pos}),
@@ -357,6 +388,13 @@ let homeBuilder, awayBuilder;
 async function boot() {
   POSITIONS = await api("/api/positions");
   UNIONS = await api("/api/unions");
+  try {
+    const logoData = await api("/api/logos");
+    LOGOS = logoData.logos;
+    NAME_TO_CODE = logoData.name_to_code;
+  } catch (e) {
+    LOGOS = {}; NAME_TO_CODE = {}; // logos are a visual nicety, never block the app
+  }
   homeBuilder = new TeamBuilder("home");
   awayBuilder = new TeamBuilder("away");
   updateRunButton();
@@ -365,21 +403,152 @@ async function boot() {
   document.getElementById("run-match").onclick = async () => {
     const seedRaw = document.getElementById("seed").value;
     const status = document.getElementById("run-status");
+    const seed = seedRaw ? parseInt(seedRaw, 10) : null;
+    const isLive = document.getElementById("live-match-toggle").checked;
     status.textContent = "simulating...";
     try {
-      const data = await api("/api/match", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-          home_team_id: homeBuilder.teamId, away_team_id: awayBuilder.teamId,
-          seed: seedRaw ? parseInt(seedRaw, 10) : null,
-        }),
-      });
-      renderReport(data);
-      status.textContent = "";
+      if (isLive) {
+        document.getElementById("report").innerHTML = "";
+        await startLiveMatch(homeBuilder.teamId, awayBuilder.teamId, seed);
+        status.textContent = "";
+      } else {
+        document.getElementById("live-match-area").innerHTML = "";
+        const data = await api("/api/match", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({home_team_id: homeBuilder.teamId, away_team_id: awayBuilder.teamId, seed}),
+        });
+        renderReport(data);
+        status.textContent = "";
+      }
     } catch (e) {
       status.textContent = "Error: " + e.message;
     }
   };
+}
+
+// ===================== Live (pausable) single match =====================
+
+async function startLiveMatch(homeTeamId, awayTeamId, seed) {
+  const state = await api("/api/match/live/start", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({home_team_id: homeTeamId, away_team_id: awayTeamId, seed}),
+  });
+  renderLiveMatchState(state);
+}
+
+function liveLineupTable(side, lineup, bench) {
+  const rows = lineup.map(p => `
+    <tr><td>${p.position}</td><td>${p.name}</td>
+    <td><button class="live-sub-btn" data-side="${side}" data-pos="${p.position}">Substitute...</button></td></tr>
+  `).join("");
+  return `<table class="stats"><tr><th>Position</th><th>Player</th><th></th></tr>${rows}</table>
+    <p class="muted">Bench: ${bench.map(p => p.name).join(", ") || "(none left)"}</p>`;
+}
+
+function renderLiveMatchState(state, onFinished, boxId) {
+  const box = document.getElementById(boxId || "live-match-area");
+  const eventsHtml = state.events.map(e => `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`).join("");
+  box.innerHTML = `
+    <h3>Live match - paused at ${state.minute}'</h3>
+    <div id="scoreline">${state.scoreline}</div>
+    <div id="events">${eventsHtml}</div>
+    <div class="row">
+      <div style="flex:1"><h4>${state.home.name}</h4>${liveLineupTable("home", state.home.lineup, state.home.bench)}</div>
+      <div style="flex:1"><h4>${state.away.name}</h4>${liveLineupTable("away", state.away.lineup, state.away.bench)}</div>
+    </div>
+    <div class="row">
+      <button id="live-continue">${state.finished ? "Match finished" : "Resume play"}</button>
+      <span class="muted" id="live-status"></span>
+    </div>
+    <div id="live-sub-picker"></div>`;
+
+  box.querySelectorAll(".live-sub-btn").forEach(btn => {
+    btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished);
+  });
+
+  const continueBtn = document.getElementById("live-continue");
+  if (state.finished) {
+    continueBtn.disabled = true;
+    if (state.result) {
+      renderReport(state.result);
+    }
+    if (onFinished) onFinished(state);
+    return;
+  }
+  continueBtn.onclick = async () => {
+    const status = document.getElementById("live-status");
+    status.textContent = "resuming...";
+    try {
+      const next = await api(`/api/match/live/${state.session_id}/continue`, {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+      });
+      renderLiveMatchState(next, onFinished, boxId);
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+    }
+  };
+}
+
+function renderLiveSubPicker(state, side, position, boxId, onFinished) {
+  const picker = document.getElementById("live-sub-picker");
+  const bench = state[side].bench;
+  if (!bench.length) {
+    picker.innerHTML = `<p class="muted">No bench players left for ${state[side].name}.</p>`;
+    return;
+  }
+  picker.innerHTML = `
+    <div class="row">
+      <span class="muted">Bring on for ${state[side].name} at ${position}:</span>
+      ${bench.map(p => `<button class="live-sub-pick" data-id="${p.id}">${p.name}</button>`).join("")}
+    </div>`;
+  picker.querySelectorAll(".live-sub-pick").forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        const next = await api(`/api/match/live/${state.session_id}/substitute`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({team: side, position, bench_player_id: parseInt(btn.dataset.id, 10)}),
+        });
+        renderLiveMatchState(next, onFinished, boxId);
+      } catch (e) {
+        alert("Could not make that substitution: " + e.message);
+      }
+    };
+  });
+}
+
+// A self-contained HTML file (inlined CSS, no external requests) of
+// whatever's currently in a report box - the live web UI already renders
+// this, this just freezes one view into a file you can keep/share/open
+// offline without the server running.
+const SNAPSHOT_CSS = `
+:root{--bg:#0f1613;--panel:#182622;--accent:#4caf7d;--text:#e8f1ec;--muted:#9fb8ad;--border:#2a3d36}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:24px}
+h1{font-size:1.3rem}h3,h4{margin-top:24px}
+#scoreline{font-size:1.4rem;margin:10px 0}
+#events{max-height:600px;overflow-y:auto;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:0.85rem}
+#events div{padding:2px 0}
+table.stats{border-collapse:collapse;margin-top:12px;width:100%}
+table.stats th,table.stats td{border:1px solid var(--border);padding:6px 8px;font-size:0.82rem;text-align:left}
+.muted{color:var(--muted);font-size:0.8rem}
+.match-link{background:none;border:none;color:var(--text);text-decoration:underline;cursor:default;padding:2px 0;font:inherit}
+`;
+
+function downloadHtmlSnapshot(title, bodyHtml, filenameBase) {
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>` +
+    `<style>${SNAPSHOT_CSS}</style></head><body><h1>${title}</h1>${bodyHtml}` +
+    `<p class="muted">Static snapshot from What If Rugby Edition - generated ${new Date().toISOString()}.</p>` +
+    `</body></html>`;
+  const blob = new Blob([doc], {type: "text/html"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${filenameBase.replace(/[^A-Za-z0-9]+/g, "_") || "report"}.html`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function snapshotButtonHtml(id) {
+  return `<div class="row"><button id="${id}">Download as standalone HTML file</button></div>`;
 }
 
 function renderReport(data, targetId) {
@@ -395,7 +564,7 @@ function renderReport(data, targetId) {
   const scorerRows = (data.top_scorers || []).slice(0, 6).map(s =>
     `<tr><td>${s.name}</td><td>${s.team}</td><td>${s.points}</td><td>${s.tries}</td><td>${s.conversions}</td><td>${s.penalty_goals}</td></tr>`
   ).join("");
-  box.innerHTML = `
+  const reportHtml = `
     <div id="scoreline">${data.scoreline}</div>
     ${pomLine}
     <div id="events">${data.events.map(e => `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`).join("")}</div>
@@ -408,12 +577,19 @@ function renderReport(data, targetId) {
       <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
       ${scorerRows}
     </table>` : ""}`;
+  const snapshotBtnId = `${targetId || "report"}-snapshot-btn`;
+  box.innerHTML = reportHtml + snapshotButtonHtml(snapshotBtnId);
+  document.getElementById(snapshotBtnId).onclick = () => {
+    downloadHtmlSnapshot(data.scoreline, reportHtml, data.scoreline);
+  };
 }
 
 // ===================== Tournament mode =====================
 
 let tournamentOptions = null;
-const tournamentBuilders = {}; // team name -> TeamBuilder
+let squadModeEnabled = false; // "fresh squad every match" toggle, see setupTournamentUI
+// name -> TeamBuilder (fixed-lineup mode) | {teamId, name} | {squadPlayerIds, name} (squad mode)
+const tournamentBuilders = {};
 
 async function setupTournamentUI() {
   tournamentOptions = await api("/api/tournament/options");
@@ -427,10 +603,17 @@ async function setupTournamentUI() {
       <button data-ttype="historical_sn">Historical Six Nations (2009-2021)</button>
       <button data-ttype="custom">Custom tournament</button>
     </div>
+    <div class="row">
+      <label class="muted"><input type="checkbox" id="squad-mode-toggle"> Fresh squad every match
+        (auto-draft a new best XV before each match from each team's full pool - an injury/red
+        card sidelines that player for the team's next match, instead of one fixed lineup for the
+        whole tournament)</label>
+    </div>
     <div id="tournament-config"></div>
     <div id="tournament-teams"></div>
     <div id="tournament-run-area"></div>
     <div id="tournament-report"></div>`;
+  document.getElementById("squad-mode-toggle").onchange = (e) => { squadModeEnabled = e.target.checked; };
   container.querySelectorAll("[data-ttype]").forEach(btn => {
     btn.onclick = () => renderTournamentConfig(btn.dataset.ttype);
   });
@@ -604,6 +787,57 @@ function renderTournamentConfig(ttype) {
  * (used by the custom-tournament flow, where that choice was already made
  * by picking "how many will you draft yourself").
  */
+/**
+ * Squad-mode team panel: pick a union+season (or Legends), fetch that
+ * pool's player ids, and register it as this team's squad - no lineup
+ * drafting here, `Tournament(squads=...)` auto-drafts a fresh best XV
+ * from this exact pool before every match it plays.
+ */
+function renderSquadPicker(row, entry) {
+  const name = entry.name;
+  // Placeholder so "still need" correctly lists this team until a pool is
+  // actually loaded - without this, a team that never got a pool loaded
+  // simply has no key in tournamentBuilders at all, and the hint (which
+  // only checks teams it already knows about) wrongly says "All teams
+  // ready" even though nothing was registered for it.
+  tournamentBuilders[name] = {squadPlayerIds: null, name};
+  row.innerHTML = `
+    <div class="row">
+      <span class="sp-logo">${logoImgHtml(entry.code || name, 24)}</span>
+      <strong>${name}</strong>
+      <label class="muted"><input type="checkbox" class="sp-legends"> Legends (Hall of Fame) instead</label>
+    </div>
+    <div class="row sp-union-row">
+      <select class="sp-union">${UNIONS.map(u => `<option value="${u.code}" ${u.code === entry.code ? "selected" : ""}>${u.code} - ${u.name}</option>`).join("")}</select>
+      ${seasonSelectHtml("", entry.season || "2026").replace('<select id="">', '<select class="sp-season">')}
+    </div>
+    <div class="row">
+      <button class="sp-go">Load pool</button>
+      <span class="muted sp-status"></span>
+    </div>`;
+  const legendsCb = row.querySelector(".sp-legends");
+  const unionRow = row.querySelector(".sp-union-row");
+  const spLogo = row.querySelector(".sp-logo");
+  const spUnion = row.querySelector(".sp-union");
+  const status = row.querySelector(".sp-status");
+  spUnion.onchange = () => { spLogo.innerHTML = logoImgHtml(spUnion.value, 24); };
+  legendsCb.onchange = () => { unionRow.style.display = legendsCb.checked ? "none" : ""; };
+  updateTournamentRunHint();
+  row.querySelector(".sp-go").onclick = async () => {
+    status.textContent = "loading...";
+    try {
+      const players = legendsCb.checked
+        ? await api("/api/legends")
+        : await api(`/api/pool/${spUnion.value}?season=${encodeURIComponent(row.querySelector(".sp-season").value)}`);
+      tournamentBuilders[name] = {squadPlayerIds: players.map(p => p.id), name};
+      status.textContent = `${players.length} players in the pool - ready.`;
+      updateTournamentRunHint();
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+    }
+  };
+}
+
 function buildTournamentTeamPanels(entries) {
   const area = document.getElementById("tournament-teams");
   area.innerHTML = `<div id="tournament-panels"></div>`;
@@ -618,6 +852,20 @@ function buildTournamentTeamPanels(entries) {
     row.id = `panel-${rowId}`;
     panelsDiv.appendChild(row);
 
+    if (squadModeEnabled) {
+      if (entry.fixedPool) {
+        // Already a known pool (a historical squad, or the 2027 draw's
+        // suggested union) - nothing to pick, just use it as the squad.
+        tournamentBuilders[name] = {squadPlayerIds: entry.fixedPool.map(p => p.id), name};
+        row.innerHTML = `${logoImgHtml(name, 24)}<strong>${name}</strong> ` +
+          `<span class="muted">squad ready (${entry.fixedPool.length} players - fresh XV drafted each match)</span>`;
+        updateTournamentRunHint();
+      } else {
+        renderSquadPicker(row, entry);
+      }
+      continue;
+    }
+
     const runAutoDraft = async () => {
       row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafting...</span>`;
       try {
@@ -631,7 +879,7 @@ function buildTournamentTeamPanels(entries) {
               body: JSON.stringify({name, code: entry.code, season: entry.season}),
             });
         tournamentBuilders[name] = {teamId: res.team_id, name};
-        row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafted${res.code ? " (" + res.code + ")" : ""}${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>`;
+        row.innerHTML = `${logoImgHtml(res.code || name, 24)}<strong>${name}</strong> <span class="muted">auto-drafted${res.code ? " (" + res.code + ")" : ""}${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>`;
         updateTournamentRunHint();
       } catch (e) {
         row.innerHTML = `<strong>${name}</strong> <span class="muted">Error: ${e.message}</span>`;
@@ -663,7 +911,7 @@ function buildTournamentTeamPanels(entries) {
           });
         }
         tournamentBuilders[name] = {teamId: res.team_id, name};
-        row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafted${res.code ? " (" + res.code + ")" : useLegends ? " (Legends)" : ""}${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>
+        row.innerHTML = `${logoImgHtml(res.code || name, 24)}<strong>${name}</strong> <span class="muted">auto-drafted${res.code ? " (" + res.code + ")" : useLegends ? " (Legends)" : ""}${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>
           <button class="redo-pick">Change team/year...</button>`;
         row.querySelector(".redo-pick").onclick = renderAutoPicker;
         updateTournamentRunHint();
@@ -683,6 +931,7 @@ function buildTournamentTeamPanels(entries) {
           <label class="muted"><input type="checkbox" class="ap-legends"> Legends (Hall of Fame) instead</label>
         </div>
         <div class="row ap-union-row">
+          <span class="ap-logo">${logoImgHtml(entry.code, 24)}</span>
           <select class="ap-union">${UNIONS.map(u => `<option value="${u.code}" ${u.code === entry.code ? "selected" : ""}>${u.code} - ${u.name}</option>`).join("")}</select>
           ${seasonSelectHtml("", "2026").replace('<select id="">', '<select class="ap-season">')}
         </div>
@@ -691,6 +940,9 @@ function buildTournamentTeamPanels(entries) {
         </div>`;
       const legendsCb = row.querySelector(".ap-legends");
       const unionRow = row.querySelector(".ap-union-row");
+      const apLogo = row.querySelector(".ap-logo");
+      const apUnionSel = row.querySelector(".ap-union");
+      apUnionSel.onchange = () => { apLogo.innerHTML = logoImgHtml(apUnionSel.value, 24); };
       legendsCb.onchange = () => { unionRow.style.display = legendsCb.checked ? "none" : ""; };
       row.querySelector(".ap-go").onclick = () => {
         const useLegends = legendsCb.checked;
@@ -723,36 +975,80 @@ function buildTournamentTeamPanels(entries) {
 function updateTournamentRunHint() {
   const hint = document.getElementById("t-run-hint");
   if (!hint) return;
-  const missing = Object.entries(tournamentBuilders).filter(([, b]) => !b.teamId).map(([name]) => name);
+  const missing = Object.entries(tournamentBuilders)
+    .filter(([, b]) => !b.teamId && !b.squadPlayerIds)
+    .map(([name]) => name);
   hint.textContent = missing.length ? `Still need: ${missing.join(", ")}` : "All teams ready.";
+  updateMyTeamSelect();
+}
+
+// The "Which team is mine?" dropdown is (re)built from tournamentBuilders'
+// *current* keys every time a team panel changes - buildTournamentTeamPanels
+// clears tournamentBuilders and refills it asynchronously as each team gets
+// auto-drafted/drafted/loaded, so populating this dropdown only once, right
+// after the panels are first rendered, would always see it empty.
+function updateMyTeamSelect() {
+  const sel = document.getElementById("t-my-team");
+  if (!sel) return;
+  const previous = sel.value;
+  const teamNames = Object.keys(tournamentBuilders);
+  sel.innerHTML = `<option value="">(none - just simulate)</option>` +
+    teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
+  if (teamNames.includes(previous)) sel.value = previous;
+}
+
+function tournamentRunBody(params) {
+  const team_ids = {};
+  const squad_player_ids = {};
+  for (const [name, builder] of Object.entries(tournamentBuilders)) {
+    if (builder.squadPlayerIds) { squad_player_ids[name] = builder.squadPlayerIds; }
+    else if (builder.teamId) { team_ids[name] = builder.teamId; }
+    else { throw new Error(`Finish setting up team "${name}" first.`); }
+  }
+  const seedRaw = document.getElementById("t-seed").value;
+  const body = {type: params.type, team_ids, squad_player_ids, seed: seedRaw ? parseInt(seedRaw, 10) : null};
+  if (params.type === "real") { body.key = params.key; body.season = params.season; }
+  if (params.type === "world_cup_2027") { body.fixture_mode = document.getElementById("t-wc-mode").value; }
+  if (params.type === "historical_world_cup") { body.year = params.year; }
+  if (params.type === "historical_six_nations") { body.year = params.year; }
+  if (params.type === "custom") {
+    body.format = document.getElementById("t-custom-format").value;
+    body.pool_count = parseInt(document.getElementById("t-custom-pools").value || "2", 10);
+  }
+  return body;
 }
 
 function renderTournamentRunArea(params) {
   const area = document.getElementById("tournament-run-area");
+  const teamNames = Object.keys(tournamentBuilders);
   area.innerHTML = `
     <div class="row">
       <label class="muted">Seed (optional): <input type="number" id="t-seed" style="width:90px"></label>
       <button id="t-run">Run tournament</button>
+      <label class="muted">Which team is mine?
+        <select id="t-my-team">
+          <option value="">(none - just simulate)</option>
+          ${teamNames.map(n => `<option value="${n}">${n}</option>`).join("")}
+        </select>
+      </label>
+      <button id="t-run-interactive">Play my matches</button>
       <span class="muted" id="t-run-hint"></span>
       <span class="muted" id="t-run-status"></span>
-    </div>`;
+    </div>
+    <div id="tournament-stage-banner"></div>
+    <div id="tournament-live-area"></div>
+    <div id="tournament-progress"></div>`;
   updateTournamentRunHint();
+
   document.getElementById("t-run").onclick = async () => {
     const status = document.getElementById("t-run-status");
-    const team_ids = {};
-    for (const [name, builder] of Object.entries(tournamentBuilders)) {
-      if (!builder.teamId) { status.textContent = `Save team "${name}" first.`; return; }
-      team_ids[name] = builder.teamId;
-    }
-    const seedRaw = document.getElementById("t-seed").value;
-    const body = {type: params.type, team_ids, seed: seedRaw ? parseInt(seedRaw, 10) : null};
-    if (params.type === "real") { body.key = params.key; body.season = params.season; }
-    if (params.type === "world_cup_2027") { body.fixture_mode = document.getElementById("t-wc-mode").value; }
-    if (params.type === "historical_world_cup") { body.year = params.year; }
-    if (params.type === "historical_six_nations") { body.year = params.year; }
-    if (params.type === "custom") {
-      body.format = document.getElementById("t-custom-format").value;
-      body.pool_count = parseInt(document.getElementById("t-custom-pools").value || "2", 10);
+    document.getElementById("tournament-live-area").innerHTML = "";
+    let body;
+    try {
+      body = tournamentRunBody(params);
+    } catch (e) {
+      status.textContent = e.message;
+      return;
     }
     status.textContent = "running...";
     try {
@@ -765,6 +1061,120 @@ function renderTournamentRunArea(params) {
       status.textContent = "Error: " + e.message;
     }
   };
+
+  document.getElementById("t-run-interactive").onclick = async () => {
+    const status = document.getElementById("t-run-status");
+    document.getElementById("tournament-report").innerHTML = "";
+    let body;
+    try {
+      body = tournamentRunBody(params);
+    } catch (e) {
+      status.textContent = e.message;
+      return;
+    }
+    body.my_team = document.getElementById("t-my-team").value || null;
+    status.textContent = "starting tournament...";
+    try {
+      const state = await api("/api/tournament/start", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+      });
+      handleTournamentSessionState(state, status);
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+    }
+  };
+}
+
+// Drives an interactive tournament session forward: shows the live-match
+// UI (same `renderLiveMatchState` the single-friendly live match uses)
+// whenever the session is paused on the user's own fixture, resumes the
+// tournament once that match is finished, and keeps doing so - fully
+// auto-simming everyone else's matches in between, invisibly, on the
+// server - until the session reports "finished" (or "error").
+function renderTournamentProgress(resultsSoFar, progress) {
+  const box = document.getElementById("tournament-progress");
+  if (!box) return;
+  if ((!resultsSoFar || !resultsSoFar.length) && !progress) { box.innerHTML = ""; return; }
+
+  let html = "";
+  if (progress && progress.stage) {
+    html += `<h4>Current stage: ${progress.stage}</h4>`;
+  }
+  if (progress && progress.standings) {
+    html += `<p class="muted">Current standings:</p>${standingsTable(progress.standings)}`;
+  }
+  if (progress && progress.pools) {
+    html += Object.entries(progress.pools).map(([name, rows]) =>
+      `<p class="muted">${name}:</p>${standingsTable(rows)}`).join("");
+  }
+  if (progress && progress.bracket && progress.bracket.length) {
+    html += progress.bracket.map(rnd => `
+      <p class="muted">${rnd.stage}:</p>
+      ${rnd.matches.map(m => `<div>${m.home} ${matchLink(m)} ${m.away}</div>`).join("")}
+    `).join("");
+  }
+  if (resultsSoFar && resultsSoFar.length) {
+    const rows = resultsSoFar.map(m => `<tr><td>${m.home}</td><td>${matchLink(m)}</td><td>${m.away}</td></tr>`).join("");
+    html += `<h4>Results so far (${resultsSoFar.length})</h4>
+      <table class="stats"><tr><th>Home</th><th>Score</th><th>Away</th></tr>${rows}</table>`;
+  }
+  html += `<div id="tournament-match-detail-live"></div>`;
+  box.innerHTML = html;
+  box.querySelectorAll(".match-link").forEach(btn => {
+    btn.onclick = () => showMatchDetail(btn.dataset.matchId, "tournament-match-detail-live");
+  });
+}
+
+// Drives an interactive tournament session forward: shows the live-match
+// UI (same `renderLiveMatchState` the single-friendly live match uses)
+// whenever the session is paused on the user's own fixture, resumes the
+// tournament once the user explicitly asks to (so the just-finished
+// match's full-time scoreline/events/stats stay on screen until they're
+// done reviewing it, instead of being replaced the instant it ends) - and
+// keeps doing so, fully auto-simming everyone else's matches in between,
+// until the session reports "finished" (or "error"). `results_so_far`
+// (every fixture resolved up to this point, mine and auto-simmed alike) is
+// re-rendered into a persistent, always-visible feed on every state update.
+function handleTournamentSessionState(state, status) {
+  const liveArea = document.getElementById("tournament-live-area");
+  const banner = document.getElementById("tournament-stage-banner");
+  renderTournamentProgress(state.results_so_far, state.progress);
+  if (state.status === "error") {
+    if (banner) banner.innerHTML = "";
+    status.textContent = "Error: " + state.error;
+    return;
+  }
+  if (state.status === "finished") {
+    if (banner) banner.innerHTML = "";
+    status.textContent = "";
+    liveArea.innerHTML = "";
+    renderTournamentReport(state.report);
+    return;
+  }
+  // paused: it's my_team's turn - play it out with the normal live-match UI.
+  const stageLabel = state.progress && state.progress.stage ? state.progress.stage : "this fixture";
+  if (banner) {
+    banner.innerHTML = `<h3>Now playing: ${stageLabel} - ${state.home} v ${state.away}</h3>`;
+  }
+  status.textContent = `Your match (${stageLabel}): ${state.home} v ${state.away} - play it out below.`;
+  renderLiveMatchState(state.live_match, (finishedState) => {
+    // Match just finished - renderLiveMatchState already left its full-time
+    // scoreline/events/stats in #tournament-live-area. Don't auto-advance;
+    // wait for the user to say they're done looking at it.
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<button id="t-continue-after-my-match">Continue tournament</button>`;
+    liveArea.appendChild(row);
+    document.getElementById("t-continue-after-my-match").onclick = async () => {
+      status.textContent = "continuing tournament...";
+      try {
+        const next = await api(`/api/tournament/${state.session_id}/resume`, {method: "POST"});
+        handleTournamentSessionState(next, status);
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+      }
+    };
+  }, "tournament-live-area");
 }
 
 function standingsTable(rows) {
@@ -772,6 +1182,44 @@ function standingsTable(rows) {
     <tr><td>${r.team}</td><td>${r.played}</td><td>${r.won}</td><td>${r.drawn}</td><td>${r.lost}</td>
     <td>${r.points_for}</td><td>${r.points_against}</td><td>${r.points_diff}</td><td>${r.table_points}</td></tr>`).join("");
   return `<table class="stats"><tr><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>PF</th><th>PA</th><th>+/-</th><th>Pts</th></tr>${body}</table>`;
+}
+
+function teamTournamentStatsTable(rows) {
+  const body = rows.map(s => `
+    <tr><td>${logoImgHtml(s.team, 18)}${s.team}</td><td>${s.played}</td><td>${s.tries}</td>
+    <td>${s.penalty_goals}</td><td>${s.drop_goals}</td><td>${s.turnovers_won}</td>
+    <td>${s.handling_errors}</td><td>${s.penalties_conceded}</td>
+    <td>${s.yellow_cards}/${s.red_cards}</td><td>${s.avg_territory_pct}%</td>
+    <td>${s.injuries}</td><td>${s.substitutions}</td></tr>`).join("");
+  return `<table class="stats">
+    <tr><th>Team</th><th>Played</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th>
+    <th>Errors</th><th>Pens conceded</th><th>Cards Y/R</th><th>Avg territory</th><th>Injuries</th><th>Subs</th></tr>
+    ${body}</table>`;
+}
+
+function playerTournamentStatsTable(rows, showPosition) {
+  const body = rows.map(s => `
+    <tr>${showPosition ? `<td>${s.position || ""}</td>` : ""}
+    <td>${logoImgHtml(s.team, 18)}${s.name}</td><td>${s.team}</td>
+    <td>${s.points}</td><td>${s.tries}</td><td>${s.conversions}</td><td>${s.penalty_goals}</td>
+    <td>${s.matches_started}</td><td>${s.average_performance}</td></tr>`).join("");
+  return `<table class="stats">
+    <tr>${showPosition ? "<th>Slot</th>" : ""}<th>Player</th><th>Team</th><th>Pts</th><th>Tries</th>
+    <th>Conv</th><th>Pens</th><th>Starts</th><th>Avg performance</th></tr>
+    ${body}</table>`;
+}
+
+async function showMatchDetail(matchId, targetId) {
+  const box = document.getElementById(targetId);
+  if (!box) return;
+  box.innerHTML = `<span class="muted">loading...</span>`;
+  try {
+    const data = await api(`/api/match/${matchId}`);
+    renderReport(data, targetId);
+    box.scrollIntoView({behavior: "smooth", block: "start"});
+  } catch (e) {
+    box.innerHTML = `<span class="muted">Could not load match detail: ${e.message}</span>`;
+  }
 }
 
 function matchLink(m) {
@@ -798,11 +1246,34 @@ function renderTournamentReport(report) {
     }
   }
   if (report.champion) {
-    html += `<p><strong>Champion: ${report.champion}</strong></p>`;
+    html += `<p><strong>Champion: ${logoImgHtml(report.champion, 22)}${report.champion}</strong></p>`;
+  }
+  if (report.team_stats && report.team_stats.length) {
+    html += `<h4>Team tournament stats</h4>${teamTournamentStatsTable(report.team_stats)}`;
+  }
+  if (report.top_scorers && report.top_scorers.length) {
+    html += `<h4>Tournament top scorers</h4>${playerTournamentStatsTable(report.top_scorers, false)}`;
+  }
+  if (report.team_of_tournament && report.team_of_tournament.length) {
+    html += `<h4>Team of the Tournament</h4>` +
+      `<p class="muted">Best average performance per starting slot across every match played -
+      quality at the position they started in, plus a bonus for whatever they personally scored
+      that match (see README: this is a heuristic, the engine doesn't track per-player
+      tackles/metres).</p>${playerTournamentStatsTable(report.team_of_tournament, true)}`;
+  }
+  if (report.player_of_tournament) {
+    const p = report.player_of_tournament;
+    html += `<p><strong>Player of the Tournament:</strong> ${logoImgHtml(p.team, 20)}${p.name} ` +
+      `(${p.team}, ${p.position || ""}) - avg performance ${p.average_performance} over ${p.matches_started} starts` +
+      (p.played_late_stage ? " (played in the semi-final/final)" : "") + `</p>`;
   }
   html += `<h4>All results (click any match for the full simulation)</h4>`
     + report.results.map(r => `<div>${matchLink(r)}</div>`).join("");
-  box.innerHTML = html;
+  const snapshotHtml = html; // captured before the match-detail div fills in and before the button itself
+  box.innerHTML = html + snapshotButtonHtml("tournament-snapshot-btn");
+  document.getElementById("tournament-snapshot-btn").onclick = () => {
+    downloadHtmlSnapshot(report.name, snapshotHtml, report.name);
+  };
 
   box.querySelectorAll(".match-link").forEach(btn => {
     const originalText = btn.textContent;

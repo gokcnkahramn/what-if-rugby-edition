@@ -17,11 +17,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from ..data.sources.auto_draft import auto_draft_team
 from ..engine.match_engine import MatchEngine, MatchResult
+from ..models.player import Player
+from ..models.position import Position
 from ..models.team import Team
+from .availability import TournamentAvailability
 from .fixtures import Fixture, knockout_bracket, next_knockout_round, pool_stage, round_robin
 from .real_fixtures import RealFixture, load_real_fixtures
 from .standings import Standings
+from .tournament_stats import PlayerTournamentStats, TeamTournamentStats, attach_tournament_awards
 
 
 @dataclass
@@ -39,6 +44,12 @@ class TournamentReport:
     pools: Optional[Dict[str, Standings]] = None
     bracket: List[BracketRound] = field(default_factory=list)
     champion: Optional[str] = None
+    # Tournament-wide awards (see `tournament_stats.py`), filled in by
+    # `attach_tournament_awards` at the end of every `run_*` method.
+    team_stats: Dict[str, TeamTournamentStats] = field(default_factory=dict)
+    player_stats_aggregate: Dict[tuple, PlayerTournamentStats] = field(default_factory=dict)
+    team_of_tournament: Dict[Position, PlayerTournamentStats] = field(default_factory=dict)
+    player_of_tournament: Optional[PlayerTournamentStats] = None
 
     def print_report(self) -> None:
         print(f"\n=== {self.name} ===")
@@ -57,11 +68,97 @@ class TournamentReport:
                 print(f"  {r.scoreline()}")
         if self.champion:
             print(f"\nChampion: {self.champion}")
+        if self.team_stats:
+            print("\n-- Team tournament stats --")
+            for s in self.team_stats.values():
+                print(
+                    f"  {s.team}: {s.played} played, {s.tries} tries, {s.penalty_goals} pens, "
+                    f"{s.drop_goals} drop goals, {s.turnovers_won} turnovers won, "
+                    f"{s.handling_errors} errors, {s.penalties_conceded} pens conceded, "
+                    f"{s.yellow_cards} YC / {s.red_cards} RC, avg territory {s.avg_territory_pct}%, "
+                    f"{s.injuries} injuries, {s.substitutions} subs"
+                )
+        if self.player_stats_aggregate:
+            top_scorers = sorted(
+                (s for s in self.player_stats_aggregate.values() if s.points > 0),
+                key=lambda s: s.points, reverse=True,
+            )[:10]
+            if top_scorers:
+                print("\n-- Tournament top scorers --")
+                for s in top_scorers:
+                    print(
+                        f"  {s.player.name} ({s.team}): {s.points} pts "
+                        f"({s.tries} tries, {s.conversions} conv, {s.penalty_goals} pens) "
+                        f"over {s.matches_started} starts"
+                    )
+        if self.team_of_tournament:
+            print("\n-- Team of the Tournament --")
+            for position, s in self.team_of_tournament.items():
+                print(f"  {position.value}: {s.player.name} ({s.team}) - avg {s.average_performance}")
+        if self.player_of_tournament:
+            s = self.player_of_tournament
+            print(
+                f"\nPlayer of the Tournament: {s.player.name} ({s.team}) - "
+                f"avg performance {s.average_performance} over {s.matches_started} starts"
+            )
 
 
 class Tournament:
-    def __init__(self, teams: Dict[str, Team]):
-        self.teams = teams
+    """`teams` maps a fixture-side name to a fixed `Team` (one drafted
+    lineup, reused for every match it plays - the original, simpler mode).
+
+    `squads`, if given, maps a fixture-side name to its full player *pool*
+    instead - that team gets a **fresh auto-drafted lineup before every
+    single match**, built from whichever of its pool players aren't
+    currently sidelined by an in-match injury or red card from an earlier
+    match in this same tournament (see `availability.py`). This is the
+    realistic alternative to one fixed lineup for the whole competition:
+    a squad, not a single starting XV, the way a real tournament actually
+    works. A name can be in `teams` or `squads`, never both."""
+
+    def __init__(
+        self, teams: Optional[Dict[str, Team]] = None, squads: Optional[Dict[str, List[Player]]] = None,
+        my_team: Optional[str] = None, pause_hook=None, on_match_played=None,
+    ):
+        """`my_team`/`pause_hook` support an interactive tournament: when a
+        fixture involves `my_team`, instead of auto-simulating it with
+        `MatchEngine(...).run()`, `_play` calls
+        `pause_hook(home_name, away_name, home_team, away_team, seed) -> MatchResult`
+        - the caller (the web layer) is expected to run that match through
+        the pausable `MatchEngine.start()/advance_to()/finish()` flow (the
+        same one the single-match "live match" UI uses) and block until the
+        user has played it through, then hand back the finished
+        `MatchResult`. Every other fixture (not involving `my_team`) is
+        still fully auto-simmed exactly as before - `pause_hook` is never
+        called for those.
+
+        `on_match_played(home_name, away_name, result)`, if given, is called
+        once for *every* fixture right after it's resolved (auto-simmed or
+        played through `pause_hook`) - this is how the web layer builds a
+        running "results so far" feed for an interactive tournament, since
+        the rest of this class otherwise only hands back one final
+        `TournamentReport` at the very end."""
+        self.teams = teams or {}
+        self.squads = squads or {}
+        self.availability = TournamentAvailability()
+        self.my_team = my_team
+        self.pause_hook = pause_hook
+        self.on_match_played = on_match_played
+        # Live progress, updated as the tournament runs (not just at the
+        # end) - the web layer reads these after every `on_match_played`
+        # call to show a current standings table / knockout stage while an
+        # interactive tournament is still in progress. `current_standings`/
+        # `current_pools` are the *same* `Standings` object(s) each run_*
+        # method keeps mutating in place, so reading them mid-tournament
+        # always reflects every match played so far; `current_bracket` is
+        # likewise the same list each knockout round gets appended to.
+        self.current_stage: Optional[str] = None
+        self.current_standings: Optional[Standings] = None
+        self.current_pools: Optional[Dict[str, Standings]] = None
+        self.current_bracket: List[BracketRound] = []
+
+    def known_names(self) -> set:
+        return set(self.teams) | set(self.squads)
 
     def _team(self, name: str) -> Team:
         if name not in self.teams:
@@ -71,24 +168,45 @@ class Tournament:
             )
         return self.teams[name]
 
+    def _resolve_team_for_match(self, name: str) -> Team:
+        if name in self.squads:
+            pool = self.availability.filter_available(name, self.squads[name])
+            if not pool:
+                raise ValueError(
+                    f"No available players left for '{name}' this match - "
+                    f"everyone in their pool is currently sidelined."
+                )
+            return auto_draft_team(name, pool, short_code=name[:3].upper())
+        return self._team(name)
+
     def _play(self, home_name: str, away_name: str, seed: Optional[int]) -> MatchResult:
-        engine = MatchEngine(self._team(home_name), self._team(away_name), seed=seed)
-        return engine.run()
+        home_team = self._resolve_team_for_match(home_name)
+        away_team = self._resolve_team_for_match(away_name)
+        if self.pause_hook is not None and self.my_team is not None and self.my_team in (home_name, away_name):
+            result = self.pause_hook(home_name, away_name, home_team, away_team, seed)
+        else:
+            result = MatchEngine(home_team, away_team, seed=seed).run()
+        self.availability.record_match(result)
+        if self.on_match_played is not None:
+            self.on_match_played(home_name, away_name, result)
+        return result
 
     # -- synthetic formats --------------------------------------------
     def run_round_robin(self, home_and_away: bool = False, seed: Optional[int] = None) -> TournamentReport:
-        team_names = list(self.teams.keys())
+        team_names = sorted(self.known_names())
         fixtures = round_robin(team_names, home_and_away=home_and_away)
         standings = Standings(team_names)
+        self.current_stage = "Round-robin"
+        self.current_standings = standings
         results = []
         for i, fx in enumerate(fixtures):
             result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
             standings.add_result(result)
             results.append(result)
-        return TournamentReport(name="Round-robin", standings=standings, results=results)
+        return attach_tournament_awards(TournamentReport(name="Round-robin", standings=standings, results=results))
 
     def run_pool_and_knockout(self, pool_count: int = 2, seed: Optional[int] = None) -> TournamentReport:
-        team_names = list(self.teams.keys())
+        team_names = sorted(self.known_names())
         pools, _ = pool_stage(team_names, pool_count=pool_count)
         named_pools = {f"Pool {i + 1}": p for i, p in enumerate(pools)}
         return self._run_named_pools_and_knockout(
@@ -106,6 +224,8 @@ class Tournament:
         complex rule (see `run_world_cup_2027`) that doesn't apply to any
         pre-2027 tournament, so it isn't reused here."""
         pool_standings = {pool_name: Standings(teams) for pool_name, teams in named_pools.items()}
+        self.current_stage = "Pool stage"
+        self.current_pools = pool_standings
         all_results: List[MatchResult] = []
         counter = 0
         for pool_name, teams in named_pools.items():
@@ -120,10 +240,12 @@ class Tournament:
             qualifiers.extend(row.team for row in standings.table()[:qualifiers_per_pool])
 
         bracket: List[BracketRound] = []
+        self.current_bracket = bracket
         round_teams = qualifiers
         champion = None
         while len(round_teams) >= 2:
             fxs = knockout_bracket(round_teams) if not bracket else next_knockout_round(round_teams)
+            self.current_stage = fxs[0].stage
             round_results = []
             for fx in fxs:
                 result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
@@ -140,10 +262,10 @@ class Tournament:
                 break
             round_teams = winners
 
-        return TournamentReport(
+        return attach_tournament_awards(TournamentReport(
             name=name, pools=pool_standings,
             results=all_results, bracket=bracket, champion=champion,
-        )
+        ))
 
     # -- real-world replay ----------------------------------------------
     def run_real(self, tournament_key: str, season: str, seed: Optional[int] = None) -> TournamentReport:
@@ -155,13 +277,15 @@ class Tournament:
             )
         team_names = sorted({f.home for f in real_fixtures} | {f.away for f in real_fixtures})
         standings = Standings(team_names)
+        self.current_stage = tournament_key.replace("_", " ").title()
+        self.current_standings = standings
         results = []
         for i, fx in enumerate(real_fixtures):
             result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
             standings.add_result(result)
             results.append(result)
         name = f"{tournament_key.replace('_', ' ').title()} {season} (real fixtures, simulated)"
-        return TournamentReport(name=name, standings=standings, results=results)
+        return attach_tournament_awards(TournamentReport(name=name, standings=standings, results=results))
 
     # -- 2027 Rugby World Cup (real draw, no fixtures exist yet) ---------
     def run_world_cup_2027(self, fixture_mode: str = "specific", seed: Optional[int] = None) -> TournamentReport:
@@ -185,10 +309,13 @@ class Tournament:
                 rng.shuffle(teams)
 
         pool_standings: Dict[str, Standings] = {}
+        self.current_stage = "Pool stage"
+        self.current_pools = pool_standings
         all_results: List[MatchResult] = []
         counter = 0
         for pool_name, teams in pools.items():
             standings = Standings(teams)
+            pool_standings[f"Pool {pool_name}"] = standings
             for fx in round_robin(teams):
                 result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
                 counter += 1
@@ -236,9 +363,11 @@ class Tournament:
         ]
 
         bracket: List[BracketRound] = []
+        self.current_bracket = bracket
         champion: Optional[str] = None
         fxs = r16_fixtures
         while True:
+            self.current_stage = fxs[0].stage
             round_results = []
             for fx in fxs:
                 result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
@@ -259,10 +388,10 @@ class Tournament:
             # unofficial progression.
             fxs = next_knockout_round(round_winners)
 
-        return TournamentReport(
+        return attach_tournament_awards(TournamentReport(
             name=f"Rugby World Cup 2027 ({fixture_mode} pool order, real draw + official R16 pairing)",
             pools=pool_standings, results=all_results, bracket=bracket, champion=champion,
-        )
+        ))
 
     # -- historical Rugby World Cups (1995-2023, professional era) ------
     def run_historical_world_cup(self, year: int, seed: Optional[int] = None) -> TournamentReport:
@@ -274,7 +403,8 @@ class Tournament:
         from ..data.sources.historical_rwc import get_rwc_year_data
 
         pools, _squads = get_rwc_year_data(year)
-        missing = [name for pool in pools.values() for name in pool if name not in self.teams]
+        known = self.known_names()
+        missing = [name for pool in pools.values() for name in pool if name not in known]
         if missing:
             raise ValueError(
                 f"Missing a Team for: {', '.join(sorted(set(missing)))} - "
@@ -306,6 +436,8 @@ class Tournament:
         1999 draw. It's the only way to generalize a one-off event, not an
         official formula - flagged here rather than presented as fact."""
         pool_standings = {pool_name: Standings(teams) for pool_name, teams in named_pools.items()}
+        self.current_stage = "Pool stage"
+        self.current_pools = pool_standings
         all_results: List[MatchResult] = []
         counter = 0
         for pool_name, teams in named_pools.items():
@@ -346,6 +478,7 @@ class Tournament:
             Fixture(home=home, away=away, round_no=1, stage="quarter-final play-off")
             for home, away in playoff_pairs
         ]
+        self.current_stage = "quarter-final play-off"
         playoff_results = []
         for fx in playoff_fixtures:
             result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
@@ -360,6 +493,7 @@ class Tournament:
         bracket: List[BracketRound] = [
             BracketRound(stage="quarter-final play-off", fixtures=playoff_fixtures, results=playoff_results),
         ]
+        self.current_bracket = bracket
         qf_teams = [winners[l] for l in letters] + playoff_winners
         champion: Optional[str] = None
         round_teams = qf_teams
@@ -367,6 +501,7 @@ class Tournament:
         while len(round_teams) >= 2:
             fxs = knockout_bracket(round_teams) if first_round else next_knockout_round(round_teams)
             first_round = False
+            self.current_stage = fxs[0].stage
             round_results = []
             for fx in fxs:
                 result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
@@ -383,11 +518,11 @@ class Tournament:
                 break
             round_teams = round_winners
 
-        return TournamentReport(
+        return attach_tournament_awards(TournamentReport(
             name="1999 Rugby World Cup (real draw, historical squads, "
                  "5-pool + quarter-final play-off format)",
             pools=pool_standings, results=all_results, bracket=bracket, champion=champion,
-        )
+        ))
 
     # -- historical Six Nations Championship (2009-2021) ----------------
     def run_historical_six_nations(self, year: int, seed: Optional[int] = None) -> TournamentReport:
@@ -402,7 +537,8 @@ class Tournament:
         from ..data.sources.historical_six_nations import get_six_nations_year_data
 
         squads = get_six_nations_year_data(year)
-        missing = [name for name in squads if name not in self.teams]
+        known = self.known_names()
+        missing = [name for name in squads if name not in known]
         if missing:
             raise ValueError(
                 f"Missing a Team for: {', '.join(sorted(missing))} - "
@@ -410,12 +546,14 @@ class Tournament:
             )
         team_names = list(squads.keys())
         standings = Standings(team_names)
+        self.current_stage = f"{year} Six Nations"
+        self.current_standings = standings
         results: List[MatchResult] = []
         for i, fx in enumerate(round_robin(team_names)):
             result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
             standings.add_result(result)
             results.append(result)
-        return TournamentReport(
+        return attach_tournament_awards(TournamentReport(
             name=f"{year} Six Nations Championship (historical squads, synthetic fixture order)",
             standings=standings, results=results,
-        )
+        ))
