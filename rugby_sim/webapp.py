@@ -159,6 +159,62 @@ def api_wc27_pools():
     })
 
 
+@app.get("/api/historical_rwc/years")
+def api_historical_rwc_years():
+    from .data.sources.historical_rwc import AVAILABLE_RWC_YEARS
+    return jsonify({"years": AVAILABLE_RWC_YEARS})
+
+
+@app.get("/api/historical_rwc/<int:year>")
+def api_historical_rwc_year(year: int):
+    """Real pool draw + each team's real historical squad (already-built
+    `Player`s, registered here so `/api/team/auto`'s fixed-pool variant or a
+    manual draft can reference them by id - same pattern as `/api/pool`)."""
+    from .data.sources.historical_rwc import get_rwc_year_data
+
+    try:
+        pools, squads = get_rwc_year_data(year)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    for squad in squads.values():
+        _register(squad)
+
+    return jsonify({
+        "year": year,
+        "pools": pools,
+        "squads": {name: [_player_json(p) for p in squad] for name, squad in squads.items()},
+    })
+
+
+@app.get("/api/historical_six_nations/years")
+def api_historical_six_nations_years():
+    from .data.sources.historical_six_nations import AVAILABLE_SIX_NATIONS_YEARS
+    return jsonify({"years": AVAILABLE_SIX_NATIONS_YEARS})
+
+
+@app.get("/api/historical_six_nations/<int:year>")
+def api_historical_six_nations_year(year: int):
+    """Each of the six teams' real historical squad for that Six Nations
+    edition - same registration pattern as the historical World Cup
+    endpoint, usable both by the dedicated tournament-mode flow and by the
+    generic "historical squad" picker in free-pool team building."""
+    from .data.sources.historical_six_nations import get_six_nations_year_data
+
+    try:
+        squads = get_six_nations_year_data(year)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    for squad in squads.values():
+        _register(squad)
+
+    return jsonify({
+        "year": year,
+        "squads": {name: [_player_json(p) for p in squad] for name, squad in squads.items()},
+    })
+
+
 # -- API: rate candidates for a position -------------------------------
 @app.post("/api/rank")
 def api_rank():
@@ -256,6 +312,34 @@ def api_team_auto():
         "captain": _ID_BY_PLAYER[id(team.lineup.captain)] if team.lineup.captain else None,
         "pool": [_player_json(slot.player) for slot in team.lineup.starters.values()]
         + [_player_json(p) for p in team.lineup.bench],
+    })
+
+
+@app.post("/api/team/auto_from_ids")
+def api_team_auto_from_ids():
+    """Auto-drafts a full XV from an explicit list of already-registered
+    player ids, rather than a `POOLS` union code - used for historical
+    World Cup squads, which aren't a standing national pool (a team's 1995
+    squad isn't the same player list as its 2026 one)."""
+    body = request.get_json(force=True)
+    name: str = body["name"]
+    player_ids: List[int] = body["player_ids"]
+    code: Optional[str] = body.get("code")
+
+    pool = [_PLAYER_BY_ID[pid] for pid in player_ids if pid in _PLAYER_BY_ID]
+    if not pool:
+        return jsonify({"error": "no known player ids given"}), 400
+
+    team = auto_draft_team(name, pool, short_code=code or name[:3].upper())
+    team_id = _register_team(team)
+
+    return jsonify({
+        "team_id": team_id,
+        "name": team.name,
+        "problems": team.lineup.validate(),
+        "slots": {pos.value: _ID_BY_PLAYER[id(slot.player)] for pos, slot in team.lineup.starters.items()},
+        "bench": [_ID_BY_PLAYER[id(p)] for p in team.lineup.bench],
+        "captain": _ID_BY_PLAYER[id(team.lineup.captain)] if team.lineup.captain else None,
     })
 
 
@@ -425,7 +509,7 @@ def api_tournament_real_teams():
 @app.post("/api/tournament/run")
 def api_tournament_run():
     body = request.get_json(force=True)
-    kind = body["type"]  # "real" | "world_cup_2027" | "custom"
+    kind = body["type"]  # "real" | "world_cup_2027" | "historical_world_cup" | "historical_six_nations" | "custom"
     team_ids: Dict[str, str] = body["team_ids"]  # team display name -> team_id
     seed = body.get("seed")
 
@@ -443,6 +527,10 @@ def api_tournament_run():
             report = Tournament(teams).run_world_cup_2027(
                 fixture_mode=body.get("fixture_mode", "specific"), seed=seed,
             )
+        elif kind == "historical_world_cup":
+            report = Tournament(teams).run_historical_world_cup(int(body["year"]), seed=seed)
+        elif kind == "historical_six_nations":
+            report = Tournament(teams).run_historical_six_nations(int(body["year"]), seed=seed)
         elif kind == "custom":
             fmt = body.get("format", "round_robin")
             pool_count = int(body.get("pool_count", 2))

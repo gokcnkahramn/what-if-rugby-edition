@@ -238,6 +238,102 @@ entirely from Wikipedia's "Current squad" pipeline.
 A custom tournament (`CustomTournament`) now asks the same "specific vs.
 random" question for its own team order, before generating fixtures.
 
+### Historical Rugby World Cups (1995-2023, professional era)
+
+Every Rugby World Cup since rugby union turned professional is playable
+with its **real pool draw and real squads**, not a guess:
+
+```python
+from rugby_sim.data.sources.historical_rwc import get_rwc_year_data
+from rugby_sim.tournament import Tournament
+
+pools, squads = get_rwc_year_data(2003)  # pools: {"Pool A": [...], ...}
+                                          # squads: {team_name: [Player, ...]}
+# ... draft/auto-draft a Team per squad, then:
+report = Tournament(teams).run_historical_world_cup(2003, seed=7)
+report.print_report()  # same real pool groupings England actually won in
+```
+
+Available years: 1995, 1999, 2003, 2007, 2011, 2015, 2019, 2023 (every
+edition before 2027's new format). Both the pool draw and every squad are
+read straight off that edition's own `"<year> Rugby World Cup squads"`
+Wikipedia page - not hand-entered - using the exact same
+`{{nat rs player|pos=...|name=...|caps=...}}` template the current-season
+Wikipedia pipeline already parses, just organized as `Pool` -> `Team`
+subsections for ~20 teams on one page. Pre-2027 knockout format was always
+plain top-2-per-pool -> straight to quarter-finals (no third-place
+wildcards), so this reuses the same pool+knockout machinery, not the 2027
+permutation table.
+
+**Ratings for this era are honestly archetype-based, not scouted**:
+`rugbydata` (the real box-score source everything else uses) only covers
+2018-2026, nowhere near 1995-2017. Every historical player gets the same
+treatment "Legend mode" uses - a position-archetype baseline, scaled by
+that union's `UNION_STRENGTH` - *unless* their career happens to overlap
+rugbydata's coverage (real for a 2019/2023 squad member whose name
+cross-references into real stats), in which case real stats are used
+instead. `data_source` is tagged `"historical_wikipedia"` (real stats
+found) or `"historical_archetype"` (position estimate) so this is always
+visible, not papered over.
+
+Both the interactive CLI (`Historical Rugby World Cup`, under "Real
+tournament") and the web UI (`Historical Rugby World Cup (1995-2023)`
+tournament-mode button) support this: pick a year, see the real pools, then
+auto-draft or draft-yourself each participant exactly like the 2027 World
+Cup flow.
+
+**1999's unique format is reproduced, not flattened into the generic
+rule**: every other edition is a plain top-2-per-pool, but 1999 was 5
+pools of 4, where only the 5 pool *winners* went straight to the
+quarter-finals - the 5 runners-up plus the single best third-placed team
+played a quarter-final **play-off** round (3 knockout matches) for the
+remaining 3 quarter-final spots. `run_historical_world_cup` detects
+`year == 1999` and runs that extra round automatically; every other year
+is unaffected.
+
+### Historical Six Nations Championship (2009-2021)
+
+Same approach, for the Six Nations: real squads for each of the 6 teams,
+read off that edition's own `"<year> Six Nations Championship squads"`
+Wikipedia page (verified live for 2009 through 2021 - earlier pages list
+players with no position at all, which can't be drafted). 2022 onward is
+already covered by the regular real-fixture pipeline (`run_real`, real
+rugbydata stats), so this is specifically the pre-rugbydata gap.
+
+```python
+from rugby_sim.data.sources.historical_six_nations import get_six_nations_year_data
+from rugby_sim.tournament import Tournament
+
+squads = get_six_nations_year_data(2012)  # {"England": [...], "France": [...], ...}
+report = Tournament(teams).run_historical_six_nations(2012, seed=3)
+report.print_report()  # 15-match round-robin + bonus-point table
+```
+
+Honest caveat: the squads page has no fixture list, so match **order** is
+a synthetic round-robin, not the real historical sequence (everyone plays
+everyone once either way, so the final table's shape is correct - who
+played whom isn't in the real order). Ratings follow the same
+archetype/union-strength convention as the historical World Cups.
+
+### Historical squads in a single friendly or a custom tournament
+
+Any historical World Cup or Six Nations squad can also be pulled into a
+normal single match or a custom tournament - not just the dedicated
+historical-tournament modes above. In the interactive CLI's free-pool
+drafting, add the `HIST` pool code (alongside a union code or `LEG`) to
+pick a competition, year and team and mix that exact historical squad
+into whatever team you're building. In the web UI, every `TeamBuilder`
+panel (single match, or a custom tournament's "Draft yourself" team) has
+a "Historical squad" button doing the same thing - pick competition, year,
+team, add, repeat to mix several historical squads into one fantasy
+roster if you want to.
+
+**Out of scope for now**: historical Tri Nations/Rugby Championship
+editions - confirmed live that, unlike the World Cup and Six Nations,
+Wikipedia does not maintain a dedicated per-year squad-list page for this
+competition (checked 2010 and 2015, neither exists); and the pre-1995
+amateur era, by design.
+
 ## Legend mode
 
 A dedicated roster of real Hall of Fame players, for building an all-time
@@ -478,6 +574,25 @@ one (e.g. to run two instances side by side).
   diluting it across all 15 starters; added a lineout-turnover event so
   `lineout_jumping`/`lineout_throwing` actually affect a match (they
   previously had zero effect on the simulation)
+- [X] Historical Rugby World Cups (1995-2023, professional era) - every
+  edition's real pool draw and real squads, read straight off that
+  edition's own Wikipedia squads page (not hand-entered); pre-2018
+  ratings are an honest archetype+union-strength estimate (same
+  convention as Legend mode), real stats used instead wherever a
+  player's career overlaps rugbydata's 2018+ coverage. Wired into both
+  the interactive CLI and the web UI's tournament mode, same
+  auto-draft/draft-yourself flow as the 2027 World Cup. 1999's real
+  5-pool + quarter-final-play-off format is reproduced exactly, not
+  flattened into the generic top-2-per-pool rule every other edition uses.
+- [X] Historical Six Nations Championship (2009-2021) - same real-squads-
+  from-Wikipedia approach as the World Cup, for the pre-rugbydata years of
+  this competition (synthetic match order, since the squads page has no
+  fixture list - the real squads and final-table shape are what's real
+  here). Both historical competitions' squads are also selectable for a
+  plain single friendly or a custom tournament, not just their own
+  dedicated tournament mode - `HIST` in the interactive CLI's free-pool
+  drafting, a "Historical squad" button on every web UI `TeamBuilder`
+  panel.
 
 **Next up (smaller, more polish than new capability):**
 

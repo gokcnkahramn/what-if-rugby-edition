@@ -45,6 +45,7 @@ from .tournament import CustomTournament, Tournament, list_tournaments
 # show up in "by nation" drafting or a real tournament's team list, only
 # here, as an extra option when mixing a free/custom-roster team.
 LEGENDS_CODE = "LEG"
+HISTORICAL_CODE = "HIST"
 
 # code -> real nation name (e.g. "ENG" -> "England"), used to suggest/default
 # a code when a real fixture's team name already tells us which union it is.
@@ -110,7 +111,8 @@ def _pick_pools_for_team() -> List[Player]:
     deliberately, they never come bundled into a nation's own pool."""
     codes = sorted(POOLS.keys())
     available: List[Player] = []
-    print(f"\nAvailable player pools: {', '.join(codes)}, {LEGENDS_CODE} (Hall of Fame legends)")
+    print(f"\nAvailable player pools: {', '.join(codes)}, {LEGENDS_CODE} (Hall of Fame legends), "
+          f"{HISTORICAL_CODE} (a specific historical World Cup/Six Nations squad)")
     while True:
         code = _prompt("Add a union/pool code (blank when done)").upper()
         if not code:
@@ -122,12 +124,53 @@ def _pick_pools_for_team() -> List[Player]:
             print(f"  +{len(legends)} Hall of Fame legends added.")
             available.extend(legends)
             continue
+        if code == HISTORICAL_CODE:
+            available.extend(_pick_historical_squad())
+            continue
         if code not in POOLS:
-            print(f"  Unknown code '{code}'. Options: {', '.join(codes)}, {LEGENDS_CODE}")
+            print(f"  Unknown code '{code}'. Options: {', '.join(codes)}, {LEGENDS_CODE}, {HISTORICAL_CODE}")
             continue
         season = _prompt("  Season for this pool", default="2026")
         available.extend(_pull_pool(code, season))
     return available
+
+
+def _pick_historical_squad() -> List[Player]:
+    """Pulls one specific team's real historical squad (a past Rugby World
+    Cup or Six Nations edition) into whatever free-pool team is being
+    built - usable for a single match or a custom tournament, same as any
+    other pool source, not just the dedicated historical-tournament mode."""
+    from .data.sources.historical_rwc import AVAILABLE_RWC_YEARS, get_rwc_year_data
+    from .data.sources.historical_six_nations import (
+        AVAILABLE_SIX_NATIONS_YEARS,
+        get_six_nations_year_data,
+    )
+
+    comp_idx = _choose_index(
+        "  Which historical competition?",
+        ["Rugby World Cup", "Six Nations Championship"],
+    )
+    if comp_idx == 0:
+        year_options = [str(y) for y in AVAILABLE_RWC_YEARS]
+        year_idx = _choose_index("  Pick a World Cup year", year_options)
+        year = AVAILABLE_RWC_YEARS[year_idx]
+        print(f"  Loading the {year} Rugby World Cup's real squads (first time is "
+              f"network-heavy - cached after)...")
+        _pools, squads = get_rwc_year_data(year)
+    else:
+        year_options = [str(y) for y in AVAILABLE_SIX_NATIONS_YEARS]
+        year_idx = _choose_index("  Pick a Six Nations year", year_options)
+        year = AVAILABLE_SIX_NATIONS_YEARS[year_idx]
+        print(f"  Loading the {year} Six Nations' real squads (first time is "
+              f"network-heavy - cached after)...")
+        squads = get_six_nations_year_data(year)
+
+    team_names = sorted(squads.keys())
+    team_idx = _choose_index("  Which team's squad?", team_names)
+    team_name = team_names[team_idx]
+    squad = squads[team_name]
+    print(f"  +{len(squad)} players added from {team_name}'s {year} squad.")
+    return squad
 
 
 def _draft_lineup(available: List[Player]) -> Lineup:
@@ -247,6 +290,8 @@ def _run_single_match():
 
 
 WORLD_CUP_2027_LABEL = "rugby_world_cup_2027 (real pool draw, no fixtures exist yet)"
+HISTORICAL_RWC_LABEL = "historical_rugby_world_cup (1995-2023, real squads from Wikipedia)"
+HISTORICAL_SIX_NATIONS_LABEL = "historical_six_nations (2009-2021, real squads from Wikipedia)"
 
 
 def _ask_fixture_mode() -> str:
@@ -265,12 +310,18 @@ def _ask_fixture_mode() -> str:
 
 
 def _run_real_tournament():
-    keys = list_tournaments() + [WORLD_CUP_2027_LABEL]
+    keys = list_tournaments() + [WORLD_CUP_2027_LABEL, HISTORICAL_RWC_LABEL, HISTORICAL_SIX_NATIONS_LABEL]
     idx = _choose_index("Pick a real tournament", keys)
     key = keys[idx]
 
     if key == WORLD_CUP_2027_LABEL:
         _run_world_cup_2027()
+        return
+    if key == HISTORICAL_RWC_LABEL:
+        _run_historical_world_cup()
+        return
+    if key == HISTORICAL_SIX_NATIONS_LABEL:
+        _run_historical_six_nations()
         return
 
     season = _prompt("Season", default="2026")
@@ -314,6 +365,88 @@ def _run_world_cup_2027():
     seed_raw = _prompt("Random seed (blank = random)")
     seed = int(seed_raw) if seed_raw.isdigit() else None
     report = Tournament(teams).run_world_cup_2027(fixture_mode=fixture_mode, seed=seed)
+    report.print_report()
+
+
+def _draft_team_from_fixed_pool(label: str, available: List[Player]) -> Team:
+    """Like `_draft_team`, but the available players come from a specific
+    pre-built squad (a historical World Cup's real roster) rather than
+    `POOLS`/`get_all_legends` - so "by nation"/"free pool" don't apply here,
+    just auto-draft-or-draft-yourself from that exact squad."""
+    print(f"\n=== Drafting: {label} ({len(available)} players in this historical squad) ===")
+    if not available:
+        raise SystemExit(f"No players available for {label}, aborting.")
+    options = ["Auto-draft (recommended)", "Draft yourself"]
+    idx = _choose_index("How do you want to build this team?", options)
+    if idx == 0:
+        from .data.sources.auto_draft import auto_draft_team
+        return auto_draft_team(label, available, short_code=label[:3].upper())
+
+    lineup = _draft_lineup(available)
+    problems = lineup.validate()
+    if problems:
+        print(f"\nWarning - lineup incomplete: {problems}")
+    return Team(name=label, short_code=label[:3].upper(), lineup=lineup)
+
+
+def _run_historical_world_cup():
+    """Replays a real past World Cup (1995-2023) with its real pool draw
+    and real squads, scraped from that edition's Wikipedia squads page -
+    see `historical_rwc.py`. Pre-2018 players have no rugbydata box scores
+    to derive a rating from, so they get a position-archetype estimate
+    scaled by that union's general competitiveness (same honest convention
+    as "Legend mode") instead of a scouted number."""
+    from .data.sources.historical_rwc import AVAILABLE_RWC_YEARS, get_rwc_year_data
+
+    year_options = [str(y) for y in AVAILABLE_RWC_YEARS]
+    year_idx = _choose_index("Pick a Rugby World Cup year", year_options)
+    year = AVAILABLE_RWC_YEARS[year_idx]
+
+    print(f"\nLoading the {year} Rugby World Cup's real squads from Wikipedia "
+          f"(first time is network-heavy - ~20 teams - cached after)...")
+    pools, squads = get_rwc_year_data(year)
+    print(f"\n{year} Rugby World Cup - real pool draw:")
+    for pool_name, team_names in pools.items():
+        print(f"  {pool_name}: {', '.join(team_names)}")
+
+    teams: Dict[str, Team] = {}
+    for team_name, squad in squads.items():
+        teams[team_name] = _draft_team_from_fixed_pool(team_name, squad)
+
+    seed_raw = _prompt("Random seed (blank = random)")
+    seed = int(seed_raw) if seed_raw.isdigit() else None
+    report = Tournament(teams).run_historical_world_cup(year, seed=seed)
+    report.print_report()
+
+
+def _run_historical_six_nations():
+    """Replays a historical Six Nations edition (2009-2021) with that
+    year's real squads, scraped from that edition's Wikipedia squads page -
+    see `historical_six_nations.py`. Same honest ratings convention as the
+    historical World Cup mode. Note: the real match-by-match order isn't
+    recoverable from the squads page, so this plays a synthetic
+    round-robin order, not the exact historical fixture sequence."""
+    from .data.sources.historical_six_nations import (
+        AVAILABLE_SIX_NATIONS_YEARS,
+        get_six_nations_year_data,
+    )
+
+    year_options = [str(y) for y in AVAILABLE_SIX_NATIONS_YEARS]
+    year_idx = _choose_index("Pick a Six Nations year", year_options)
+    year = AVAILABLE_SIX_NATIONS_YEARS[year_idx]
+
+    print(f"\nLoading the {year} Six Nations' real squads from Wikipedia "
+          f"(first time is network-heavy - cached after)...")
+    squads = get_six_nations_year_data(year)
+    print(f"\n{year} Six Nations Championship: {', '.join(squads.keys())}")
+
+    teams: Dict[str, Team] = {}
+    for team_name, squad in squads.items():
+        teams[team_name] = _draft_team_from_fixed_pool(team_name, squad)
+
+    seed_raw = _prompt("Random seed (blank = random)")
+    seed = int(seed_raw) if seed_raw.isdigit() else None
+    report = Tournament(teams).run_historical_six_nations(year, seed=seed)
     report.print_report()
 
 

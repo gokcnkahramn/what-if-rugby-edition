@@ -89,26 +89,41 @@ class Tournament:
 
     def run_pool_and_knockout(self, pool_count: int = 2, seed: Optional[int] = None) -> TournamentReport:
         team_names = list(self.teams.keys())
-        pools, fixtures = pool_stage(team_names, pool_count=pool_count)
-        pool_standings = {f"Pool {i + 1}": Standings(p) for i, p in enumerate(pools)}
-        all_results = []
+        pools, _ = pool_stage(team_names, pool_count=pool_count)
+        named_pools = {f"Pool {i + 1}": p for i, p in enumerate(pools)}
+        return self._run_named_pools_and_knockout(
+            named_pools, name="Pool stage + knockout", qualifiers_per_pool=2, seed=seed,
+        )
+
+    def _run_named_pools_and_knockout(
+        self, named_pools: Dict[str, List[str]], name: str,
+        qualifiers_per_pool: int = 2, seed: Optional[int] = None,
+    ) -> TournamentReport:
+        """Shared by `run_pool_and_knockout` (auto-split pools) and
+        `run_historical_world_cup` (real historical pool groupings) - plain
+        top-N-per-pool-advance, standard bracket order. The 2027 World Cup's
+        third-place-wildcard permutation table is a different, more
+        complex rule (see `run_world_cup_2027`) that doesn't apply to any
+        pre-2027 tournament, so it isn't reused here."""
+        pool_standings = {pool_name: Standings(teams) for pool_name, teams in named_pools.items()}
+        all_results: List[MatchResult] = []
         counter = 0
-        for fx in fixtures:
-            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
-            counter += 1
-            pool_standings[f"Pool {int(fx.stage.split('_')[1])}"].add_result(result)
-            all_results.append(result)
+        for pool_name, teams in named_pools.items():
+            for fx in round_robin(teams):
+                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                counter += 1
+                pool_standings[pool_name].add_result(result)
+                all_results.append(result)
 
         qualifiers = []
-        for pool_name, standings in pool_standings.items():
-            top_two = [row.team for row in standings.table()[:2]]
-            qualifiers.extend(top_two)
+        for standings in pool_standings.values():
+            qualifiers.extend(row.team for row in standings.table()[:qualifiers_per_pool])
 
         bracket: List[BracketRound] = []
         round_teams = qualifiers
         champion = None
         while len(round_teams) >= 2:
-            fxs = knockout_bracket(round_teams) if bracket == [] else next_knockout_round(round_teams)
+            fxs = knockout_bracket(round_teams) if not bracket else next_knockout_round(round_teams)
             round_results = []
             for fx in fxs:
                 result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
@@ -126,7 +141,7 @@ class Tournament:
             round_teams = winners
 
         return TournamentReport(
-            name="Pool stage + knockout", pools=pool_standings,
+            name=name, pools=pool_standings,
             results=all_results, bracket=bracket, champion=champion,
         )
 
@@ -247,4 +262,160 @@ class Tournament:
         return TournamentReport(
             name=f"Rugby World Cup 2027 ({fixture_mode} pool order, real draw + official R16 pairing)",
             pools=pool_standings, results=all_results, bracket=bracket, champion=champion,
+        )
+
+    # -- historical Rugby World Cups (1995-2023, professional era) ------
+    def run_historical_world_cup(self, year: int, seed: Optional[int] = None) -> TournamentReport:
+        """Replays a real past World Cup's real pool groupings (read
+        straight off that edition's Wikipedia squads page - see
+        `historical_rwc.get_rwc_year_data` - not hand-entered), with the
+        simple top-2-per-pool-advance format every edition before 2027
+        used (no third-place wildcards, unlike `run_world_cup_2027`)."""
+        from ..data.sources.historical_rwc import get_rwc_year_data
+
+        pools, _squads = get_rwc_year_data(year)
+        missing = [name for pool in pools.values() for name in pool if name not in self.teams]
+        if missing:
+            raise ValueError(
+                f"Missing a Team for: {', '.join(sorted(set(missing)))} - "
+                f"draft every {year} World Cup participant before running it."
+            )
+        if year == 1999:
+            return self._run_1999_world_cup(pools, seed=seed)
+
+        return self._run_named_pools_and_knockout(
+            pools, name=f"{year} Rugby World Cup (real draw, historical squads)",
+            qualifiers_per_pool=2, seed=seed,
+        )
+
+    def _run_1999_world_cup(self, named_pools: Dict[str, List[str]], seed: Optional[int] = None) -> TournamentReport:
+        """1999 is the one professional-era edition with a genuinely
+        different format: 5 pools of 4, pool **winners** go straight to the
+        quarter-finals (5 slots); the 5 pool **runners-up** plus the single
+        best third-placed team play a quarter-final play-off round (3
+        knockout matches) for the remaining 3 quarter-final slots. Every
+        other edition (1995, 2003-2023) is a plain top-2-per-pool, which
+        `_run_named_pools_and_knockout` already covers.
+
+        The real 1999 play-off pairings (England v Fiji, Scotland v Samoa,
+        Argentina v Ireland) came down to the actual pool letters each team
+        was drawn into, not a published general rule for an arbitrary
+        set of results - so this reproduces it as a letter-based pattern
+        (runner-up B v runner-up C, runner-up A v runner-up D, best third
+        v runner-up E) that happens to match the real bracket for the real
+        1999 draw. It's the only way to generalize a one-off event, not an
+        official formula - flagged here rather than presented as fact."""
+        pool_standings = {pool_name: Standings(teams) for pool_name, teams in named_pools.items()}
+        all_results: List[MatchResult] = []
+        counter = 0
+        for pool_name, teams in named_pools.items():
+            for fx in round_robin(teams):
+                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                counter += 1
+                pool_standings[pool_name].add_result(result)
+                all_results.append(result)
+
+        letters = sorted(named_pools.keys())  # ["Pool A", ..., "Pool E"]
+        winners, runners_up, thirds = {}, {}, {}
+        for letter in letters:
+            table = pool_standings[letter].table()
+            winners[letter] = table[0].team
+            runners_up[letter] = table[1].team
+            thirds[letter] = table[2]
+
+        # Best third by table points/diff/for - but if that happens to be
+        # pool E's own third, pair it against E's runner-up would be a
+        # same-pool rematch (the two already played each other in the pool
+        # stage). Real 1999 never hit this (the best third, Argentina, was
+        # from pool D), so there's no real precedent for it - fall back to
+        # the next-best third rather than replay a pool match in the
+        # knockout stage.
+        thirds_by_rank = sorted(
+            letters,
+            key=lambda l: (thirds[l].table_points, thirds[l].points_diff, thirds[l].points_for),
+            reverse=True,
+        )
+        best_third_letter = next(l for l in thirds_by_rank if l != letters[4])
+
+        playoff_pairs = [
+            (runners_up[letters[1]], runners_up[letters[2]]),  # B v C
+            (runners_up[letters[0]], runners_up[letters[3]]),  # A v D
+            (thirds[best_third_letter].team, runners_up[letters[4]]),  # best 3rd v E
+        ]
+        playoff_fixtures = [
+            Fixture(home=home, away=away, round_no=1, stage="quarter-final play-off")
+            for home, away in playoff_pairs
+        ]
+        playoff_results = []
+        for fx in playoff_fixtures:
+            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+            counter += 1
+            playoff_results.append(result)
+            all_results.append(result)
+        playoff_winners = [
+            r.home.name if r.score_home >= r.score_away else r.away.name
+            for r in playoff_results
+        ]
+
+        bracket: List[BracketRound] = [
+            BracketRound(stage="quarter-final play-off", fixtures=playoff_fixtures, results=playoff_results),
+        ]
+        qf_teams = [winners[l] for l in letters] + playoff_winners
+        champion: Optional[str] = None
+        round_teams = qf_teams
+        first_round = True
+        while len(round_teams) >= 2:
+            fxs = knockout_bracket(round_teams) if first_round else next_knockout_round(round_teams)
+            first_round = False
+            round_results = []
+            for fx in fxs:
+                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                counter += 1
+                round_results.append(result)
+                all_results.append(result)
+            round_winners = [
+                r.home.name if r.score_home >= r.score_away else r.away.name
+                for r in round_results
+            ]
+            bracket.append(BracketRound(stage=fxs[0].stage, fixtures=fxs, results=round_results))
+            if len(round_winners) == 1:
+                champion = round_winners[0]
+                break
+            round_teams = round_winners
+
+        return TournamentReport(
+            name="1999 Rugby World Cup (real draw, historical squads, "
+                 "5-pool + quarter-final play-off format)",
+            pools=pool_standings, results=all_results, bracket=bracket, champion=champion,
+        )
+
+    # -- historical Six Nations Championship (2009-2021) ----------------
+    def run_historical_six_nations(self, year: int, seed: Optional[int] = None) -> TournamentReport:
+        """Replays a historical Six Nations edition with that year's real
+        squads (see `historical_six_nations.get_six_nations_year_data`) -
+        plain round-robin + bonus-point table, same shape as `run_real`.
+        The real match-by-match order isn't recoverable from the squads
+        page (no fixture list there), so the round-robin uses a synthetic
+        generated order, not the actual historical sequence - the final
+        table's shape (10 matches, everyone plays everyone once) is real,
+        the order they were played in isn't."""
+        from ..data.sources.historical_six_nations import get_six_nations_year_data
+
+        squads = get_six_nations_year_data(year)
+        missing = [name for name in squads if name not in self.teams]
+        if missing:
+            raise ValueError(
+                f"Missing a Team for: {', '.join(sorted(missing))} - "
+                f"draft every {year} Six Nations side before running it."
+            )
+        team_names = list(squads.keys())
+        standings = Standings(team_names)
+        results: List[MatchResult] = []
+        for i, fx in enumerate(round_robin(team_names)):
+            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
+            standings.add_result(result)
+            results.append(result)
+        return TournamentReport(
+            name=f"{year} Six Nations Championship (historical squads, synthetic fixture order)",
+            standings=standings, results=results,
         )

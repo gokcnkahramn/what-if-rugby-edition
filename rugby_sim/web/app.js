@@ -5,6 +5,16 @@
 
 let POSITIONS = [];
 let UNIONS = [];
+// Real rugbydata coverage is 2022-2026 (see README) - a dropdown of known-
+// good seasons instead of a free-text field, so you're never guessing
+// which years actually have data.
+const SEASON_YEARS = ["2026", "2025", "2024", "2023", "2022"];
+function seasonSelectHtml(id, selected) {
+  selected = selected || "2026";
+  return `<select id="${id}">` +
+    SEASON_YEARS.map(y => `<option value="${y}" ${y === selected ? "selected" : ""}>${y}</option>`).join("") +
+    `</select>`;
+}
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -26,6 +36,8 @@ class TeamBuilder {
     this.title = opts.title || (side === "home" ? "Team A (home)" : side === "away" ? "Team B (away)" : side);
     this.fixedName = opts.fixedName || null; // if set, name field is pre-filled and locked
     if (this.fixedName) this.name = this.fixedName;
+    this.fixedPool = opts.fixedPool || null; // if set, skip mode selection - draft from this exact squad
+    if (this.fixedPool) { this.mode = "fixed"; this.pool = this.fixedPool; }
     this.el = document.getElementById(`panel-${side}`);
     this.render();
   }
@@ -36,15 +48,18 @@ class TeamBuilder {
 
   render() {
     const title = this.title;
+    const modeButtons = this.fixedPool
+      ? `<span class="muted">Drafting from this exact historical squad (${this.pool.length} players).</span>`
+      : `
+      <button data-mode="nation" class="${this.mode === "nation" ? "active" : ""}">By nation</button>
+      <button data-mode="free" class="${this.mode === "free" ? "active" : ""}">Free pool</button>
+      <button data-mode="legends" class="${this.mode === "legends" ? "active" : ""}">Legends (HoF)</button>
+      <button data-mode="historical" class="${this.mode === "historical" ? "active" : ""}">Historical squad</button>
+      <button id="${this.side}-import-btn">Load saved team...</button>
+      <input type="file" id="${this.side}-import-file" accept="application/json" style="display:none">`;
     this.el.innerHTML = `
       <h2>${title}</h2>
-      <div class="row">
-        <button data-mode="nation" class="${this.mode === "nation" ? "active" : ""}">By nation</button>
-        <button data-mode="free" class="${this.mode === "free" ? "active" : ""}">Free pool</button>
-        <button data-mode="legends" class="${this.mode === "legends" ? "active" : ""}">Legends (HoF)</button>
-        <button id="${this.side}-import-btn">Load saved team...</button>
-        <input type="file" id="${this.side}-import-file" accept="application/json" style="display:none">
-      </div>
+      <div class="row">${modeButtons}</div>
       <div id="${this.side}-mode-area"></div>
       <div class="row">
         <label class="muted">Team name: <input type="text" id="${this.side}-name" value="${this.name || ""}" ${this.fixedName ? "disabled" : ""}></label>
@@ -58,6 +73,7 @@ class TeamBuilder {
     });
     const importBtn = document.getElementById(`${this.side}-import-btn`);
     const importFile = document.getElementById(`${this.side}-import-file`);
+    if (importBtn && importFile) {
     importBtn.onclick = () => importFile.click();
     importFile.onchange = async () => {
       const file = importFile.files[0];
@@ -79,6 +95,7 @@ class TeamBuilder {
         alert("Could not load team file: " + e.message);
       }
     };
+    }
     this.renderModeArea();
     this.renderPitch();
     this.renderFinish();
@@ -91,7 +108,7 @@ class TeamBuilder {
       area.innerHTML = `
         <div class="row">
           <select id="${this.side}-union"></select>
-          <input type="text" id="${this.side}-season" value="2026" style="width:70px" placeholder="season">
+          ${seasonSelectHtml(`${this.side}-season`)}
           <button id="${this.side}-load">Load pool</button>
           <span class="muted" id="${this.side}-load-status"></span>
         </div>`;
@@ -112,7 +129,7 @@ class TeamBuilder {
         <div class="row muted">Click unions to merge their pools together:</div>
         <div class="row" id="${this.side}-union-list"></div>
         <div class="row">
-          <input type="text" id="${this.side}-season" value="2026" style="width:70px" placeholder="season">
+          <label class="muted">Season: ${seasonSelectHtml(`${this.side}-season`)}</label>
           <span class="muted" id="${this.side}-load-status"></span>
         </div>`;
       const list = document.getElementById(`${this.side}-union-list`);
@@ -138,10 +155,55 @@ class TeamBuilder {
         this.pool = players;
         status.textContent = `${players.length} legends loaded.`;
       };
+    } else if (this.mode === "historical") {
+      area.innerHTML = `
+        <div class="row muted">Mix in one or more real historical squads (World Cup or Six Nations):</div>
+        <div class="row">
+          <select id="${this.side}-hist-comp">
+            <option value="rwc">Rugby World Cup (1995-2023)</option>
+            <option value="sn">Six Nations Championship (2009-2021)</option>
+          </select>
+          <select id="${this.side}-hist-year"></select>
+          <select id="${this.side}-hist-team"><option>(load a year first)</option></select>
+          <button id="${this.side}-hist-add">Add this squad</button>
+          <span class="muted" id="${this.side}-hist-status"></span>
+        </div>`;
+      const compSel = document.getElementById(`${this.side}-hist-comp`);
+      const yearSel = document.getElementById(`${this.side}-hist-year`);
+      const teamSel = document.getElementById(`${this.side}-hist-team`);
+      const status = document.getElementById(`${this.side}-hist-status`);
+      let yearData = null; // {year, squads: {name: [players]}}
+
+      const loadYears = async () => {
+        const path = compSel.value === "rwc" ? "/api/historical_rwc/years" : "/api/historical_six_nations/years";
+        const res = await api(path);
+        yearSel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
+        await loadYearData();
+      };
+      const loadYearData = async () => {
+        const year = yearSel.value;
+        status.textContent = "loading real squads (first time is network-heavy - cached after)...";
+        const path = compSel.value === "rwc" ? `/api/historical_rwc/${year}` : `/api/historical_six_nations/${year}`;
+        const res = await api(path);
+        yearData = res;
+        const teamNames = Object.keys(res.squads).sort();
+        teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
+        status.textContent = `${teamNames.length} teams loaded for ${year}.`;
+      };
+      compSel.onchange = loadYears;
+      yearSel.onchange = loadYearData;
+      document.getElementById(`${this.side}-hist-add`).onclick = () => {
+        if (!yearData) return;
+        const squad = yearData.squads[teamSel.value] || [];
+        this.pool = this.pool.concat(squad);
+        status.textContent = `${this.pool.length} players in the mix.`;
+      };
+      loadYears();
     } else {
       area.innerHTML = "";
     }
   }
+  // (mode === "fixed": pool is pre-loaded in the constructor, nothing to render here)
 
   renderPitch() {
     const pitch = document.getElementById(`${this.side}-pitch`);
@@ -361,6 +423,8 @@ async function setupTournamentUI() {
     <div class="row">
       <button data-ttype="real">Real fixture replay</button>
       <button data-ttype="wc2027">2027 Rugby World Cup (real draw)</button>
+      <button data-ttype="historical">Historical Rugby World Cup (1995-2023)</button>
+      <button data-ttype="historical_sn">Historical Six Nations (2009-2021)</button>
       <button data-ttype="custom">Custom tournament</button>
     </div>
     <div id="tournament-config"></div>
@@ -415,6 +479,69 @@ function renderTournamentConfig(ttype) {
     const entries = wc.teams.map(name => ({name, code: wc.code_by_nation[name]}));
     buildTournamentTeamPanels(entries);
     renderTournamentRunArea({type: "world_cup_2027"});
+  } else if (ttype === "historical") {
+    cfg.innerHTML = `
+      <div class="row">
+        <select id="t-hist-year"></select>
+        <button id="t-hist-load">Load this World Cup's real squads</button>
+        <span class="muted" id="t-hist-status"></span>
+      </div>
+      <p class="muted">Real pool draw + every participant's real roster from that edition's
+      Wikipedia squads page (pre-2018 ratings are a position-archetype estimate scaled by that
+      union's competitiveness, not scouted - see README). Pick which team(s) you want to draft
+      yourself; the rest auto-draft their own real squad's best XV.</p>`;
+    api("/api/historical_rwc/years").then(res => {
+      const sel = document.getElementById("t-hist-year");
+      if (!sel) return;
+      sel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
+    });
+    document.getElementById("t-hist-load").onclick = async () => {
+      const year = document.getElementById("t-hist-year").value;
+      const status = document.getElementById("t-hist-status");
+      status.textContent = "loading real squads from Wikipedia (first time is network-heavy, ~20 teams - cached after)...";
+      try {
+        const res = await api(`/api/historical_rwc/${year}`);
+        const teamNames = Object.keys(res.squads);
+        status.textContent = `${teamNames.length} teams - pools: ` +
+          Object.entries(res.pools).map(([p, ts]) => `${p}: ${ts.join(", ")}`).join(" | ");
+        const entries = teamNames.map(name => ({name, fixedPool: res.squads[name]}));
+        buildTournamentTeamPanels(entries);
+        renderTournamentRunArea({type: "historical_world_cup", year: parseInt(year, 10)});
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+      }
+    };
+  } else if (ttype === "historical_sn") {
+    cfg.innerHTML = `
+      <div class="row">
+        <select id="t-hsn-year"></select>
+        <button id="t-hsn-load">Load this edition's real squads</button>
+        <span class="muted" id="t-hsn-status"></span>
+      </div>
+      <p class="muted">Real squads from that edition's Wikipedia squads page (pre-rugbydata era,
+      archetype-based ratings where no real stats cross-reference - see README). Fixture order
+      is a synthetic round-robin, not the real historical match order (not recoverable from this
+      page). Pick which team(s) you want to draft yourself; the rest auto-draft their best XV.</p>`;
+    api("/api/historical_six_nations/years").then(res => {
+      const sel = document.getElementById("t-hsn-year");
+      if (!sel) return;
+      sel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
+    });
+    document.getElementById("t-hsn-load").onclick = async () => {
+      const year = document.getElementById("t-hsn-year").value;
+      const status = document.getElementById("t-hsn-status");
+      status.textContent = "loading real squads from Wikipedia (first time is network-heavy - cached after)...";
+      try {
+        const res = await api(`/api/historical_six_nations/${year}`);
+        const teamNames = Object.keys(res.squads);
+        status.textContent = `${teamNames.length} teams loaded.`;
+        const entries = teamNames.map(name => ({name, fixedPool: res.squads[name]}));
+        buildTournamentTeamPanels(entries);
+        renderTournamentRunArea({type: "historical_six_nations", year: parseInt(year, 10)});
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+      }
+    };
   } else if (ttype === "custom") {
     cfg.innerHTML = `
       <div class="row">
@@ -422,8 +549,9 @@ function renderTournamentConfig(ttype) {
         <label class="muted">How many will you draft yourself: <input type="number" id="t-custom-mine" value="1" style="width:60px"></label>
         <button id="t-custom-setup">Set up teams</button>
       </div>
-      <p class="muted">The rest fill in automatically - mostly strong unions - each with
-      their own auto-drafted best XV, so you only have to build the ones you care about.</p>
+      <p class="muted">The rest default to a suggested strong union's auto-drafted best XV, but
+      each one is editable - pick a different union, a specific season, or the Legends (Hall of
+      Fame) roster instead - so you only have to build the ones you care about by hand.</p>
       <div id="t-custom-names-area"></div>
       <div class="row">
         <label class="muted">Order:
@@ -455,7 +583,10 @@ function renderTournamentConfig(ttype) {
         for (let i = 0; i < autoCount; i++) {
           const code = fillOrder[i % fillOrder.length];
           const union = UNIONS.find(u => u.code === code);
-          autoEntries.push({name: union ? union.name : code, code, forceMode: "auto"});
+          // "auto_pick": auto-drafted for you, but you can change which
+          // union/season (or use the Legends roster instead) before it runs -
+          // not locked to the suggested fill-order team.
+          autoEntries.push({name: union ? union.name : code, code, forceMode: "auto_pick"});
         }
         const manualEntries = myNames.map(n => ({name: n, forceMode: "manual"}));
         buildTournamentTeamPanels([...manualEntries, ...autoEntries]);
@@ -490,12 +621,17 @@ function buildTournamentTeamPanels(entries) {
     const runAutoDraft = async () => {
       row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafting...</span>`;
       try {
-        const res = await api("/api/team/auto", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({name, code: entry.code, season: entry.season}),
-        });
+        const res = entry.fixedPool
+          ? await api("/api/team/auto_from_ids", {
+              method: "POST", headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({name, player_ids: entry.fixedPool.map(p => p.id)}),
+            })
+          : await api("/api/team/auto", {
+              method: "POST", headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({name, code: entry.code, season: entry.season}),
+            });
         tournamentBuilders[name] = {teamId: res.team_id, name};
-        row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafted (${res.code})${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>`;
+        row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafted${res.code ? " (" + res.code + ")" : ""}${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>`;
         updateTournamentRunHint();
       } catch (e) {
         row.innerHTML = `<strong>${name}</strong> <span class="muted">Error: ${e.message}</span>`;
@@ -506,11 +642,68 @@ function buildTournamentTeamPanels(entries) {
       const builderDiv = document.createElement("div");
       builderDiv.id = `panel-${rowId}_builder`;
       row.appendChild(builderDiv);
-      const builder = new TeamBuilder(`${rowId}_builder`, {title: name, fixedName: name});
+      const builder = new TeamBuilder(`${rowId}_builder`, {title: name, fixedName: name, fixedPool: entry.fixedPool || null});
       tournamentBuilders[name] = builder;
     };
 
-    if (entry.forceMode === "auto") {
+    const runAutoDraftFromPicker = async (code, season, useLegends) => {
+      row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafting...</span>`;
+      try {
+        let res;
+        if (useLegends) {
+          const legends = await api("/api/legends");
+          res = await api("/api/team/auto_from_ids", {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, player_ids: legends.map(p => p.id)}),
+          });
+        } else {
+          res = await api("/api/team/auto", {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, code, season}),
+          });
+        }
+        tournamentBuilders[name] = {teamId: res.team_id, name};
+        row.innerHTML = `<strong>${name}</strong> <span class="muted">auto-drafted${res.code ? " (" + res.code + ")" : useLegends ? " (Legends)" : ""}${res.problems.length ? " - " + res.problems.join("; ") : " - ready"}</span>
+          <button class="redo-pick">Change team/year...</button>`;
+        row.querySelector(".redo-pick").onclick = renderAutoPicker;
+        updateTournamentRunHint();
+      } catch (e) {
+        row.innerHTML = `<strong>${name}</strong> <span class="muted">Error: ${e.message}</span> <button class="redo-pick">Try again</button>`;
+        row.querySelector(".redo-pick").onclick = renderAutoPicker;
+      }
+    };
+
+    function renderAutoPicker() {
+      tournamentBuilders[name] = {teamId: null, name}; // placeholder so "still need" hints count it until confirmed
+      row.innerHTML = `
+        <div class="row">
+          <strong>${name}</strong> <span class="muted">(auto-fills with a suggested union - change it here if you want a different one, a specific season, or the Legends roster)</span>
+        </div>
+        <div class="row">
+          <label class="muted"><input type="checkbox" class="ap-legends"> Legends (Hall of Fame) instead</label>
+        </div>
+        <div class="row ap-union-row">
+          <select class="ap-union">${UNIONS.map(u => `<option value="${u.code}" ${u.code === entry.code ? "selected" : ""}>${u.code} - ${u.name}</option>`).join("")}</select>
+          ${seasonSelectHtml("", "2026").replace('<select id="">', '<select class="ap-season">')}
+        </div>
+        <div class="row">
+          <button class="ap-go">Auto-draft</button>
+        </div>`;
+      const legendsCb = row.querySelector(".ap-legends");
+      const unionRow = row.querySelector(".ap-union-row");
+      legendsCb.onchange = () => { unionRow.style.display = legendsCb.checked ? "none" : ""; };
+      row.querySelector(".ap-go").onclick = () => {
+        const useLegends = legendsCb.checked;
+        const code = row.querySelector(".ap-union").value;
+        const season = row.querySelector(".ap-season").value;
+        runAutoDraftFromPicker(code, season, useLegends);
+      };
+      updateTournamentRunHint();
+    }
+
+    if (entry.forceMode === "auto_pick") {
+      renderAutoPicker();
+    } else if (entry.forceMode === "auto") {
       runAutoDraft();
     } else if (entry.forceMode === "manual") {
       startManualDraft();
@@ -555,6 +748,8 @@ function renderTournamentRunArea(params) {
     const body = {type: params.type, team_ids, seed: seedRaw ? parseInt(seedRaw, 10) : null};
     if (params.type === "real") { body.key = params.key; body.season = params.season; }
     if (params.type === "world_cup_2027") { body.fixture_mode = document.getElementById("t-wc-mode").value; }
+    if (params.type === "historical_world_cup") { body.year = params.year; }
+    if (params.type === "historical_six_nations") { body.year = params.year; }
     if (params.type === "custom") {
       body.format = document.getElementById("t-custom-format").value;
       body.pool_count = parseInt(document.getElementById("t-custom-pools").value || "2", 10);
