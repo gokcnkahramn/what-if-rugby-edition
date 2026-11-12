@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>What If Rugby Edition</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>What If Rugby Edition</h1>
+  <p>Click-driven squad builder. Pick a pool, click a position, click a player - no typing required.</p>
+</header>
+
+<div class="teams">
+  <div class="panel" id="panel-home"></div>
+  <div class="panel" id="panel-away"></div>
+</div>
+
+<div class="match-controls">
+  <label class="muted">Seed (optional): <input type="number" id="seed" style="width:90px"></label>
+  <button id="run-match" disabled>Run match</button>
+  <span id="run-hint" class="muted"></span>
+  <span id="run-status" class="muted"></span>
+</div>
+
+<div id="report"></div>
+
+<hr style="border-color:#2a3d36; margin: 20px 24px;">
+
+<div id="tournament-section" style="padding: 0 24px 40px;"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

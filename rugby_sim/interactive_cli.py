@@ -1,0 +1,366 @@
+"""Interactive, prompt-driven "what if" builder.
+
+    python -m rugby_sim.interactive_cli
+
+Lets you, from a terminal, without writing any code:
+- for each team, pick how it's built: **by nation** (pick a union or the
+  Barbarians - its whole real capped pool, for any season the data covers,
+  loads automatically and becomes the team) or **free pool** (mix any
+  pool(s)/season(s) yourself for a fantasy roster, e.g. a few Fiji players
+  dropped into an "England" side) - nothing stops you putting any player in
+  any position either way, that's the whole point of the project;
+- draft all 15 starting positions + a captain, one at a time, seeing the
+  fit rating for each candidate at that specific slot;
+- then either simulate a single match, a real tournament's actual fixture
+  list (Six Nations, Rugby Championship, ...), or a custom round-robin /
+  pool+knockout tournament - for however many teams you draft.
+- in "free pool" mode only, add `LEG` to mix in ~30 Hall of Fame legends
+  (Jonah Lomu, Richie McCaw, Dan Carter, Jonny Wilkinson, ...) spanning
+  different eras/nations - they're deliberately excluded from "by nation"
+  drafting and real tournaments, since they never played for a 2026 squad.
+"""
+
+from __future__ import annotations
+
+import sys
+from typing import Dict, List, Optional
+
+# Some real player names use characters outside Windows consoles' default
+# codepage (e.g. Namibian "!Gaoseb"'s click consonant) - never crash on
+# printing a real name, just best-effort transliterate what can't display.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except Exception:
+        pass
+
+from .data.legends import get_all_legends
+from .data.national_teams import POOLS
+from .data.sources.pool_builder import ALL_TEAM_IDS
+from .engine import MatchEngine
+from .models import Lineup, Player, Position, Team
+from .tournament import CustomTournament, Tournament, list_tournaments
+
+# Hall of Fame "legends" are deliberately NOT part of `POOLS` - they never
+# show up in "by nation" drafting or a real tournament's team list, only
+# here, as an extra option when mixing a free/custom-roster team.
+LEGENDS_CODE = "LEG"
+
+# code -> real nation name (e.g. "ENG" -> "England"), used to suggest/default
+# a code when a real fixture's team name already tells us which union it is.
+NATION_DISPLAY = {code: nation for code, (_, _, nation) in ALL_TEAM_IDS.items()}
+NATION_DISPLAY["BAR"] = "Barbarians"
+NATION_DISPLAY["HKG"] = "Hong Kong"
+NATION_DISPLAY["ZIM"] = "Zimbabwe"
+CODE_BY_NATION_NAME = {v: k for k, v in NATION_DISPLAY.items()}
+
+
+def _prompt(msg: str, default: Optional[str] = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    raw = input(f"{msg}{suffix}: ").strip()
+    return raw or (default or "")
+
+
+def _choose_index(prompt: str, options: List[str], allow_blank: bool = False) -> Optional[int]:
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}. {opt}")
+    while True:
+        raw = _prompt(prompt)
+        if allow_blank and not raw:
+            return None
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw) - 1
+        print("  (invalid choice, try again)")
+
+
+def _pull_pool(code: str, season: str) -> List[Player]:
+    print(f"  Pulling {code} {season} pool (first time may hit the network)...")
+    try:
+        pool = POOLS[code](season=season)
+    except TypeError:
+        pool = POOLS[code]()  # Barbarians ignores season but accepts it too
+    if not pool:
+        print(f"  No players found for {code} {season}.")
+    else:
+        print(f"  +{len(pool)} players added from {code} {season}.")
+    return pool
+
+
+def _pick_single_nation_pool(suggested_code: Optional[str] = None) -> tuple[List[Player], str]:
+    """Mode 1: pick exactly one union/Barbarians pool - the team is that
+    nation, nothing else gets mixed in. Picking the team *is* picking the
+    nation: its whole capped pool loads automatically."""
+    codes = sorted(POOLS.keys())
+    print("\nAvailable unions/pools:", ", ".join(f"{c} ({NATION_DISPLAY.get(c, c)})" for c in codes))
+    while True:
+        code = _prompt("Union/pool code", default=suggested_code).upper()
+        if code in POOLS:
+            break
+        print(f"  Unknown code '{code}'. Options: {', '.join(codes)}")
+    season = _prompt("Season", default="2026")
+    pool = _pull_pool(code, season)
+    return pool, code
+
+
+def _pick_pools_for_team() -> List[Player]:
+    """Mode 2: lets the user merge one or more union/Barbarians pools (any
+    season, any mix) into the pool of players available for one team - a
+    fully free "what if" roster, not tied to a single nation. This is also
+    the only place Hall of Fame legends (`LEG`) are selectable - add them
+    deliberately, they never come bundled into a nation's own pool."""
+    codes = sorted(POOLS.keys())
+    available: List[Player] = []
+    print(f"\nAvailable player pools: {', '.join(codes)}, {LEGENDS_CODE} (Hall of Fame legends)")
+    while True:
+        code = _prompt("Add a union/pool code (blank when done)").upper()
+        if not code:
+            break
+        if code == LEGENDS_CODE:
+            print("  Pulling the full Hall of Fame roster (first time may hit the "
+                  "network for ~190 pages - later calls are instant)...")
+            legends = get_all_legends()
+            print(f"  +{len(legends)} Hall of Fame legends added.")
+            available.extend(legends)
+            continue
+        if code not in POOLS:
+            print(f"  Unknown code '{code}'. Options: {', '.join(codes)}, {LEGENDS_CODE}")
+            continue
+        season = _prompt("  Season for this pool", default="2026")
+        available.extend(_pull_pool(code, season))
+    return available
+
+
+def _draft_lineup(available: List[Player]) -> Lineup:
+    lineup = Lineup()
+    remaining = list(available)
+
+    for pos in Position:
+        print(f"\n-- {pos.value} --")
+        ranked = sorted(remaining, key=lambda p: p.rating_at(pos), reverse=True)[:8]
+        if not ranked:
+            print("  (no players left in the pool - skipping this slot)")
+            continue
+        labels = [
+            f"{p.name} ({p.nation}{', ' + p.era if p.era else ''}) "
+            f"- fit {p.rating_at(pos)} (natural: {p.natural_position.value})"
+            for p in ranked
+        ]
+        labels.append("search by name instead")
+        idx = _choose_index(f"Pick for {pos.value} (number)", labels)
+        if idx is None:
+            continue
+        if idx == len(labels) - 1:
+            query = _prompt("  Name contains").lower()
+            matches = [p for p in remaining if query in p.name.lower()]
+            if not matches:
+                print("  No match, skipping this slot.")
+                continue
+            match_labels = [f"{p.name} ({p.nation}) - fit {p.rating_at(pos)}" for p in matches]
+            match_idx = _choose_index("  Pick one", match_labels)
+            if match_idx is None:
+                continue
+            chosen = matches[match_idx]
+        else:
+            chosen = ranked[idx]
+
+        lineup.set_starter(pos, chosen)
+        remaining = [p for p in remaining if p is not chosen]
+
+    if lineup.starters:
+        names = [slot.player.name for slot in lineup.starters.values()]
+        cap_idx = _choose_index("\nPick captain", names)
+        if cap_idx is not None:
+            lineup.captain = list(lineup.starters.values())[cap_idx].player
+
+    return lineup
+
+
+def _draft_team(fixed_label: Optional[str] = None, suggested_code_override: Optional[str] = None) -> Team:
+    """Drafts one team. Three modes, chosen up front:
+    1. By nation - pick one union/Barbarians pool; that nation's whole
+       capped pool loads automatically, and (unless `fixed_label` pins the
+       name, as for a real-tournament side) becomes the team's name too.
+    2. Free pool - mix any pool(s)/season(s) yourself for a fantasy roster.
+    3. Load from file - a squad previously saved with `save_team` (see
+       `rugby_sim/data/squad_repository.py`), e.g. from an earlier session.
+    """
+    header = fixed_label or "new team"
+    print(f"\n=== Drafting: {header} ===")
+
+    mode_options = [
+        "By nation - pick a union/Barbarians, its whole pool loads automatically",
+        "Free pool - mix any pools/seasons yourself (fantasy roster)",
+        "Load from a saved file",
+    ]
+    mode_idx = _choose_index("How do you want to build this team?", mode_options)
+
+    if mode_idx == 2:
+        from .data.squad_repository import load_team
+        path = _prompt("Path to the saved team JSON file")
+        try:
+            team = load_team(path)
+        except (FileNotFoundError, KeyError, ValueError) as e:
+            raise SystemExit(f"Could not load '{path}': {e}")
+        problems = team.lineup.validate()
+        if problems:
+            print(f"\nWarning - loaded lineup incomplete: {problems}")
+        print(f"Loaded '{team.name}' from {path}.")
+        return team
+
+    suggested_code = suggested_code_override or (CODE_BY_NATION_NAME.get(fixed_label) if fixed_label else None)
+    if mode_idx == 0:
+        available, code = _pick_single_nation_pool(suggested_code=suggested_code)
+        default_name = NATION_DISPLAY.get(code, code)
+    else:
+        available = _pick_pools_for_team()
+        default_name = fixed_label or "Team"
+
+    if not available:
+        raise SystemExit(f"No players available for {header}, aborting.")
+
+    name = fixed_label or _prompt("Team name", default=default_name)
+    if fixed_label:
+        print(f"Team name: {name} (fixed - matches the real fixture list)")
+
+    lineup = _draft_lineup(available)
+    problems = lineup.validate()
+    if problems:
+        print(f"\nWarning - lineup incomplete: {problems}")
+    team = Team(name=name, short_code=name[:3].upper(), lineup=lineup)
+
+    save_raw = _prompt("Save this team to a file for next time? (path, or blank to skip)")
+    if save_raw:
+        from .data.squad_repository import save_team
+        save_team(team, save_raw)
+        print(f"Saved to {save_raw}.")
+
+    return team
+
+
+def _run_single_match():
+    home = _draft_team()
+    away = _draft_team()
+    seed_raw = _prompt("Random seed (blank = random)")
+    seed = int(seed_raw) if seed_raw.isdigit() else None
+    result = MatchEngine(home, away, seed=seed).run()
+    result.print_report()
+
+
+WORLD_CUP_2027_LABEL = "rugby_world_cup_2027 (real pool draw, no fixtures exist yet)"
+
+
+def _ask_fixture_mode() -> str:
+    """Shared "specific vs random" prompt. "Specific" means a fixed,
+    deterministic order (the real draw's pool order for the 2027 World Cup;
+    the order you typed teams in for a custom tournament). "Random" shuffles
+    that order (per pool, for the World Cup; the whole team list, for a
+    custom tournament) before generating fixtures - same teams, different
+    match order each time you pick it (unless you also fix a seed)."""
+    options = [
+        "Specific (fixed/deterministic order)",
+        "Random (shuffle the order before generating fixtures)",
+    ]
+    idx = _choose_index("Fixture order", options)
+    return "specific" if idx == 0 else "random"
+
+
+def _run_real_tournament():
+    keys = list_tournaments() + [WORLD_CUP_2027_LABEL]
+    idx = _choose_index("Pick a real tournament", keys)
+    key = keys[idx]
+
+    if key == WORLD_CUP_2027_LABEL:
+        _run_world_cup_2027()
+        return
+
+    season = _prompt("Season", default="2026")
+    print(f"\nYou'll need a Team for every side that actually played in {key} {season}.")
+
+    from .tournament.real_fixtures import load_real_fixtures
+    fixtures = load_real_fixtures(key, season)
+    if not fixtures:
+        print("No fixtures found for that tournament/season.")
+        return
+    team_names = sorted({f.home for f in fixtures} | {f.away for f in fixtures})
+    print(f"Teams in this competition: {', '.join(team_names)}")
+
+    teams: Dict[str, Team] = {}
+    for name in team_names:
+        teams[name] = _draft_team(fixed_label=name)
+
+    seed_raw = _prompt("Random seed (blank = random)")
+    seed = int(seed_raw) if seed_raw.isdigit() else None
+    report = Tournament(teams).run_real(key, season=season, seed=seed)
+    report.print_report()
+
+
+def _run_world_cup_2027():
+    """The 2027 Rugby World Cup hasn't been played - World Rugby's real
+    pool draw (held 3 Dec 2025) is used, but since there's no fixture list
+    to replay, you choose whether pool play follows that draw's order
+    ("specific") or a shuffled one ("random") - see `world_cup_2027.py`."""
+    from .tournament import ALL_TEAMS_2027, CODE_BY_NATION, POOLS_2027
+
+    print("\n2027 Rugby World Cup - real pool draw:")
+    for pool_name, pool_teams in POOLS_2027.items():
+        print(f"  Pool {pool_name}: {', '.join(pool_teams)}")
+
+    fixture_mode = _ask_fixture_mode()
+
+    teams: Dict[str, Team] = {}
+    for name in ALL_TEAMS_2027:
+        teams[name] = _draft_team(fixed_label=name, suggested_code_override=CODE_BY_NATION.get(name))
+
+    seed_raw = _prompt("Random seed (blank = random)")
+    seed = int(seed_raw) if seed_raw.isdigit() else None
+    report = Tournament(teams).run_world_cup_2027(fixture_mode=fixture_mode, seed=seed)
+    report.print_report()
+
+
+def _run_custom_tournament():
+    n_raw = _prompt("How many teams", default="4")
+    n = int(n_raw) if n_raw.isdigit() else 4
+    teams: Dict[str, Team] = {}
+    for i in range(n):
+        team = _draft_team()
+        teams[team.name] = team
+
+    fixture_mode = _ask_fixture_mode()
+    if fixture_mode == "random":
+        import random
+        names = list(teams.keys())
+        random.shuffle(names)
+        teams = {name: teams[name] for name in names}
+
+    fmt_options = ["round_robin", "round_robin_home_away", "pool_knockout"]
+    fmt_idx = _choose_index("Pick a format", fmt_options)
+    fmt = fmt_options[fmt_idx]
+    pool_count = 2
+    if fmt == "pool_knockout":
+        pc_raw = _prompt("How many pools", default="2")
+        pool_count = int(pc_raw) if pc_raw.isdigit() else 2
+    seed_raw = _prompt("Random seed (blank = random)")
+    seed = int(seed_raw) if seed_raw.isdigit() else None
+
+    report = CustomTournament(teams, format=fmt).run(pool_count=pool_count, seed=seed)
+    report.print_report()
+
+
+def main():
+    print("=== What If Rugby Edition - interactive builder ===")
+    options = [
+        "Single match (friendly / test match)",
+        "Real tournament (actual fixture list, e.g. Six Nations)",
+        "Custom tournament (round-robin / pool+knockout)",
+    ]
+    idx = _choose_index("What do you want to simulate?", options)
+    if idx == 0:
+        _run_single_match()
+    elif idx == 1:
+        _run_real_tournament()
+    else:
+        _run_custom_tournament()
+
+
+if __name__ == "__main__":
+    main()
