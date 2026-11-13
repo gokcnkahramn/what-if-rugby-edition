@@ -41,7 +41,7 @@ from .tournament import (
     TournamentReport,
     list_tournaments,
 )
-from .tournament.real_fixtures import load_real_fixtures
+from .tournament.real_fixtures import TOURNAMENTS, load_real_fixtures
 
 app = Flask(__name__, static_folder=None)
 
@@ -697,6 +697,7 @@ def api_match_live_substitute(session_id: str):
 def api_tournament_options():
     return jsonify({
         "real_keys": list_tournaments(),
+        "real_key_names": {key: TOURNAMENTS[key].name for key in list_tournaments()},
         "world_cup_2027": {"teams": ALL_TEAMS_2027, "pools": POOLS_2027, "code_by_nation": CODE_BY_NATION},
         "strong_unions_fill_order": STRONG_UNIONS_FILL_ORDER,
         "default_season": DEFAULT_SEASON,

@@ -11,26 +11,44 @@
   <p>Click-driven squad builder. Pick a pool, click a position, click a player - no typing required.</p>
 </header>
 
-<div class="teams">
-  <div class="panel" id="panel-home"></div>
-  <div class="panel" id="panel-away"></div>
+<div class="breadcrumb" id="breadcrumb"></div>
+
+<div class="screen" id="screen-mode-select">
+  <div class="card-grid">
+    <button class="card" id="mode-friendly">
+      <span class="card-title">Friendly match</span>
+      <span class="card-desc">Build two teams yourself and run a single "what if" match.</span>
+    </button>
+    <button class="card" id="mode-tournament">
+      <span class="card-title">Tournament mode</span>
+      <span class="card-desc">Real fixtures, the 2027 World Cup draw, historical World Cups/Six
+        Nations, or a fully custom tournament - play your own matches, auto-sim the rest.</span>
+    </button>
+  </div>
 </div>
 
-<div class="match-controls">
-  <label class="muted">Seed (optional): <input type="number" id="seed" style="width:90px"></label>
-  <button id="run-match" disabled>Run match</button>
-  <label class="muted"><input type="checkbox" id="live-match-toggle"> Pause mid-match to make substitutions</label>
-  <span id="run-hint" class="muted"></span>
-  <span id="run-status" class="muted"></span>
+<div class="screen hidden" id="screen-friendly">
+  <div class="teams">
+    <div class="panel" id="panel-home"></div>
+    <div class="panel" id="panel-away"></div>
+  </div>
+
+  <div class="match-controls">
+    <label class="muted">Seed (optional): <input type="number" id="seed" style="width:90px"></label>
+    <button id="run-match" disabled>Run match</button>
+    <label class="muted"><input type="checkbox" id="live-match-toggle"> Pause mid-match to make substitutions</label>
+    <span id="run-hint" class="muted"></span>
+    <span id="run-status" class="muted"></span>
+  </div>
+
+  <div id="live-match-area"></div>
+
+  <div id="report"></div>
 </div>
 
-<div id="live-match-area"></div>
-
-<div id="report"></div>
-
-<hr style="border-color:#2a3d36; margin: 20px 24px;">
-
-<div id="tournament-section" style="padding: 0 24px 40px;"></div>
+<div class="screen hidden" id="screen-tournament">
+  <div id="tournament-section"></div>
+</div>
 
 <script src="app.js"></script>
 </body>

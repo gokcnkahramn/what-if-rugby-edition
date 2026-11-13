@@ -129,3 +129,64 @@ table.stats { border-collapse: collapse; margin-top: 12px; width: 100%; }
 table.stats th, table.stats td { border: 1px solid var(--border); padding: 6px 8px; font-size: 0.82rem; text-align: left; }
 
 .muted { color: var(--muted); font-size: 0.8rem; }
+
+/* ===== Screens / navigation (mode-select -> friendly|tournament -> ...) ===== */
+.screen { padding: 0 24px 40px; }
+.hidden { display: none !important; }
+
+.breadcrumb {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.85rem;
+}
+.breadcrumb .crumb {
+  background: none;
+  border: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 2px 0;
+  font: inherit;
+}
+.breadcrumb .crumb:last-child { color: var(--text); text-decoration: none; cursor: default; }
+.breadcrumb .sep { color: var(--border); }
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  margin: 16px 0;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.9rem;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.card .card-title { font-weight: 600; margin-bottom: 6px; display: block; }
+.card .card-desc { color: var(--muted); font-size: 0.78rem; display: block; }
+
+.collapsible-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-top: 14px;
+}
+.collapsible-header:hover { border-color: var(--accent); }
+.collapsible-body { padding: 10px 2px; }
+.collapsible-body.hidden { display: none !important; }
+.chevron { color: var(--muted); font-size: 0.8rem; }

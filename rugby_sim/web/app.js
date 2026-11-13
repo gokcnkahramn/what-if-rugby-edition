@@ -385,6 +385,68 @@ function updateRunButton() {
 
 let homeBuilder, awayBuilder;
 
+// ===================== Screen navigation (mode-select -> friendly|tournament) =====================
+// A tiny view-stack: each entry is {label, onClick} - onClick re-shows that
+// screen (and is what the breadcrumb button does). The page starts on
+// mode-select; friendly/tournament setup is deferred until the user
+// actually picks that mode, so nothing heavy (team builders, tournament
+// options fetch) runs before it's needed.
+let navStack = [];
+let friendlyInitialized = false;
+let tournamentInitialized = false;
+
+function renderBreadcrumb() {
+  const box = document.getElementById("breadcrumb");
+  box.innerHTML = navStack.map((entry, i) => {
+    const isLast = i === navStack.length - 1;
+    const sep = i > 0 ? `<span class="sep">/</span>` : "";
+    return `${sep}<button class="crumb" data-i="${i}" ${isLast ? "disabled" : ""}>${entry.label}</button>`;
+  }).join("");
+  box.querySelectorAll(".crumb").forEach(btn => {
+    btn.onclick = () => {
+      const i = parseInt(btn.dataset.i, 10);
+      navStack = navStack.slice(0, i + 1);
+      navStack[i].onShow();
+      renderBreadcrumb();
+    };
+  });
+}
+
+function showScreen(id) {
+  document.querySelectorAll(".screen").forEach(el => el.classList.add("hidden"));
+  document.getElementById(id).classList.remove("hidden");
+}
+
+function navTo(id, label, onShow) {
+  navStack.push({label, onShow});
+  onShow();
+  renderBreadcrumb();
+}
+
+function navReset() {
+  navStack = [];
+  navTo("screen-mode-select", "What If Rugby Edition", () => showScreen("screen-mode-select"));
+}
+
+async function enterFriendlyMode() {
+  navTo("screen-friendly", "Friendly match", () => showScreen("screen-friendly"));
+  if (friendlyInitialized) return;
+  friendlyInitialized = true;
+  homeBuilder = new TeamBuilder("home");
+  awayBuilder = new TeamBuilder("away");
+  updateRunButton();
+}
+
+async function enterTournamentMode() {
+  navTo("screen-tournament", "Tournament mode", () => {
+    showScreen("screen-tournament");
+    if (tournamentInitialized) renderTournamentTypePicker();
+  });
+  if (tournamentInitialized) return;
+  tournamentInitialized = true;
+  await setupTournamentUI();
+}
+
 async function boot() {
   POSITIONS = await api("/api/positions");
   UNIONS = await api("/api/unions");
@@ -395,10 +457,10 @@ async function boot() {
   } catch (e) {
     LOGOS = {}; NAME_TO_CODE = {}; // logos are a visual nicety, never block the app
   }
-  homeBuilder = new TeamBuilder("home");
-  awayBuilder = new TeamBuilder("away");
-  updateRunButton();
-  await setupTournamentUI();
+
+  navReset();
+  document.getElementById("mode-friendly").onclick = enterFriendlyMode;
+  document.getElementById("mode-tournament").onclick = enterTournamentMode;
 
   document.getElementById("run-match").onclick = async () => {
     const seedRaw = document.getElementById("seed").value;
@@ -436,25 +498,32 @@ async function startLiveMatch(homeTeamId, awayTeamId, seed) {
   renderLiveMatchState(state);
 }
 
-function liveLineupTable(side, lineup, bench) {
+// `allowSubsFor`: null/undefined = both sides can substitute (a single
+// friendly, where the user built both teams themselves); "home"/"away"
+// restricts the "Substitute..." control to just that side (an interactive
+// tournament fixture, where the opponent is an auto-drafted/CPU side the
+// user shouldn't get to make substitution calls for).
+function liveLineupTable(side, lineup, bench, allowSubs) {
   const rows = lineup.map(p => `
     <tr><td>${p.position}</td><td>${p.name}</td>
-    <td><button class="live-sub-btn" data-side="${side}" data-pos="${p.position}">Substitute...</button></td></tr>
+    <td>${allowSubs ? `<button class="live-sub-btn" data-side="${side}" data-pos="${p.position}">Substitute...</button>` : ""}</td></tr>
   `).join("");
   return `<table class="stats"><tr><th>Position</th><th>Player</th><th></th></tr>${rows}</table>
     <p class="muted">Bench: ${bench.map(p => p.name).join(", ") || "(none left)"}</p>`;
 }
 
-function renderLiveMatchState(state, onFinished, boxId) {
+function renderLiveMatchState(state, onFinished, boxId, allowSubsFor) {
   const box = document.getElementById(boxId || "live-match-area");
+  const homeSubsAllowed = allowSubsFor === undefined || allowSubsFor === null || allowSubsFor === "home";
+  const awaySubsAllowed = allowSubsFor === undefined || allowSubsFor === null || allowSubsFor === "away";
   const eventsHtml = state.events.map(e => `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`).join("");
   box.innerHTML = `
     <h3>Live match - paused at ${state.minute}'</h3>
     <div id="scoreline">${state.scoreline}</div>
     <div id="events">${eventsHtml}</div>
     <div class="row">
-      <div style="flex:1"><h4>${state.home.name}</h4>${liveLineupTable("home", state.home.lineup, state.home.bench)}</div>
-      <div style="flex:1"><h4>${state.away.name}</h4>${liveLineupTable("away", state.away.lineup, state.away.bench)}</div>
+      <div style="flex:1"><h4>${state.home.name}</h4>${liveLineupTable("home", state.home.lineup, state.home.bench, homeSubsAllowed)}</div>
+      <div style="flex:1"><h4>${state.away.name}</h4>${liveLineupTable("away", state.away.lineup, state.away.bench, awaySubsAllowed)}</div>
     </div>
     <div class="row">
       <button id="live-continue">${state.finished ? "Match finished" : "Resume play"}</button>
@@ -463,7 +532,7 @@ function renderLiveMatchState(state, onFinished, boxId) {
     <div id="live-sub-picker"></div>`;
 
   box.querySelectorAll(".live-sub-btn").forEach(btn => {
-    btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished);
+    btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor);
   });
 
   const continueBtn = document.getElementById("live-continue");
@@ -482,14 +551,14 @@ function renderLiveMatchState(state, onFinished, boxId) {
       const next = await api(`/api/match/live/${state.session_id}/continue`, {
         method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
       });
-      renderLiveMatchState(next, onFinished, boxId);
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor);
     } catch (e) {
       status.textContent = "Error: " + e.message;
     }
   };
 }
 
-function renderLiveSubPicker(state, side, position, boxId, onFinished) {
+function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor) {
   const picker = document.getElementById("live-sub-picker");
   const bench = state[side].bench;
   if (!bench.length) {
@@ -508,7 +577,7 @@ function renderLiveSubPicker(state, side, position, boxId, onFinished) {
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({team: side, position, bench_player_id: parseInt(btn.dataset.id, 10)}),
         });
-        renderLiveMatchState(next, onFinished, boxId);
+        renderLiveMatchState(next, onFinished, boxId, allowSubsFor);
       } catch (e) {
         alert("Could not make that substitution: " + e.message);
       }
@@ -591,32 +660,66 @@ let squadModeEnabled = false; // "fresh squad every match" toggle, see setupTour
 // name -> TeamBuilder (fixed-lineup mode) | {teamId, name} | {squadPlayerIds, name} (squad mode)
 const tournamentBuilders = {};
 
+const TOURNAMENT_TYPE_CARDS = [
+  {ttype: "real", title: "Real fixture replay", desc: "Replay the actual fixture list for a real competition (Six Nations, Rugby Championship, Autumn Nations Series) and season."},
+  {ttype: "wc2027", title: "2027 Rugby World Cup", desc: "24 teams, the real pool draw - play it out before it's happened for real."},
+  {ttype: "historical", title: "Historical Rugby World Cup", desc: "Every real edition, 1995-2023, with that year's real squads."},
+  {ttype: "historical_sn", title: "Historical Six Nations", desc: "2009-2021, with that year's real squads."},
+  {ttype: "custom", title: "Custom tournament", desc: "Pick any teams yourself - round robin, home & away, or pool + knockout."},
+];
+
 async function setupTournamentUI() {
   tournamentOptions = await api("/api/tournament/options");
+  renderTournamentTypePicker();
+}
+
+function renderTournamentTypePicker() {
   const container = document.getElementById("tournament-section");
   container.innerHTML = `
     <h2>Tournament mode</h2>
     <div class="row">
-      <button data-ttype="real">Real fixture replay</button>
-      <button data-ttype="wc2027">2027 Rugby World Cup (real draw)</button>
-      <button data-ttype="historical">Historical Rugby World Cup (1995-2023)</button>
-      <button data-ttype="historical_sn">Historical Six Nations (2009-2021)</button>
-      <button data-ttype="custom">Custom tournament</button>
-    </div>
-    <div class="row">
-      <label class="muted"><input type="checkbox" id="squad-mode-toggle"> Fresh squad every match
+      <label class="muted"><input type="checkbox" id="squad-mode-toggle" ${squadModeEnabled ? "checked" : ""}> Fresh squad every match
         (auto-draft a new best XV before each match from each team's full pool - an injury/red
         card sidelines that player for the team's next match, instead of one fixed lineup for the
         whole tournament)</label>
     </div>
+    <div class="card-grid" id="tournament-type-cards"></div>
     <div id="tournament-config"></div>
     <div id="tournament-teams"></div>
     <div id="tournament-run-area"></div>
     <div id="tournament-report"></div>`;
   document.getElementById("squad-mode-toggle").onchange = (e) => { squadModeEnabled = e.target.checked; };
-  container.querySelectorAll("[data-ttype]").forEach(btn => {
-    btn.onclick = () => renderTournamentConfig(btn.dataset.ttype);
+  const cardsBox = document.getElementById("tournament-type-cards");
+  cardsBox.innerHTML = TOURNAMENT_TYPE_CARDS.map(c => `
+    <button class="card" data-ttype="${c.ttype}">
+      <span class="card-title">${c.title}</span>
+      <span class="card-desc">${c.desc}</span>
+    </button>`).join("");
+  cardsBox.querySelectorAll("[data-ttype]").forEach(btn => {
+    btn.onclick = () => {
+      const chosen = TOURNAMENT_TYPE_CARDS.find(c => c.ttype === btn.dataset.ttype);
+      navTo("tournament-type-" + chosen.ttype, chosen.title, () => {
+        showScreen("screen-tournament");
+        renderTournamentTypeScreen(chosen.ttype);
+      });
+    };
   });
+}
+
+function renderTournamentTypeScreen(ttype) {
+  const container = document.getElementById("tournament-section");
+  container.innerHTML = `
+    <div class="row"><button id="tournament-back-to-types">&laquo; Choose a different tournament type</button></div>
+    <div id="tournament-config"></div>
+    <div id="tournament-teams"></div>
+    <div id="tournament-run-area"></div>
+    <div id="tournament-report"></div>`;
+  document.getElementById("tournament-back-to-types").onclick = () => {
+    navStack.pop();
+    navStack[navStack.length - 1].onShow();
+    renderBreadcrumb();
+  };
+  renderTournamentConfig(ttype);
 }
 
 function renderTournamentConfig(ttype) {
@@ -627,29 +730,36 @@ function renderTournamentConfig(ttype) {
 
   if (ttype === "real") {
     cfg.innerHTML = `
+      <p class="muted">Pick a competition and season, then pick which team(s)
+      you want to draft yourself - every other team auto-drafts its own real
+      pool's best XV, so you don't have to build all of them.</p>
       <div class="row">
-        <select id="t-real-key">${tournamentOptions.real_keys.map(k => `<option value="${k}">${k}</option>`).join("")}</select>
-        <input type="text" id="t-real-season" value="${tournamentOptions.default_season}" style="width:70px" placeholder="season">
-        <button id="t-real-load">Load teams</button>
-        <span class="muted" id="t-real-status"></span>
+        <label class="muted">Season: ${seasonSelectHtml("t-real-season", tournamentOptions.default_season)}</label>
       </div>
-      <p class="muted">Pick which team(s) you want to draft yourself - every other
-      team auto-drafts its own real pool's best XV, so you don't have to build all of them.</p>`;
-    document.getElementById("t-real-load").onclick = async () => {
-      const key = document.getElementById("t-real-key").value;
-      const season = document.getElementById("t-real-season").value || tournamentOptions.default_season;
-      const status = document.getElementById("t-real-status");
-      status.textContent = "loading fixture list...";
-      try {
-        const res = await api(`/api/tournament/real/teams?key=${encodeURIComponent(key)}&season=${encodeURIComponent(season)}`);
-        status.textContent = `${res.teams.length} teams in this competition.`;
-        const entries = res.teams.map(name => ({name, code: res.code_by_nation[name], season}));
-        buildTournamentTeamPanels(entries);
-        renderTournamentRunArea({type: "real", key, season});
-      } catch (e) {
-        status.textContent = "Error: " + e.message;
-      }
-    };
+      <div class="card-grid" id="t-real-cards"></div>
+      <span class="muted" id="t-real-status"></span>`;
+    const cardsBox = document.getElementById("t-real-cards");
+    cardsBox.innerHTML = tournamentOptions.real_keys.map(key => `
+      <button class="card" data-key="${key}">
+        <span class="card-title">${(tournamentOptions.real_key_names || {})[key] || key}</span>
+      </button>`).join("");
+    cardsBox.querySelectorAll("[data-key]").forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.dataset.key;
+        const season = document.getElementById("t-real-season").value || tournamentOptions.default_season;
+        const status = document.getElementById("t-real-status");
+        status.textContent = "loading fixture list...";
+        try {
+          const res = await api(`/api/tournament/real/teams?key=${encodeURIComponent(key)}&season=${encodeURIComponent(season)}`);
+          status.textContent = `${res.teams.length} teams in this competition.`;
+          const entries = res.teams.map(name => ({name, code: res.code_by_nation[name], season}));
+          buildTournamentTeamPanels(entries);
+          renderTournamentRunArea({type: "real", key, season});
+        } catch (e) {
+          status.textContent = "Error: " + e.message;
+        }
+      };
+    });
   } else if (ttype === "wc2027") {
     cfg.innerHTML = `<p class="muted">24 teams, 6 real pools (see README). Pick which team(s)
       you want to draft yourself - the rest auto-draft their own real 2026 pool's best XV.</p>
@@ -1072,13 +1182,14 @@ function renderTournamentRunArea(params) {
       status.textContent = e.message;
       return;
     }
-    body.my_team = document.getElementById("t-my-team").value || null;
+    const myTeam = document.getElementById("t-my-team").value || null;
+    body.my_team = myTeam;
     status.textContent = "starting tournament...";
     try {
       const state = await api("/api/tournament/start", {
         method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
       });
-      handleTournamentSessionState(state, status);
+      handleTournamentSessionState(state, status, myTeam);
     } catch (e) {
       status.textContent = "Error: " + e.message;
     }
@@ -1091,6 +1202,29 @@ function renderTournamentRunArea(params) {
 // tournament once that match is finished, and keeps doing so - fully
 // auto-simming everyone else's matches in between, invisibly, on the
 // server - until the session reports "finished" (or "error").
+// A collapsible section: starts collapsed (`open` false) unless noted
+// otherwise, clicking the header toggles it - so a long-running tournament's
+// standings/results don't all dump on screen at once.
+function collapsibleHtml(id, title, bodyHtml, open) {
+  return `
+    <div class="collapsible-header" data-collapsible="${id}">
+      <span>${title}</span><span class="chevron" data-chevron="${id}">${open ? "▾" : "▸"}</span>
+    </div>
+    <div class="collapsible-body ${open ? "" : "hidden"}" id="collapsible-body-${id}">${bodyHtml}</div>`;
+}
+
+function wireCollapsibles(box) {
+  box.querySelectorAll("[data-collapsible]").forEach(header => {
+    header.onclick = () => {
+      const id = header.dataset.collapsible;
+      const body = document.getElementById(`collapsible-body-${id}`);
+      const chevron = box.querySelector(`[data-chevron="${id}"]`);
+      const nowOpen = body.classList.toggle("hidden") === false;
+      if (chevron) chevron.textContent = nowOpen ? "▾" : "▸";
+    };
+  });
+}
+
 function renderTournamentProgress(resultsSoFar, progress) {
   const box = document.getElementById("tournament-progress");
   if (!box) return;
@@ -1101,25 +1235,28 @@ function renderTournamentProgress(resultsSoFar, progress) {
     html += `<h4>Current stage: ${progress.stage}</h4>`;
   }
   if (progress && progress.standings) {
-    html += `<p class="muted">Current standings:</p>${standingsTable(progress.standings)}`;
+    html += collapsibleHtml("standings", "Current standings", standingsTable(progress.standings), true);
   }
   if (progress && progress.pools) {
-    html += Object.entries(progress.pools).map(([name, rows]) =>
+    const poolsHtml = Object.entries(progress.pools).map(([name, rows]) =>
       `<p class="muted">${name}:</p>${standingsTable(rows)}`).join("");
+    html += collapsibleHtml("pools", "Current pool standings", poolsHtml, true);
   }
   if (progress && progress.bracket && progress.bracket.length) {
-    html += progress.bracket.map(rnd => `
+    const bracketHtml = progress.bracket.map(rnd => `
       <p class="muted">${rnd.stage}:</p>
       ${rnd.matches.map(m => `<div>${m.home} ${matchLink(m)} ${m.away}</div>`).join("")}
     `).join("");
+    html += collapsibleHtml("bracket", "Knockout bracket so far", bracketHtml, true);
   }
   if (resultsSoFar && resultsSoFar.length) {
     const rows = resultsSoFar.map(m => `<tr><td>${m.home}</td><td>${matchLink(m)}</td><td>${m.away}</td></tr>`).join("");
-    html += `<h4>Results so far (${resultsSoFar.length})</h4>
-      <table class="stats"><tr><th>Home</th><th>Score</th><th>Away</th></tr>${rows}</table>`;
+    const resultsHtml = `<table class="stats"><tr><th>Home</th><th>Score</th><th>Away</th></tr>${rows}</table>`;
+    html += collapsibleHtml("results", `Results so far (${resultsSoFar.length})`, resultsHtml, false);
   }
   html += `<div id="tournament-match-detail-live"></div>`;
   box.innerHTML = html;
+  wireCollapsibles(box);
   box.querySelectorAll(".match-link").forEach(btn => {
     btn.onclick = () => showMatchDetail(btn.dataset.matchId, "tournament-match-detail-live");
   });
@@ -1135,7 +1272,7 @@ function renderTournamentProgress(resultsSoFar, progress) {
 // until the session reports "finished" (or "error"). `results_so_far`
 // (every fixture resolved up to this point, mine and auto-simmed alike) is
 // re-rendered into a persistent, always-visible feed on every state update.
-function handleTournamentSessionState(state, status) {
+function handleTournamentSessionState(state, status, myTeam) {
   const liveArea = document.getElementById("tournament-live-area");
   const banner = document.getElementById("tournament-stage-banner");
   renderTournamentProgress(state.results_so_far, state.progress);
@@ -1152,6 +1289,10 @@ function handleTournamentSessionState(state, status) {
     return;
   }
   // paused: it's my_team's turn - play it out with the normal live-match UI.
+  // Only my_team's own side gets a "Substitute..." control here - the
+  // opponent is whichever auto-drafted/CPU side the tournament is
+  // simulating, the user shouldn't be able to make their decisions for them.
+  const mySide = myTeam === state.home ? "home" : myTeam === state.away ? "away" : null;
   const stageLabel = state.progress && state.progress.stage ? state.progress.stage : "this fixture";
   if (banner) {
     banner.innerHTML = `<h3>Now playing: ${stageLabel} - ${state.home} v ${state.away}</h3>`;
@@ -1169,12 +1310,12 @@ function handleTournamentSessionState(state, status) {
       status.textContent = "continuing tournament...";
       try {
         const next = await api(`/api/tournament/${state.session_id}/resume`, {method: "POST"});
-        handleTournamentSessionState(next, status);
+        handleTournamentSessionState(next, status, myTeam);
       } catch (e) {
         status.textContent = "Error: " + e.message;
       }
     };
-  }, "tournament-live-area");
+  }, "tournament-live-area", mySide);
 }
 
 function standingsTable(rows) {
@@ -1232,34 +1373,8 @@ function matchLink(m) {
 function renderTournamentReport(report) {
   const box = document.getElementById("tournament-report");
   let html = `<h3>${report.name}</h3><div id="tournament-match-detail"></div>`;
-  if (report.pools) {
-    for (const [poolName, rows] of Object.entries(report.pools)) {
-      html += `<h4>${poolName}</h4>${standingsTable(rows)}`;
-    }
-  }
-  if (report.standings) {
-    html += standingsTable(report.standings);
-  }
-  if (report.bracket && report.bracket.length) {
-    for (const rnd of report.bracket) {
-      html += `<h4>${rnd.stage}</h4>` + rnd.matches.map(m => `<div>${matchLink(m)}</div>`).join("");
-    }
-  }
   if (report.champion) {
     html += `<p><strong>Champion: ${logoImgHtml(report.champion, 22)}${report.champion}</strong></p>`;
-  }
-  if (report.team_stats && report.team_stats.length) {
-    html += `<h4>Team tournament stats</h4>${teamTournamentStatsTable(report.team_stats)}`;
-  }
-  if (report.top_scorers && report.top_scorers.length) {
-    html += `<h4>Tournament top scorers</h4>${playerTournamentStatsTable(report.top_scorers, false)}`;
-  }
-  if (report.team_of_tournament && report.team_of_tournament.length) {
-    html += `<h4>Team of the Tournament</h4>` +
-      `<p class="muted">Best average performance per starting slot across every match played -
-      quality at the position they started in, plus a bonus for whatever they personally scored
-      that match (see README: this is a heuristic, the engine doesn't track per-player
-      tackles/metres).</p>${playerTournamentStatsTable(report.team_of_tournament, true)}`;
   }
   if (report.player_of_tournament) {
     const p = report.player_of_tournament;
@@ -1267,10 +1382,37 @@ function renderTournamentReport(report) {
       `(${p.team}, ${p.position || ""}) - avg performance ${p.average_performance} over ${p.matches_started} starts` +
       (p.played_late_stage ? " (played in the semi-final/final)" : "") + `</p>`;
   }
-  html += `<h4>All results (click any match for the full simulation)</h4>`
-    + report.results.map(r => `<div>${matchLink(r)}</div>`).join("");
+  if (report.pools) {
+    const poolsHtml = Object.entries(report.pools).map(([poolName, rows]) =>
+      `<h4>${poolName}</h4>${standingsTable(rows)}`).join("");
+    html += collapsibleHtml("final-pools", "Final pool standings", poolsHtml, false);
+  }
+  if (report.standings) {
+    html += collapsibleHtml("final-standings", "Final standings", standingsTable(report.standings), true);
+  }
+  if (report.bracket && report.bracket.length) {
+    const bracketHtml = report.bracket.map(rnd =>
+      `<h4>${rnd.stage}</h4>` + rnd.matches.map(m => `<div>${matchLink(m)}</div>`).join("")).join("");
+    html += collapsibleHtml("final-bracket", "Knockout bracket", bracketHtml, false);
+  }
+  if (report.team_stats && report.team_stats.length) {
+    html += collapsibleHtml("final-team-stats", "Team tournament stats", teamTournamentStatsTable(report.team_stats), false);
+  }
+  if (report.top_scorers && report.top_scorers.length) {
+    html += collapsibleHtml("final-top-scorers", "Tournament top scorers", playerTournamentStatsTable(report.top_scorers, false), false);
+  }
+  if (report.team_of_tournament && report.team_of_tournament.length) {
+    const totHtml = `<p class="muted">Best average performance per starting slot across every match played -
+      quality at the position they started in, plus a bonus for whatever they personally scored
+      that match (see README: this is a heuristic, the engine doesn't track per-player
+      tackles/metres).</p>${playerTournamentStatsTable(report.team_of_tournament, true)}`;
+    html += collapsibleHtml("final-team-of-tournament", "Team of the Tournament", totHtml, false);
+  }
+  const resultsHtml = report.results.map(r => `<div>${matchLink(r)}</div>`).join("");
+  html += collapsibleHtml("final-all-results", "All results (click any match for the full simulation)", resultsHtml, false);
   const snapshotHtml = html; // captured before the match-detail div fills in and before the button itself
   box.innerHTML = html + snapshotButtonHtml("tournament-snapshot-btn");
+  wireCollapsibles(box);
   document.getElementById("tournament-snapshot-btn").onclick = () => {
     downloadHtmlSnapshot(report.name, snapshotHtml, report.name);
   };
