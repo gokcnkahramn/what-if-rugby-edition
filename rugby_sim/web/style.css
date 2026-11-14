@@ -154,8 +154,12 @@ select, input[type=text], input[type=number] {
 
 #report { padding: 0 24px 40px; }
 #scoreline { font-size: 1.4rem; margin: 10px 0; }
-#events { max-height: 400px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 0.85rem; }
-#events div { padding: 2px 0; }
+#events, .events { max-height: 400px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 0.85rem; }
+#events div, .events div { padding: 2px 0; }
+.sort-toggle { font-size: 0.8rem; }
+.depth-chart { display: flex; flex-wrap: wrap; gap: 6px; }
+.depth-slot { min-width: 160px; text-align: left; cursor: default; }
+.depth-entry { font-size: 0.78rem; }
 
 table.stats { border-collapse: collapse; margin-top: 12px; width: 100%; }
 table.stats th, table.stats td { border: 1px solid var(--border); padding: 6px 8px; font-size: 0.82rem; text-align: left; }

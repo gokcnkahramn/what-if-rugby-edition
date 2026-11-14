@@ -38,11 +38,18 @@
 
 <div class="screen hidden" id="screen-draft-pool">
   <h2>Draft mode - build the shared pool</h2>
-  <p class="muted">Click unions to merge their pools together, optionally include the Legends
+  <p class="muted">Add any number of union + season combinations (e.g. "Ireland 2026" AND
+    "Ireland 2025" at once - every real player across both seasons joins the shared pool, no
+    duplicates even if the same person appears in both), optionally include the Legends
     (Hall of Fame) roster, then start the draft. Both sides will pick from this exact combined pool.</p>
-  <div class="row muted">Season: <span id="draft-season-area"></span></div>
-  <div class="row" id="draft-union-list"></div>
+  <div class="row" id="draft-union-area"></div>
+  <div class="row muted" id="draft-union-list"></div>
   <div class="row"><label><input type="checkbox" id="draft-include-legends"> Include Legends (Hall of Fame)</label></div>
+  <p class="muted">Mix in one or more real historical squads (World Cup or Six Nations) too - same
+    picker as a normal team's "Historical squad" mode, just adding into the shared draft pool
+    instead of one team's own pool:</p>
+  <div class="row" id="draft-historical-area"></div>
+  <div class="row muted" id="draft-historical-list"></div>
   <div class="row">
     <span class="muted" id="draft-pool-status">0 players in the shared pool.</span>
   </div>
@@ -82,9 +89,11 @@
   <div class="match-controls">
     <label class="muted">Seed (optional): <input type="number" id="draft-match-seed" style="width:90px"></label>
     <button id="draft-run-match" disabled>Run match</button>
+    <label class="muted"><input type="checkbox" id="draft-live-match-toggle"> Pause mid-match to make substitutions</label>
     <span id="draft-run-hint" class="muted"></span>
     <span id="draft-run-status" class="muted"></span>
   </div>
+  <div id="draft-live-match-area"></div>
   <div id="draft-report"></div>
 </div>
 

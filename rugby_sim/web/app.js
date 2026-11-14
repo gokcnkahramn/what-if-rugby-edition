@@ -30,6 +30,50 @@ function seasonSelectHtml(id, selected) {
     `</select>`;
 }
 
+// Merges a freshly-loaded pool of players into an existing one, by real-
+// person identity rather than object identity - loading the same union (or
+// an overlapping historical squad) twice would otherwise add the exact same
+// real player as two separate entries (each a distinct Player object/id
+// server-side, since every `/api/pool/<code>`/historical-squad call builds
+// fresh objects), showing up as a literal duplicate pick in any list. Keyed
+// by name - same convention `build_union_pool` already uses server-side
+// (see README) for the equivalent problem within one union's own pool.
+function mergeUniquePlayers(existingPool, newPlayers) {
+  const seen = new Set(existingPool.map(p => p.name));
+  const added = newPlayers.filter(p => !seen.has(p.name));
+  return existingPool.concat(added);
+}
+
+// ===================== Shared "sort by rating" control =====================
+// One helper + one small toggle button, reused everywhere a list of
+// players is shown for picking (TeamBuilder's candidate list and bench,
+// the live match's bench, draft mode's remaining pool and protect/poach
+// selects) instead of five separate ad-hoc sorts - see README.
+function sortPlayersByRating(players, direction, field) {
+  field = field || "fit";
+  const sorted = players.slice().sort((a, b) => (a[field] || 0) - (b[field] || 0));
+  if (direction === "desc") sorted.reverse();
+  return sorted;
+}
+
+// Renders a tiny "Sort: Rating v/^" toggle button. `getDir`/`setDir` read
+// and write wherever the caller is keeping its current direction (a plain
+// variable, or a field on some state object) - `onChange` just re-renders.
+function sortToggleHtml(id) {
+  return `<button class="sort-toggle" id="${id}" type="button"></button>`;
+}
+function wireSortToggle(id, getDir, setDir, onChange) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  const paint = () => { btn.textContent = `Sort: Rating ${getDir() === "desc" ? "↓ high-to-low" : "↑ low-to-high"}`; };
+  paint();
+  btn.onclick = () => {
+    setDir(getDir() === "desc" ? "asc" : "desc");
+    paint();
+    onChange();
+  };
+}
+
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const data = await res.json();
@@ -159,7 +203,7 @@ class TeamBuilder {
           const status = document.getElementById(`${this.side}-load-status`);
           status.textContent = "loading...";
           const players = await api(`/api/pool/${btn.dataset.code}?season=${encodeURIComponent(season)}`);
-          this.pool = this.pool.concat(players);
+          this.pool = mergeUniquePlayers(this.pool, players);
           btn.classList.add("active");
           status.textContent = `${this.pool.length} players in the mix.`;
         };
@@ -222,7 +266,7 @@ class TeamBuilder {
       document.getElementById(`${this.side}-hist-add`).onclick = () => {
         if (!yearData) return;
         const squad = yearData.squads[teamSel.value] || [];
-        this.pool = this.pool.concat(squad);
+        this.pool = mergeUniquePlayers(this.pool, squad);
         status.textContent = `${this.pool.length} players in the mix.`;
       };
       loadYears();
@@ -262,13 +306,23 @@ class TeamBuilder {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({player_ids: available.map(p => p.id), position: pos}),
     });
+    this._candidateSortDir = this._candidateSortDir || "desc";
+    this._lastRanked = ranked;
+    this._renderCandidateList(pos);
+  }
+
+  _renderCandidateList(pos) {
+    const ranked = sortPlayersByRating(this._lastRanked, this._candidateSortDir, "fit");
     const box = document.getElementById(`${this.side}-candidates`);
-    box.innerHTML = `<div class="muted">Top candidates for ${pos} (click to assign):</div>` +
+    box.innerHTML = `<div class="row"><div class="muted">Top candidates for ${pos} (click to assign):</div>${sortToggleHtml(`${this.side}-candidates-sort`)}</div>` +
       ranked.slice(0, 15).map(p => `
         <div class="candidate" data-id="${p.id}">
           <span>${p.name} (${p.nation}${p.era ? ", " + p.era : ""}) - natural: ${p.natural_position}</span>
           <span class="fit">${p.fit.toFixed(1)}</span>
         </div>`).join("");
+    wireSortToggle(`${this.side}-candidates-sort`,
+      () => this._candidateSortDir, (d) => { this._candidateSortDir = d; },
+      () => this._renderCandidateList(pos));
     box.querySelectorAll(".candidate").forEach(row => {
       row.onclick = () => {
         this.slots[pos] = parseInt(row.dataset.id, 10);
@@ -289,7 +343,9 @@ class TeamBuilder {
       return;
     }
     const starterIds = new Set(Object.values(this.slots));
-    const benchCandidates = this.pool.filter(p => !starterIds.has(p.id));
+    this._benchSortDir = this._benchSortDir || "desc";
+    const benchCandidates = sortPlayersByRating(
+      this.pool.filter(p => !starterIds.has(p.id)), this._benchSortDir, "natural_fit");
     box.innerHTML = `
       <div class="row">
         <label class="muted">Captain:
@@ -301,10 +357,10 @@ class TeamBuilder {
           </select>
         </label>
       </div>
-      <div class="muted">Bench (optional, click up to 8):</div>
+      <div class="row"><div class="muted">Bench (optional, click up to 8, sorted by natural-position rating):</div>${sortToggleHtml(`${this.side}-bench-sort`)}</div>
       <div class="row" id="${this.side}-bench-list">
         ${benchCandidates.slice(0, 40).map(p =>
-          `<button data-id="${p.id}" class="${this.bench.has(p.id) ? "active" : ""}">${p.name}</button>`
+          `<button data-id="${p.id}" class="${this.bench.has(p.id) ? "active" : ""}">${p.name} (${p.natural_fit.toFixed(1)})</button>`
         ).join("")}
       </div>
       <div class="row">
@@ -324,6 +380,9 @@ class TeamBuilder {
         URL.revokeObjectURL(url);
       };
     }
+    wireSortToggle(`${this.side}-bench-sort`,
+      () => this._benchSortDir, (d) => { this._benchSortDir = d; },
+      () => this.renderFinish());
     document.getElementById(`${this.side}-bench-list`).querySelectorAll("button").forEach(btn => {
       // Toggle in place rather than calling renderFinish() again - a full
       // re-render would wipe the captain <select>'s current choice and any
@@ -514,7 +573,7 @@ async function boot() {
     try {
       if (isLive) {
         document.getElementById("report").innerHTML = "";
-        await startLiveMatch(homeBuilder.teamId, awayBuilder.teamId, seed);
+        await startLiveMatch(homeBuilder.teamId, awayBuilder.teamId, seed, "live-match-area", null);
         status.textContent = "";
       } else {
         document.getElementById("live-match-area").innerHTML = "";
@@ -533,12 +592,12 @@ async function boot() {
 
 // ===================== Live (pausable) single match =====================
 
-async function startLiveMatch(homeTeamId, awayTeamId, seed) {
+async function startLiveMatch(homeTeamId, awayTeamId, seed, boxId, allowSubsFor, reportTargetId) {
   const state = await api("/api/match/live/start", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({home_team_id: homeTeamId, away_team_id: awayTeamId, seed}),
   });
-  renderLiveMatchState(state);
+  renderLiveMatchState(state, undefined, boxId, allowSubsFor, reportTargetId);
 }
 
 // `allowSubsFor`: null/undefined = both sides can substitute (a single
@@ -546,47 +605,89 @@ async function startLiveMatch(homeTeamId, awayTeamId, seed) {
 // restricts the "Substitute..." control to just that side (an interactive
 // tournament fixture, where the opponent is an auto-drafted/CPU side the
 // user shouldn't get to make substitution calls for).
+let liveBenchSortDir = "desc";
+
 function liveLineupTable(side, lineup, bench, allowSubs) {
   const rows = lineup.map(p => `
     <tr><td>${p.position}</td><td>${p.name}</td>
     <td>${allowSubs ? `<button class="live-sub-btn" data-side="${side}" data-pos="${p.position}">Substitute...</button>` : ""}</td></tr>
   `).join("");
+  const sortedBench = sortPlayersByRating(bench, liveBenchSortDir, "natural_fit");
+  const benchText = sortedBench.map(p => `${p.name} (${p.natural_fit.toFixed(1)})`).join(", ") || "(none left)";
   return `<table class="stats"><tr><th>Position</th><th>Player</th><th></th></tr>${rows}</table>
-    <p class="muted">Bench: ${bench.map(p => p.name).join(", ") || "(none left)"}</p>`;
+    <p class="muted">Bench (by natural-position rating): ${benchText}</p>`;
 }
 
-function renderLiveMatchState(state, onFinished, boxId, allowSubsFor) {
-  const box = document.getElementById(boxId || "live-match-area");
+// `liveRevealProgress`: boxId -> {sessionId, shown} - how many of this
+// session's events were already fully shown as of the LAST render, so a
+// fresh render (after a continue/substitute) only paces the reveal of
+// events that arrived since then, instead of re-revealing the whole list
+// from scratch every time (the live state response always contains every
+// event up to the current pause point, not just new ones).
+const liveRevealProgress = {};
+
+function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId) {
+  const boxKey = boxId || "live-match-area";
+  const box = document.getElementById(boxKey);
+
+  // Once the match is actually over, don't render any of the mid-match live
+  // UI at all - no lineup/"Substitute..." tables (there's nothing left to
+  // substitute for), no partial "paused at X'" event log, no Resume/skip
+  // buttons. Rendering those alongside the final report used to show the
+  // match twice: the live view's own last chunk of events in one box, and
+  // the full final report's complete event list in another, right below
+  // it. Now this box is cleared and the one full report is the only thing
+  // shown, in every mode (friendly, tournament, draft) that uses this
+  // function - they all funnel through here.
+  if (state.finished) {
+    box.innerHTML = "";
+    if (state.result) {
+      renderReport(state.result, reportTargetId);
+    }
+    if (onFinished) onFinished(state);
+    return;
+  }
+
   const homeSubsAllowed = allowSubsFor === undefined || allowSubsFor === null || allowSubsFor === "home";
   const awaySubsAllowed = allowSubsFor === undefined || allowSubsFor === null || allowSubsFor === "away";
-  const eventsHtml = state.events.map(e => `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`).join("");
+
+  if (!liveRevealProgress[boxKey] || liveRevealProgress[boxKey].sessionId !== state.session_id) {
+    liveRevealProgress[boxKey] = {sessionId: state.session_id, shown: 0};
+  }
+  const startAt = Math.min(liveRevealProgress[boxKey].shown, state.events.length);
+  const playbackId = `${boxKey}-live-playback`;
+
   box.innerHTML = `
     <h3>Live match - paused at ${state.minute}'</h3>
     <div id="scoreline">${state.scoreline}</div>
-    <div id="events">${eventsHtml}</div>
+    ${playbackControlsHtml(playbackId, false)}
+    <div id="${playbackId}-events" class="events"></div>
     <div class="row">
       <div style="flex:1"><h4>${state.home.name}</h4>${liveLineupTable("home", state.home.lineup, state.home.bench, homeSubsAllowed)}</div>
       <div style="flex:1"><h4>${state.away.name}</h4>${liveLineupTable("away", state.away.lineup, state.away.bench, awaySubsAllowed)}</div>
     </div>
     <div class="row">
-      <button id="live-continue">${state.finished ? "Match finished" : "Resume play"}</button>
+      <button id="live-continue">Resume play</button>
+      <button id="live-auto-to-sub">Skip to next substitution point</button>
+      <button id="live-skip-to-end">Skip to end of match</button>
+      ${sortToggleHtml("live-bench-sort")}
       <span class="muted" id="live-status"></span>
     </div>
     <div id="live-sub-picker"></div>`;
 
+  const eventsEl = document.getElementById(`${playbackId}-events`);
+  const reveal = pacedEventReveal(eventsEl, state.events, startAt);
+  wirePlaybackControls(playbackId, reveal);
+  liveRevealProgress[boxKey].shown = state.events.length;
+
+  wireSortToggle("live-bench-sort", () => liveBenchSortDir, (d) => { liveBenchSortDir = d; },
+    () => renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId));
+
   box.querySelectorAll(".live-sub-btn").forEach(btn => {
-    btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor);
+    btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor, reportTargetId);
   });
 
   const continueBtn = document.getElementById("live-continue");
-  if (state.finished) {
-    continueBtn.disabled = true;
-    if (state.result) {
-      renderReport(state.result);
-    }
-    if (onFinished) onFinished(state);
-    return;
-  }
   continueBtn.onclick = async () => {
     const status = document.getElementById("live-status");
     status.textContent = "resuming...";
@@ -594,25 +695,72 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor) {
       const next = await api(`/api/match/live/${state.session_id}/continue`, {
         method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
       });
-      renderLiveMatchState(next, onFinished, boxId, allowSubsFor);
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+    }
+  };
+  // "Skip to next substitution" in the live/pausable context: the pause
+  // checkpoints (LIVE_MATCH_CHECKPOINTS in webapp.py, e.g. 20'/40'/60'/70')
+  // ARE the substitution opportunities - each `.../continue` call already
+  // advances to exactly the next one and stops there (never further), so
+  // this button is just that one call, not a search/loop. From 22' this
+  // lands on 40' and stops (offering the chance to sub, whether or not you
+  // take it); from 41' it lands on 60' and stops - always exactly the next
+  // checkpoint, never skipping past one looking for something "more
+  // interesting" to happen first.
+  document.getElementById("live-auto-to-sub").onclick = async () => {
+    const status = document.getElementById("live-status");
+    status.textContent = "advancing to the next substitution point...";
+    try {
+      const next = await api(`/api/match/live/${state.session_id}/continue`, {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+      });
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+    }
+  };
+  // "Skip to end of match" - repeatedly calls the exact same `.../continue`
+  // endpoint "Resume play" uses, one checkpoint at a time, until the match
+  // reports finished - no backend change needed, this is just doing
+  // several of the same round-trips the user would otherwise click
+  // through one at a time. Unlike the plain report's "Skip to end" (which
+  // instantly reveals an already-fully-simulated event list), this one
+  // actually drives the match to completion first, then reveals it.
+  document.getElementById("live-skip-to-end").onclick = async () => {
+    const status = document.getElementById("live-status");
+    let current = state;
+    try {
+      while (!current.finished) {
+        status.textContent = "skipping to the end of the match...";
+        current = await api(`/api/match/live/${current.session_id}/continue`, {
+          method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+        });
+      }
+      renderLiveMatchState(current, onFinished, boxId, allowSubsFor, reportTargetId);
     } catch (e) {
       status.textContent = "Error: " + e.message;
     }
   };
 }
 
-function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor) {
+function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor, reportTargetId) {
   const picker = document.getElementById("live-sub-picker");
   const bench = state[side].bench;
   if (!bench.length) {
     picker.innerHTML = `<p class="muted">No bench players left for ${state[side].name}.</p>`;
     return;
   }
+  const sortedBench = sortPlayersByRating(bench, liveBenchSortDir, "natural_fit");
   picker.innerHTML = `
     <div class="row">
-      <span class="muted">Bring on for ${state[side].name} at ${position}:</span>
-      ${bench.map(p => `<button class="live-sub-pick" data-id="${p.id}">${p.name}</button>`).join("")}
+      <span class="muted">Bring on for ${state[side].name} at ${position} (sorted by natural-position rating):</span>
+      ${sortToggleHtml("live-sub-picker-sort")}
+      ${sortedBench.map(p => `<button class="live-sub-pick" data-id="${p.id}">${p.name} (${p.natural_fit.toFixed(1)})</button>`).join("")}
     </div>`;
+  wireSortToggle("live-sub-picker-sort", () => liveBenchSortDir, (d) => { liveBenchSortDir = d; },
+    () => renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor, reportTargetId));
   picker.querySelectorAll(".live-sub-pick").forEach(btn => {
     btn.onclick = async () => {
       try {
@@ -620,7 +768,7 @@ function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubs
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({team: side, position, bench_player_id: parseInt(btn.dataset.id, 10)}),
         });
-        renderLiveMatchState(next, onFinished, boxId, allowSubsFor);
+        renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
       } catch (e) {
         alert("Could not make that substitution: " + e.message);
       }
@@ -663,6 +811,142 @@ function snapshotButtonHtml(id) {
   return `<div class="row"><button id="${id}">Download as standalone HTML file</button></div>`;
 }
 
+// ===================== Paced event reveal (client-side only) ===============
+// The server always computes a match's full event list in one shot (a
+// finished match report, or whatever's happened up to the current live
+// pause point) - this purely animates *revealing* it, a short delay
+// between each line instead of dumping the whole list at once, plus
+// "skip to next substitution" (jump the reveal cursor to the next event
+// whose text mentions a substitution or injury - see match_engine.py's
+// commentary wording: "Substitution:", "Tactical substitution:", or
+// "Injury: ... comes on."/"no replacements left") and "skip to end"
+// (reveal everything immediately - the fast path, not the only path).
+const SUB_EVENT_RE = /substitution|injury/i;
+
+function formatEventLine(e) {
+  return `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`;
+}
+
+/**
+ * Drives paced reveal of `events` (starting from `startAt`, so a live
+ * match's already-shown events aren't re-revealed) into `eventsEl`.
+ * Returns {skipToEnd, skipToNextEvent, setDelay, isDone} for a caller's
+ * control buttons to use.
+ */
+// `onComplete` fires once the reveal cursor first reaches the end of the
+// events list - by natural playback, "Skip to end", or "Skip to next
+// substitution" happening to land on the last event - whichever happens
+// first. This is what lets a caller hide the final score/Player of the
+// Match/box score until the viewer has actually watched (or explicitly
+// skipped) their way to full time, instead of spoiling the result the
+// instant the report loads.
+function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete) {
+  let cursor = startAt || 0;
+  let delay = delayMs || 650;
+  let timer = null;
+  let completed = false;
+
+  function paint() {
+    eventsEl.innerHTML = events.slice(0, cursor).map(formatEventLine).join("");
+    eventsEl.scrollTop = eventsEl.scrollHeight;
+  }
+  function stop() {
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+  function checkComplete() {
+    if (!completed && cursor >= events.length) {
+      completed = true;
+      if (onComplete) onComplete();
+    }
+  }
+  function tick() {
+    if (cursor >= events.length) { stop(); return; }
+    cursor++;
+    paint();
+    if (cursor >= events.length) stop();
+    checkComplete();
+  }
+  function start() {
+    stop();
+    if (cursor < events.length) timer = setInterval(tick, delay);
+  }
+
+  paint();
+  checkComplete();
+  start();
+
+  return {
+    skipToEnd() { cursor = events.length; paint(); stop(); checkComplete(); },
+    skipToNextEvent() {
+      let idx = -1;
+      for (let i = cursor; i < events.length; i++) {
+        if (SUB_EVENT_RE.test(events[i].text)) { idx = i; break; }
+      }
+      const found = idx >= 0;
+      cursor = found ? idx + 1 : events.length;
+      paint();
+      if (cursor >= events.length) stop();
+      checkComplete();
+      return found;
+    },
+    setDelay(ms) { delay = ms; if (timer) start(); },
+    isDone() { return cursor >= events.length; },
+    stop,
+  };
+}
+
+const PLAYBACK_SPEEDS = [
+  {label: "Slower", ms: 1400},
+  {label: "Normal", ms: 650},
+  {label: "Faster", ms: 250},
+];
+
+// `withSkipButtons` (default true): the plain, already-fully-simulated
+// report view (friendly/draft/tournament-detail matches run without the
+// live-pause toggle) knows its ENTIRE event list up front, so "skip to next
+// substitution"/"skip to end" are unambiguous local operations over that
+// full list. The live/pausable view (`renderLiveMatchState`) only ever
+// knows the small handful of events in the *current* paused chunk (since
+// future minutes haven't been simulated yet) - reusing these same two
+// buttons there made "skip to next substitution" and "skip to end" often
+// reveal the exact same tiny chunk (confusingly identical), since there's
+// nothing meaningfully different to skip *to* within 1-4 minutes of drives.
+// The live view instead gets its own, unambiguous backend-driven controls
+// (see `renderLiveMatchState`'s "Skip to next substitution point"/"Skip to
+// end of match" buttons) and passes `withSkipButtons: false` here to keep
+// only the speed selector (still a nice touch for animating a chunk's
+// reveal) without the confusing duplicate skip buttons.
+function playbackControlsHtml(idPrefix, withSkipButtons) {
+  const skipButtons = withSkipButtons === false ? "" : `
+      <button id="${idPrefix}-skip-sub">Skip to next substitution</button>
+      <button id="${idPrefix}-skip-end">Skip to end</button>`;
+  return `
+    <div class="row">
+      <label class="muted">Playback speed:
+        <select id="${idPrefix}-speed">
+          ${PLAYBACK_SPEEDS.map((s, i) => `<option value="${s.ms}" ${i === 1 ? "selected" : ""}>${s.label}</option>`).join("")}
+        </select>
+      </label>${skipButtons}
+    </div>`;
+}
+
+function wirePlaybackControls(idPrefix, reveal) {
+  const speedSel = document.getElementById(`${idPrefix}-speed`);
+  const skipSubBtn = document.getElementById(`${idPrefix}-skip-sub`);
+  const skipEndBtn = document.getElementById(`${idPrefix}-skip-end`);
+  if (speedSel) speedSel.onchange = () => reveal.setDelay(parseInt(speedSel.value, 10));
+  if (skipSubBtn) {
+    skipSubBtn.onclick = () => {
+      const found = reveal.skipToNextEvent();
+      const status = document.getElementById(`${idPrefix}-skip-status`);
+      if (status) {
+        status.textContent = found ? "" : "No more injuries/substitutions in this match - showing full time.";
+      }
+    };
+  }
+  if (skipEndBtn) skipEndBtn.onclick = () => reveal.skipToEnd();
+}
+
 function renderReport(data, targetId) {
   const box = document.getElementById(targetId || "report");
   const statRows = Object.entries(data.stats).map(([name, s]) => `
@@ -676,10 +960,15 @@ function renderReport(data, targetId) {
   const scorerRows = (data.top_scorers || []).slice(0, 6).map(s =>
     `<tr><td>${s.name}</td><td>${s.team}</td><td>${s.points}</td><td>${s.tries}</td><td>${s.conversions}</td><td>${s.penalty_goals}</td></tr>`
   ).join("");
+  const playbackId = `${targetId || "report"}-playback`;
+  const fullEventsHtml = data.events.map(formatEventLine).join("");
+  // `reportHtml` (used for the downloadable snapshot) always shows every
+  // event - the paced reveal is a live-viewing animation only, never a
+  // reason to ship an incomplete snapshot.
   const reportHtml = `
     <div id="scoreline">${data.scoreline}</div>
     ${pomLine}
-    <div id="events">${data.events.map(e => `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`).join("")}</div>
+    <div id="events">${fullEventsHtml}</div>
     <table class="stats">
       <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
       <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th></tr>
@@ -689,11 +978,40 @@ function renderReport(data, targetId) {
       <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
       ${scorerRows}
     </table>` : ""}`;
+  // The final score/Player of the Match/box score are spoilers - they stay
+  // hidden (`spoilersId`, class "hidden") until the paced reveal actually
+  // reaches full time (naturally, or via "Skip to end"/"Skip to next
+  // substitution" happening to land there), so watching the commentary
+  // unfold still has suspense instead of giving the result away instantly.
+  const spoilersId = `${playbackId}-spoilers`;
+  const liveHtml = `
+    ${playbackControlsHtml(playbackId)}
+    <div class="row muted" id="${playbackId}-skip-status"></div>
+    <div id="${playbackId}-events" class="events"></div>
+    <div id="${spoilersId}" class="hidden">
+      <div id="scoreline">${data.scoreline}</div>
+      ${pomLine}
+      <table class="stats">
+        <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
+        <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th></tr>
+        ${statRows}
+      </table>
+      ${scorerRows ? `<h3>Top scorers</h3><table class="stats">
+        <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
+        ${scorerRows}
+      </table>` : ""}
+    </div>`;
   const snapshotBtnId = `${targetId || "report"}-snapshot-btn`;
-  box.innerHTML = reportHtml + snapshotButtonHtml(snapshotBtnId);
+  box.innerHTML = liveHtml + snapshotButtonHtml(snapshotBtnId);
   document.getElementById(snapshotBtnId).onclick = () => {
     downloadHtmlSnapshot(data.scoreline, reportHtml, data.scoreline);
   };
+  const eventsEl = document.getElementById(`${playbackId}-events`);
+  const reveal = pacedEventReveal(eventsEl, data.events, 0, undefined, () => {
+    const spoilers = document.getElementById(spoilersId);
+    if (spoilers) spoilers.classList.remove("hidden");
+  });
+  wirePlaybackControls(playbackId, reveal);
 }
 
 // ===================== Tournament mode =====================
@@ -1487,6 +1805,33 @@ let draftShowFitRatings = false; // toggle: show each player's natural-position 
 let draftPoolPlayers = []; // [{code, players}] chosen so far, just for the running count
 let draftHumanBuilder = null;
 let draftAiTeamId = null;
+let draftSortDir = "desc"; // shared by the remaining-pool list and the protect/poach selects
+
+async function refreshDraftDepthChart(area) {
+  if (!draftSessionId || !area) return;
+  try {
+    const res = await api(`/api/draft/${draftSessionId}/depth_chart`);
+    area.innerHTML = draftDepthChartHtml(res.depth_chart);
+  } catch (e) {
+    area.innerHTML = `<p class="muted">Could not load depth chart: ${e.message}</p>`;
+  }
+}
+
+// A "tactics board" style sidebar: one slot per real position, top 3
+// drafted-so-far candidates ranked by their rating AT that position (not
+// just natural_fit) - a preview of who'd play where if the lineup had to
+// be locked in right now, not an actual assignment (draft mode deliberately
+// doesn't assign positions during the draft - see README).
+function draftDepthChartHtml(chart) {
+  const rows = POSITIONS.map(pos => {
+    const entries = chart[pos] || [];
+    const cells = entries.length
+      ? entries.map(p => `<div class="depth-entry">${p.name} <span class="fit">${p.fit.toFixed(1)}</span></div>`).join("")
+      : `<div class="muted depth-entry">(none yet)</div>`;
+    return `<div class="slot depth-slot"><span class="pos">${pos}</span>${cells}</div>`;
+  }).join("");
+  return `<div class="pitch depth-chart">${rows}</div>`;
+}
 
 async function enterDraftMode() {
   navTo("screen-draft-pool", "Draft mode", () => showScreen("screen-draft-pool"));
@@ -1495,31 +1840,94 @@ async function enterDraftMode() {
 }
 
 function renderDraftPoolScreen() {
-  const seasonArea = document.getElementById("draft-season-area");
-  seasonArea.innerHTML = seasonSelectHtml("draft-season");
-  const list = document.getElementById("draft-union-list");
-  list.innerHTML = UNIONS.map(u => `<button data-code="${u.code}">${logoImgHtml(u.code, 18)}${u.code}</button>`).join("");
-  const chosenCodes = new Set();
+  // Union + season picker: each "Add" click appends one {code, season} pair
+  // to `chosenUnionSquads` - deliberately NOT a toggle-button Set keyed by
+  // code alone, since that made it impossible to add e.g. "Ireland 2026"
+  // AND "Ireland 2025" at once (one global season for every chosen union).
+  // Same add-one-at-a-time flow as the historical-squad picker right below
+  // it, for the same reason: a season is part of the selection, not a
+  // single setting for the whole screen.
+  const unionArea = document.getElementById("draft-union-area");
+  const unionListBox = document.getElementById("draft-union-list");
+  unionArea.innerHTML = `
+    <select id="draft-union-code">${UNIONS.map(u => `<option value="${u.code}">${u.code} - ${u.name}</option>`).join("")}</select>
+    ${seasonSelectHtml("draft-union-season")}
+    <button id="draft-union-add">Add this union's pool</button>`;
+  const unionCodeSel = document.getElementById("draft-union-code");
+  const unionSeasonSel = document.getElementById("draft-union-season");
+  const chosenUnionSquads = []; // [{code, season}]
+  const chosenHistorical = []; // [{competition, year, team}]
   const status = document.getElementById("draft-pool-status");
-  list.querySelectorAll("button").forEach(btn => {
-    btn.onclick = () => {
-      if (chosenCodes.has(btn.dataset.code)) {
-        chosenCodes.delete(btn.dataset.code);
-        btn.classList.remove("active");
-      } else {
-        chosenCodes.add(btn.dataset.code);
-        btn.classList.add("active");
-      }
-      status.textContent = `${chosenCodes.size} union(s) selected so far.`;
-    };
-  });
+  const updateStatus = () => {
+    status.textContent = `${chosenUnionSquads.length} union+season pick(s) + ${chosenHistorical.length} historical squad(s) selected so far.`;
+  };
+  const renderUnionList = () => {
+    unionListBox.textContent = chosenUnionSquads.length
+      ? "Added: " + chosenUnionSquads.map(u => `${u.code} ${u.season}`).join(", ")
+      : "";
+  };
+  document.getElementById("draft-union-add").onclick = () => {
+    chosenUnionSquads.push({code: unionCodeSel.value, season: unionSeasonSel.value});
+    renderUnionList();
+    updateStatus();
+  };
+
+  // Historical-squad picker - same data flow as TeamBuilder's "Historical
+  // squad" mode (compSel -> yearSel -> teamSel -> "Add this squad"), just
+  // collecting selections into `chosenHistorical` instead of one team's pool.
+  const histArea = document.getElementById("draft-historical-area");
+  const histListBox = document.getElementById("draft-historical-list");
+  histArea.innerHTML = `
+    <select id="draft-hist-comp">
+      <option value="rwc">Rugby World Cup (1995-2023)</option>
+      <option value="sn">Six Nations Championship (2009-2021)</option>
+    </select>
+    <select id="draft-hist-year"></select>
+    <select id="draft-hist-team"><option>(load a year first)</option></select>
+    <button id="draft-hist-add">Add this squad</button>
+    <span class="muted" id="draft-hist-status"></span>`;
+  const compSel = document.getElementById("draft-hist-comp");
+  const yearSel = document.getElementById("draft-hist-year");
+  const teamSel = document.getElementById("draft-hist-team");
+  const histStatus = document.getElementById("draft-hist-status");
+  let yearData = null;
+  const renderHistList = () => {
+    histListBox.textContent = chosenHistorical.length
+      ? "Historical squads added: " + chosenHistorical.map(h => `${h.team} (${h.competition.toUpperCase()} ${h.year})`).join(", ")
+      : "";
+  };
+  const loadYears = async () => {
+    const path = compSel.value === "rwc" ? "/api/historical_rwc/years" : "/api/historical_six_nations/years";
+    const res = await api(path);
+    yearSel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
+    await loadYearData();
+  };
+  const loadYearData = async () => {
+    const year = yearSel.value;
+    histStatus.textContent = "loading real squads...";
+    const path = compSel.value === "rwc" ? `/api/historical_rwc/${year}` : `/api/historical_six_nations/${year}`;
+    const res = await api(path);
+    yearData = res;
+    const teamNames = Object.keys(res.squads).sort();
+    teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
+    histStatus.textContent = `${teamNames.length} teams loaded for ${year}.`;
+  };
+  compSel.onchange = loadYears;
+  yearSel.onchange = loadYearData;
+  document.getElementById("draft-hist-add").onclick = () => {
+    if (!yearData) return;
+    chosenHistorical.push({competition: compSel.value, year: parseInt(yearSel.value, 10), team: teamSel.value});
+    renderHistList();
+    updateStatus();
+  };
+  loadYears();
+
   document.getElementById("draft-start-btn").onclick = async () => {
     const startStatus = document.getElementById("draft-start-status");
     const seedRaw = document.getElementById("draft-seed").value;
-    const season = document.getElementById("draft-season").value || "2026";
     const legends = document.getElementById("draft-include-legends").checked;
-    if (chosenCodes.size === 0 && !legends) {
-      startStatus.textContent = "Pick at least one union (or Legends) first.";
+    if (chosenUnionSquads.length === 0 && !legends && chosenHistorical.length === 0) {
+      startStatus.textContent = "Add at least one union+season, a historical squad, or Legends first.";
       return;
     }
     startStatus.textContent = "building shared pool and flipping a coin...";
@@ -1527,7 +1935,7 @@ function renderDraftPoolScreen() {
       const data = await api("/api/draft/start", {
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({
-          codes: Array.from(chosenCodes), season, legends,
+          union_squads: chosenUnionSquads, legends, historical: chosenHistorical,
           seed: seedRaw ? parseInt(seedRaw, 10) : null,
         }),
       });
@@ -1564,28 +1972,40 @@ function renderDraftPicking(state) {
   const turnText = state.turn === "human" ? "Your turn - click a player to draft them." : "AI is picking...";
   const showFit = !!draftShowFitRatings;
   const fitSpan = (p) => showFit ? `<span class="fit">${p.natural_fit.toFixed(1)}</span>` : "";
+  const sortedPool = sortPlayersByRating(state.remaining_pool, draftSortDir, "natural_fit");
   area.innerHTML = `
     <div class="row">
-      <div class="muted">You: ${state.human_roster.length}/${state.roster_target} drafted</div>
-      <div class="muted">AI: ${state.ai_roster.length}/${state.roster_target} drafted</div>
-      <label class="muted"><input type="checkbox" id="draft-show-fit" ${showFit ? "checked" : ""}>
-        Show fit rating (natural-position rating)</label>
-    </div>
-    <p><strong>${turnText}</strong></p>
-    <div class="candidates" id="draft-remaining-list">
-      ${state.remaining_pool.map(p => `
-        <div class="candidate" data-id="${p.id}">
-          <span>${p.name} (${p.nation}${p.era ? ", " + p.era : ""}) - ${p.natural_position}</span>
-          ${fitSpan(p)}
-        </div>`).join("")}
-    </div>
-    <div class="row"><strong>Your roster:</strong> ${state.human_roster.map(p => `${p.name}${showFit ? ` (${p.natural_fit.toFixed(1)})` : ""}`).join(", ") || "(none yet)"}</div>
-    <div class="row"><strong>AI roster:</strong> ${state.ai_roster.map(p => `${p.name}${showFit ? ` (${p.natural_fit.toFixed(1)})` : ""}`).join(", ") || "(none yet)"}</div>
-    <div class="row muted" id="draft-log">${state.log.slice(-5).join("<br>")}</div>`;
+      <div style="flex:1">
+        <div class="row">
+          <div class="muted">You: ${state.human_roster.length}/${state.roster_target} drafted</div>
+          <div class="muted">AI: ${state.ai_roster.length}/${state.roster_target} drafted</div>
+          <label class="muted"><input type="checkbox" id="draft-show-fit" ${showFit ? "checked" : ""}>
+            Show fit rating (natural-position rating)</label>
+        </div>
+        <p><strong>${turnText}</strong></p>
+        <div class="row">${sortToggleHtml("draft-pool-sort")}</div>
+        <div class="candidates" id="draft-remaining-list">
+          ${sortedPool.map(p => `
+            <div class="candidate" data-id="${p.id}">
+              <span>${p.name} (${p.nation}${p.era ? ", " + p.era : ""}) - ${p.natural_position}</span>
+              ${fitSpan(p)}
+            </div>`).join("")}
+        </div>
+        <div class="row"><strong>Your roster:</strong> ${state.human_roster.map(p => `${p.name}${showFit ? ` (${p.natural_fit.toFixed(1)})` : ""}`).join(", ") || "(none yet)"}</div>
+        <div class="row"><strong>AI roster:</strong> ${state.ai_roster.map(p => `${p.name}${showFit ? ` (${p.natural_fit.toFixed(1)})` : ""}`).join(", ") || "(none yet)"}</div>
+        <div class="row muted" id="draft-log">${state.log.slice(-5).join("<br>")}</div>
+      </div>
+      <div style="flex:1">
+        <div class="muted">Your depth chart so far (top 3 per position, by rating at that position - a preview, not a lock-in):</div>
+        <div id="draft-depth-chart"></div>
+      </div>
+    </div>`;
   const fitToggle = document.getElementById("draft-show-fit");
   if (fitToggle) {
     fitToggle.onchange = (e) => { draftShowFitRatings = e.target.checked; renderDraftPicking(state); };
   }
+  wireSortToggle("draft-pool-sort", () => draftSortDir, (d) => { draftSortDir = d; }, () => renderDraftPicking(state));
+  refreshDraftDepthChart(document.getElementById("draft-depth-chart"));
   if (state.turn === "human") {
     area.querySelectorAll(".candidate").forEach(row => {
       row.onclick = async () => {
@@ -1619,32 +2039,47 @@ function renderDraftProtect(state) {
   }
   const showFit = !!draftShowFitRatings;
   const optLabel = (p) => showFit ? `${p.name} (${p.natural_fit.toFixed(1)})` : p.name;
+  const protectOptions = sortPlayersByRating(
+    state.human_roster.filter(p => !state.protected_human.includes(p.id)), draftSortDir, "natural_fit");
+  const poachOptions = sortPlayersByRating(
+    state.ai_roster.filter(p => !state.protected_ai.includes(p.id)), draftSortDir, "natural_fit");
   area.innerHTML = `
-    <h3>Round ${state.protect_round + 1} of ${state.protect_rounds_total}</h3>
-    <div class="row"><label class="muted"><input type="checkbox" id="draft-show-fit" ${showFit ? "checked" : ""}>
-      Show fit rating (natural-position rating)</label></div>
-    <div class="row"><label class="muted">Protect one of your players:
-      <select id="draft-protect-select">
-        <option value="">(none)</option>
-        ${state.human_roster.filter(p => !state.protected_human.includes(p.id))
-          .map(p => `<option value="${p.id}">${optLabel(p)}</option>`).join("")}
-      </select>
-    </label></div>
-    <div class="row"><label class="muted">Poach an unprotected AI player (optional):
-      <select id="draft-poach-select">
-        <option value="">(none)</option>
-        ${state.ai_roster.filter(p => !state.protected_ai.includes(p.id))
-          .map(p => `<option value="${p.id}">${optLabel(p)}</option>`).join("")}
-      </select>
-    </label></div>
     <div class="row">
-      <button id="draft-protect-submit">Confirm round</button>
-    </div>
-    <div class="row muted">${state.log.slice(-6).join("<br>")}</div>`;
+      <div style="flex:1">
+        <h3>Round ${state.protect_round + 1} of ${state.protect_rounds_total}</h3>
+        <div class="row">
+          <label class="muted"><input type="checkbox" id="draft-show-fit" ${showFit ? "checked" : ""}>
+            Show fit rating (natural-position rating)</label>
+          ${sortToggleHtml("draft-protect-sort")}
+        </div>
+        <div class="row"><label class="muted">Protect one of your players:
+          <select id="draft-protect-select">
+            <option value="">(none)</option>
+            ${protectOptions.map(p => `<option value="${p.id}">${optLabel(p)}</option>`).join("")}
+          </select>
+        </label></div>
+        <div class="row"><label class="muted">Poach an unprotected AI player (optional):
+          <select id="draft-poach-select">
+            <option value="">(none)</option>
+            ${poachOptions.map(p => `<option value="${p.id}">${optLabel(p)}</option>`).join("")}
+          </select>
+        </label></div>
+        <div class="row">
+          <button id="draft-protect-submit">Confirm round</button>
+        </div>
+        <div class="row muted">${state.log.slice(-6).join("<br>")}</div>
+      </div>
+      <div style="flex:1">
+        <div class="muted">Your depth chart so far (top 3 per position, by rating at that position):</div>
+        <div id="draft-depth-chart"></div>
+      </div>
+    </div>`;
   document.getElementById("draft-show-fit").onchange = (e) => {
     draftShowFitRatings = e.target.checked;
     renderDraftProtect(state);
   };
+  wireSortToggle("draft-protect-sort", () => draftSortDir, (d) => { draftSortDir = d; }, () => renderDraftProtect(state));
+  refreshDraftDepthChart(document.getElementById("draft-depth-chart"));
   document.getElementById("draft-protect-submit").onclick = async () => {
     const protectVal = document.getElementById("draft-protect-select").value;
     const poachVal = document.getElementById("draft-poach-select").value;
@@ -1671,13 +2106,23 @@ async function finishDraftIntoBuild(state) {
     const seedRaw = document.getElementById("draft-match-seed").value;
     const seed = seedRaw ? parseInt(seedRaw, 10) : null;
     const status = document.getElementById("draft-run-status");
+    const isLive = document.getElementById("draft-live-match-toggle").checked;
     status.textContent = "simulating...";
     try {
-      const data = await api("/api/match", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({home_team_id: draftHumanBuilder.teamId, away_team_id: draftAiTeamId, seed}),
-      });
-      renderReport(data, "draft-report");
+      if (isLive) {
+        document.getElementById("draft-report").innerHTML = "";
+        // Your drafted XV is always `home_team_id` here - only your side
+        // gets a "Substitute..." control, never the AI's auto-drafted one
+        // (same convention as the interactive tournament's own matches).
+        await startLiveMatch(draftHumanBuilder.teamId, draftAiTeamId, seed, "draft-live-match-area", "home", "draft-report");
+      } else {
+        document.getElementById("draft-live-match-area").innerHTML = "";
+        const data = await api("/api/match", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({home_team_id: draftHumanBuilder.teamId, away_team_id: draftAiTeamId, seed}),
+        });
+        renderReport(data, "draft-report");
+      }
       status.textContent = "";
     } catch (e) {
       status.textContent = "Error: " + e.message;

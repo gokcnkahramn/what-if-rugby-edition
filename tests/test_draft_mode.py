@@ -18,6 +18,84 @@ def test_draft_pool_setup_from_multiple_unions():
     assert len(data["remaining_pool"]) >= 2 * DRAFT_ROSTER_TARGET
 
 
+def test_draft_pool_dedupes_the_same_real_player_across_sources():
+    # Submitting the same union twice built two distinct Player objects per
+    # real person (each `/api/pool`-style fetch constructs fresh objects) -
+    # without deduping by name, that's a literal duplicate pick available
+    # in the shared draft pool. ENG alone has too few players to pass the
+    # "at least 2x roster target" check, which itself is evidence the
+    # duplicate copies were dropped rather than counted twice.
+    client = _client()
+    res = client.post("/api/draft/start", json={"codes": ["ENG", "ENG"], "seed": 1})
+    assert res.status_code == 400
+    assert "shared pool only has" in res.get_json()["error"]
+
+    res2 = client.post("/api/draft/start", json={"codes": ["ENG", "WAL", "WAL"], "seed": 1})
+    assert res2.status_code == 200
+    names = [p["name"] for p in res2.get_json()["remaining_pool"]]
+    assert len(names) == len(set(names))
+
+
+def test_draft_pool_can_mix_the_same_union_at_different_seasons():
+    # The original bug report: a single shared `codes`+`season` pair can
+    # never express "Ireland 2026 AND Ireland 2025 at once" - `union_squads`
+    # (a list of independent {code, season} pairs) is what makes that
+    # possible, merged and deduped into the same shared pool as everything
+    # else.
+    client = _client()
+    res = client.post("/api/draft/start", json={
+        "union_squads": [
+            {"code": "IRE", "season": "2026"}, {"code": "IRE", "season": "2025"},
+            {"code": "WAL", "season": "2026"},
+        ],
+        "seed": 1,
+    })
+    assert res.status_code == 200
+    names = [p["name"] for p in res.get_json()["remaining_pool"]]
+    assert len(names) == len(set(names))
+
+
+def test_draft_pool_can_mix_historical_squads_in():
+    client = _client()
+    res = client.post("/api/draft/start", json={
+        "codes": ["ENG"],
+        "historical": [{"competition": "rwc", "year": 2003, "team": "England"}],
+        "seed": 1,
+    })
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["phase"] == "drafting"
+    assert len(data["remaining_pool"]) >= 2 * DRAFT_ROSTER_TARGET
+
+
+def test_draft_pool_unknown_historical_team_errors():
+    client = _client()
+    res = client.post("/api/draft/start", json={
+        "codes": ["ENG", "WAL"],
+        "historical": [{"competition": "rwc", "year": 2003, "team": "Narnia"}],
+        "seed": 1,
+    })
+    assert res.status_code == 404
+
+
+def test_depth_chart_endpoint_ranks_roster_by_position():
+    client = _client()
+    start = client.post("/api/draft/start", json={"codes": ["ENG", "WAL"], "seed": 2}).get_json()
+    session_id = start["session_id"]
+    state = client.get(f"/api/draft/{session_id}/state").get_json()
+    pid = state["remaining_pool"][0]["id"]
+    client.post(f"/api/draft/{session_id}/pick", json={"player_id": pid})
+
+    res = client.get(f"/api/draft/{session_id}/depth_chart")
+    assert res.status_code == 200
+    chart = res.get_json()["depth_chart"]
+    assert "Fly-half" in chart or len(chart) > 0
+    for pos, entries in chart.items():
+        assert len(entries) <= 3
+        fits = [e["fit"] for e in entries]
+        assert fits == sorted(fits, reverse=True)
+
+
 def test_coin_flip_is_seedable():
     client = _client()
     a = client.post("/api/draft/start", json={"codes": ["ENG", "WAL"], "seed": 7}).get_json()

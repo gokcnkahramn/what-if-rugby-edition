@@ -72,6 +72,24 @@ def _register(players: List[Player]) -> None:
             _next_id += 1
 
 
+def _dedupe_players_by_name(players: List[Player]) -> List[Player]:
+    """Merging several sources into one pool (e.g. draft mode's union codes
+    + historical squads + Legends) can genuinely include the same real
+    person twice - each source builds its own fresh `Player` objects, so
+    they're distinct by identity even when they're the same athlete (same
+    convention/problem `build_union_pool` already handles *within* one
+    union's own pool, see README - this is the same fix applied across a
+    multi-source merge). Keeps whichever occurrence came first."""
+    seen = set()
+    deduped = []
+    for p in players:
+        if p.name in seen:
+            continue
+        seen.add(p.name)
+        deduped.append(p)
+    return deduped
+
+
 def _player_json(p: Player) -> dict:
     return {
         "id": _ID_BY_PLAYER[id(p)],
@@ -1128,28 +1146,75 @@ def _draft_session_json(session_id: str, s: DraftSession) -> dict:
 
 @app.post("/api/draft/start")
 def api_draft_start():
-    """Builds the shared pool from `codes` (union codes, merged) and
-    optional `legends` (bool), coin-flips who picks first (seedable via
-    `seed` for tests - real randomness otherwise), and opens a new draft
-    session."""
+    """Builds the shared pool from `codes` (union codes, all pulled at the
+    one shared `season`) and/or `union_squads` (a list of
+    `{code, season}` pairs - lets the SAME union be added more than once at
+    DIFFERENT seasons in one draft, e.g. "Ireland 2026" and "Ireland 2025"
+    together, which a single shared `codes`+`season` pair can never express),
+    plus optional `legends` (bool) and optional `historical` (a list of
+    `{competition: "rwc"|"sn", year: int, team: str}` historical-squad
+    selections) - every source merges into the one shared pool, deduped by
+    real-person name (see `_dedupe_players_by_name` - the same real player
+    can easily appear in e.g. both a 2026 and a 2025 pull). Coin-flips who
+    picks first (seedable via `seed` for tests - real randomness otherwise),
+    and opens a new draft session. `codes`/`season`/`legends`-only requests
+    keep working exactly as before; `union_squads`/`historical` are purely
+    additive."""
     global _next_draft_session_id
     body = request.get_json(force=True)
     codes: List[str] = body.get("codes", [])
     season: str = body.get("season", DEFAULT_SEASON)
+    union_squads: List[dict] = body.get("union_squads", [])
     include_legends: bool = bool(body.get("legends"))
+    historical: List[dict] = body.get("historical", [])
     seed = body.get("seed")
+
+    def _pull_union(code: str, season_: str):
+        code = code.upper()
+        if code not in POOLS:
+            return None, f"unknown union code {code}"
+        try:
+            return POOLS[code](season=season_), None
+        except TypeError:
+            return POOLS[code](), None
 
     pool: List[Player] = []
     for code in codes:
-        code = code.upper()
-        if code not in POOLS:
-            return jsonify({"error": f"unknown union code {code}"}), 400
-        try:
-            pool.extend(POOLS[code](season=season))
-        except TypeError:
-            pool.extend(POOLS[code]())
+        players, error = _pull_union(code, season)
+        if error:
+            return jsonify({"error": error}), 400
+        pool.extend(players)
+    for sel in union_squads:
+        code = sel.get("code", "")
+        sel_season = sel.get("season", season)
+        players, error = _pull_union(code, sel_season)
+        if error:
+            return jsonify({"error": error}), 400
+        pool.extend(players)
     if include_legends:
         pool.extend(get_all_legends())
+
+    for sel in historical:
+        competition = sel.get("competition")
+        year = sel.get("year")
+        team_name = sel.get("team")
+        try:
+            if competition == "rwc":
+                from .data.sources.historical_rwc import get_rwc_year_data
+                _pools, squads = get_rwc_year_data(int(year))
+            elif competition == "sn":
+                from .data.sources.historical_six_nations import get_six_nations_year_data
+                squads = get_six_nations_year_data(int(year))
+            else:
+                return jsonify({"error": f"unknown historical competition {competition}"}), 400
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 404
+        squad = squads.get(team_name)
+        if squad is None:
+            return jsonify({"error": f"unknown historical team {team_name!r} for {competition} {year}"}), 404
+        pool.extend(squad)
+
+    pool = _dedupe_players_by_name(pool)
 
     if len(pool) < 2 * DRAFT_ROSTER_TARGET:
         return jsonify({
@@ -1180,6 +1245,30 @@ def api_draft_state(session_id: str):
     if session is None:
         return jsonify({"error": f"unknown draft session {session_id}"}), 404
     return jsonify(_draft_session_json(session_id, session))
+
+
+@app.get("/api/draft/<session_id>/depth_chart")
+def api_draft_depth_chart(session_id: str):
+    """A "depth chart" preview of the human's drafted roster so far: for
+    every real position, the top 3 roster players ranked by their
+    `rating_at(position)` (same per-position rating `/api/rank` uses
+    elsewhere - no rugby logic duplicated here). Draft mode deliberately
+    doesn't assign positions during the draft itself (see README), so this
+    is purely "if I had to assign positions right now, here's who'd play
+    where" - a ranking, not a lock-in; more than one drafted player can
+    reasonably fit a slot, hence top 3 rather than just the single best."""
+    session = _DRAFT_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown draft session {session_id}"}), 404
+    roster = [_PLAYER_BY_ID[pid] for pid in session.human_roster]
+    chart = {}
+    for pos in Position:
+        ranked = sorted(roster, key=lambda p: p.rating_at(pos), reverse=True)[:3]
+        chart[pos.value] = [
+            {**_player_json(p), "fit": round(p.rating_at(pos), 1)}
+            for p in ranked
+        ]
+    return jsonify({"depth_chart": chart})
 
 
 def _run_ai_pick(session: DraftSession) -> None:

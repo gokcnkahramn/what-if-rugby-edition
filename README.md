@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-84%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-89%20passing-brightgreen.svg)](tests/)
 
 A national-team rugby union "what if" simulator: what happens if you put a
 player in a position they never actually played (Jonah Lomu at fullback,
@@ -247,6 +247,42 @@ best-fitting bench player (real 8-sub cap), or the team plays a man down if
 the bench is empty. None of this touches your original `Lineup` - the
 engine works from a per-match copy.
 
+**Paced event reveal**: whether a match already finished simulating (a
+plain friendly/draft-mode/tournament-detail report) or is still paused
+mid-match, events appear one at a time with a short delay instead of the
+whole list dumping on screen at once - and the final score/Player of the
+Match/box score stay hidden until the reveal actually reaches full time
+(naturally, or via a skip button), so watching the commentary unfold isn't
+spoiled the instant the page loads. A playback-speed control
+(slower/normal/faster) always sits above the event log.
+
+The **finished-report view** (friendly matches, draft mode's match, a
+tournament's per-match detail) knows its entire event list up front, so it
+gets two unambiguous local buttons: "Skip to next substitution" jumps the
+reveal cursor forward to the next event whose text mentions a substitution
+or injury (matched against the engine's actual commentary wording -
+`"Substitution:"`, `"Tactical substitution:"`, `"Injury: ... comes on."` -
+not guessed; if none remain, it says so and reveals to the end instead of
+silently behaving like the other button), and "Skip to end" reveals
+everything immediately. Downloaded HTML snapshots always contain every
+event regardless of what's been revealed on screen.
+
+The **live/pausable match UI** only ever knows the small handful of events
+in the *current* paused chunk (future minutes haven't been simulated yet),
+so reusing those same two local buttons there made them often reveal the
+exact same tiny chunk - confusingly indistinguishable. It gets its own,
+unambiguous backend-driven controls instead: "Resume play" (advance to the
+next pause checkpoint), "Skip to next substitution point" (exactly the same
+one-checkpoint advance - the checkpoints themselves, e.g. 20'/40'/60'/70',
+*are* the substitution opportunities, so this is never a search/loop that
+could skip past one), and "Skip to end of match" (repeats that same
+`.../continue` call automatically until the match reports finished, then
+shows the full paced reveal of the result). No engine change was needed for
+any of this - `advance_to`/`run_interactive`'s existing checkpoint
+granularity was already exactly what these buttons needed; it's all
+client-side reveal pacing plus repeated calls to the existing
+`.../continue` endpoint.
+
 **Manual substitutions**: `MatchEngine` can be paused mid-match
 (`start()`/`advance_to(minute)`/`finish()`, or `run_interactive(checkpoints,
 on_checkpoint)`) to make a substitution yourself
@@ -296,6 +332,15 @@ For tournaments, "Auto-draft" instantly builds a team's real best XV, or
 team to play. Every scoreline anywhere (group tables, bracket, results
 list) is clickable for that match's full commentary/box score.
 
+Every player list you pick from - candidates for a position, the bench,
+draft mode's remaining pool, the protect/poach dropdowns - can be sorted by
+rating, high-to-low or low-to-high, via a small "Sort: Rating" toggle
+button next to the list (one shared `sortPlayersByRating` helper behind all
+of them, not five separate implementations). Position-candidate lists sort
+by fit-at-that-position (`/api/rank`'s `fit`); every other list (bench,
+draft pool, protect/poach) sorts by natural-position rating (`natural_fit`)
+since it isn't rating candidates against one specific slot.
+
 ### Draft mode
 
 A third mode alongside Friendly match / Tournament mode: pick which real
@@ -308,6 +353,36 @@ never assigns positions - it only decides whose personal roster a player
 joins, matching this project's "any player in any slot" philosophy; each
 side's starting XV is assigned afterwards.
 
+The shared pool isn't limited to a single union, or a single season of one:
+add as many union+season combinations as you want (e.g. "Ireland 2026" AND
+"Ireland 2025" in the same pool - different squads a single season picker
+could never express together), optionally add Legends, and/or mix in one
+or more real historical World Cup/Six Nations year+team squads through the
+same picker `TeamBuilder`'s own "Historical squad" mode uses - add as many
+of these as you like before clicking "Start draft". The same real person
+showing up in more than one of these (e.g. a player capped in both the 2026
+and 2025 squads) is deduped by name into one pool entry, not two
+(`_dedupe_players_by_name` in `webapp.py` - the same fix as `build_union_pool`
+already applies *within* one union's own pool, now applied across a
+multi-source merge too). `POST /api/draft/start` takes `codes`/`season`
+(one shared season for a simple list of unions, as before) and/or
+`union_squads` (a list of independent `{code, season}` pairs, for mixing
+different seasons of the same or different unions), plus `legends` and an
+optional `historical` list of `{competition: "rwc"|"sn", year, team}`
+selections - all merged into one pool. Fully backward compatible: the
+original `codes`/`season`/`legends`-only request shape still works
+unchanged; `union_squads`/`historical` are purely additive.
+
+While drafting and during the protect phase, a side panel shows a *depth
+chart*: for every one of the 15 positions, the top 3 of your drafted-so-far
+players ranked by their rating **at that specific position**
+(`Player.rating_at(position)`, not just `natural_fit`) - computed
+server-side (`GET /api/draft/<id>/depth_chart`), no rating logic duplicated
+in the browser. This is a preview, not a lock-in: the draft itself still
+never assigns positions, so this is purely "if I had to build my lineup
+right now, here's who'd rank where" - more than one drafted player often
+reasonably fits the same slot, hence showing the top 3, not just one.
+
 After the draft, a PES21/eFootball-style 3-round protect phase runs: each
 round, you (and the AI, automatically) protect one of your own drafted
 players, then may poach one *unprotected* player off the opponent's roster.
@@ -315,7 +390,10 @@ A protected player can never be poached, no matter what. Once the 3 rounds
 are done, you build your final XV from your drafted roster through the same
 `TeamBuilder` flow as the other modes, while the AI's XV is auto-drafted
 (greedy best-fit, the same `auto_draft_lineup` used everywhere else) from
-its own roster - then you run the match exactly like a friendly.
+its own roster - then you run the match exactly like a friendly, including
+the same "Pause mid-match to make substitutions" toggle (only your side
+gets a "Substitute..." control, never the AI's auto-drafted one - same
+convention as the interactive tournament's own matches).
 
 A "Show fit rating" checkbox on both the drafting and protect screens
 reveals each player's natural-position fit rating (`natural_fit` in the API,
