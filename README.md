@@ -2,506 +2,104 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-89%20passing-brightgreen.svg)](tests/)
+[![Tests](<https://img.shields.io/badge/tests-89%20passing-brightgreen.svg>)](tests/)
 
-A national-team rugby union "what if" simulator: what happens if you put a
-player in a position they never actually played (Jonah Lomu at fullback,
-a hooker at tighthead, etc.)? Build your own squads and simulate the match -
-real players, real pools, real tournaments, a turn-based draft mode against
-an AI, and a clickable web UI, all built from real data, not invented
-stats.
+**What if you played Antoine Dupont at fullback? What if Jonah Lomu started
+at tighthead?** Build real squads from real players, drop anyone into any
+position, and simulate the match - a click-driven "what if" rugby lab, not
+a scripted game.
 
-Licensed under the [MIT License](LICENSE).
+This started from this week's actual international selection news - and it
+wasn't just England. France named Dupont out of his usual scrum-half slot
+for the first time; new Wallabies boss Les Kiss handed uncapped debuts to
+scrum-half Teddy Wilson and prop Tom Lambert; and Eddie Jones went further
+still for Japan, naming Meiji University fly-half Ryunosuke Ito - straight
+out of university rugby, no caps - in his Nations Championship squad. Three
+unions, three selection curveballs, all in the same week. That's exactly
+the kind of question rugby fans ask constantly ("what if he played there
+instead? what if they'd picked that uncapped kid?") but never get to
+actually test. This repo is built so anyone can run that experiment in
+under a minute: pick a real international pool, move a player wherever you
+like, and watch a full match play out - no spreadsheets, no manual
+stat-crunching.
 
-## Layout
-
-- `rugby_sim/models/` - `Attributes`, `Position`, `Player` (out-of-position
-  "fit" rating), `Team`/`Lineup` (23-man squad builder).
-- `rugby_sim/engine/` - `MatchEngine`, a phase-by-phase 80-minute simulator
-  driven by the lineup's computed ratings (tries, conversions, penalties,
-  cards, turnovers, territory, injuries, substitutions) + `CommentaryEvent`
-  log.
-- `rugby_sim/data/sample_players.py` - small hand-made seed roster, no
-  network needed.
-- `rugby_sim/data/legends.py` - Hall of Fame "legend" players, deliberately
-  **not** in `POOLS` (only selectable via the interactive CLI/web UI's
-  Legends option, never in "by nation" drafting or a real tournament's team
-  list). `CURATED_LEGENDS` (~30 hand-tuned) + `get_all_legends()` (~100
-  total, the rest scraped from Wikipedia's Hall of Fame category).
-- `rugby_sim/data/sources/` - the real player-data pipeline: pulls
-  international box-score stats from the `seanyboi/rugbydata` GitHub
-  dataset (free, no API key) and converts them to `Attributes` via a
-  documented heuristic (`attribute_mapping.py`). Disk-cached under
-  `rugby_sim/data/cache/` (gitignored) - no network needed after first pull.
-- `rugby_sim/data/national_teams/` - `POOLS["ENG"]()`, `POOLS["NZL"]()`, ...
-  one lazy-loaded **player pool** per union: 12 Tier 1 + 11 Tier 2 unions
-  (2027 World Cup picture) + `POOLS["BAR"]()` (Barbarians). Pools are flat
-  lists, not preset XVs - you draft the lineup yourself.
-- `rugby_sim/tournament/` - `Tournament`/`CustomTournament`: real-fixture
-  replay, the 2027 World Cup draw, historical World Cups/Six Nations,
-  synthetic round-robin/pool+knockout, `Standings` (bonus-point table).
-- `rugby_sim/data/squad_repository.py` - `save_team`/`load_team`: a drafted
-  squad round-trips to a `.json` file (CLI + web UI).
-- `rugby_sim/cli.py` - runnable hardcoded demo.
-- `rugby_sim/interactive_cli.py` - prompt-driven terminal builder, no code
-  required: draft each team (by nation / free pool / legends), run a single
-  match or any tournament format.
-- `rugby_sim/webapp.py` + `rugby_sim/web/` - **clickable web UI**: the same
-  flow as the CLI but click-driven in a browser. A thin Flask JSON API
-  wraps the exact same `POOLS`/`MatchEngine`/`Tournament` calls - no rugby
-  logic is reimplemented in JavaScript.
-- `tests/` - sanity, data-pipeline, tournament, substitution, player-stats,
-  squad-repository, auto-draft, and web-API tests.
-
-## How to run
-
-Requires Python 3.10+. From the project root:
+## Quickstart
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install -r requirements.txt
-```
-
-**Interactive terminal builder** (pick pools, draft all 15 positions +
-captain, then a single match / real tournament / custom tournament):
-
-```bash
-python -m rugby_sim.interactive_cli
-```
-
-**Or the clickable web UI**:
-
-```bash
 python -m rugby_sim.webapp
 ```
 
-Then open `http://127.0.0.1:5000` (always port 5000, see below). Local-only,
-single-user, no login.
+Open `http://127.0.0.1:5000` - that's it. Pick a pool, click a position,
+click a player, run the match.
 
-**Or the hardcoded demo match** (standard England XV vs. a "what if" England
-XV with Jonah Lomu at fullback):
+## What you can do
 
-```bash
-python -m rugby_sim.cli
-```
+- **Friendly match** - build two squads from real national-team pools (or
+  Legends, or historical World Cup/Six Nations squads), draft any player
+  into any position, and simulate.
+- **Tournament mode** - replay a real Six Nations/Rugby Championship
+  season, the real 2027 World Cup draw, any historical World Cup
+  (1995-2023) or Six Nations (2009-2021), or build a fully custom
+  tournament - then play your own matches while the rest auto-sims.
+- **Draft mode** - merge pools into one shared player pool, alternate
+  picks with an AI opponent, a PES21-style 3-round protect/poach phase,
+  then build and play your drafted XV.
+- **Live play** - pause mid-match to make a substitution, with a paced,
+  spoiler-free event reveal and fast-forward controls.
 
-**Tests**: `pip install pytest` then `pytest -q`.
+Every rating comes from real player data (not invented stats), every
+tournament/draw is the real thing where one exists, and every heuristic or
+approximation is called out explicitly in the code rather than presented
+as fact - see `rugby_sim/data/sources/attribute_mapping.py` and the
+in-repo docstrings for the honest details.
 
-**Try your own lineup**, drafting from a real 2026-capped pool (first call
-per union hits the network once and disk-caches the result):
+## Project layout
+
+| Path                                         | What's there                                                            |
+| -------------------------------------------- | ----------------------------------------------------------------------- |
+| `rugby_sim/models/`                        | `Player`, `Position`, `Team`/`Lineup` - the squad-building core |
+| `rugby_sim/engine/`                        | `MatchEngine` - the drive-by-drive match simulator                    |
+| `rugby_sim/data/`                          | Real player pools, Legends, the rugbydata/Wikipedia data pipeline       |
+| `rugby_sim/tournament/`                    | Real & synthetic tournament formats, standings, awards                  |
+| `rugby_sim/webapp.py` + `rugby_sim/web/` | The Flask API + clickable web UI (no rugby logic in JS)                 |
+| `rugby_sim/interactive_cli.py`             | A terminal-only alternative to the web UI                               |
+| `tests/`                                   | 89 tests across data, tournaments, the engine, and the web API          |
+
+Run the tests with `pip install pytest && pytest -q`.
+
+## A quick taste of the API
 
 ```python
 from rugby_sim.data import POOLS
 from rugby_sim.models import Team, Lineup, Position
 from rugby_sim.engine import MatchEngine
 
-italy_pool = POOLS["ITA"]()
+italy_pool = POOLS["ITA"]()  # real 2026-capped squad, cached after first pull
 capuozzo = next(p for p in italy_pool if p.name == "Ange Capuozzo")
 lineup = Lineup()
-lineup.set_starter(Position.LEFT_WING, capuozzo)  # his real 2026 slot is fullback
-# ... set_starter for the other 14 positions, then lineup.captain = <a Player>
+lineup.set_starter(Position.LEFT_WING, capuozzo)  # his real slot is fullback
+# ... fill the other 14 positions, set lineup.captain, then:
 team = Team(name="Italy (what if)", short_code="ITA", lineup=lineup)
 # MatchEngine(team, some_other_team, seed=42).run()
 ```
 
-`lineup.validate()` reports what's missing before you simulate -
-`MatchEngine.run()` raises if either lineup isn't complete.
-
-## Tournaments
-
-`Tournament`/`CustomTournament` can replay a **real** competition's actual
-fixture list, or a **synthetic** one:
-
-```python
-from rugby_sim.tournament import Tournament
-
-teams = {"England": team_eng, "France": team_fra, ...}  # draft from POOLS[code](season="2026")
-report = Tournament(teams).run_real("six_nations", season="2026")
-report.print_report()
-```
-
-- `run_real(key, season)` - actual fixture order for `"six_nations"`,
-  `"rugby_championship"`, or `"autumn_nations_series"` (dataset covers
-  2022-2026), simulated into a real bonus-point table. No `"rugby_world_cup"`
-  key - a real-fixture replay can't reliably tell a World Cup match apart
-  from a Rugby Championship one in this dataset; use `run_world_cup_2027`
-  or `run_historical_world_cup` instead. Fixture recovery is a documented
-  team-set + month-window heuristic, not a guaranteed-exact replica (see
-  `real_fixtures.py`).
-- `run_round_robin(...)` / `run_pool_and_knockout(...)` / `CustomTournament(teams, format=...)` -
-  synthetic fixtures for a tournament that never happened.
-
-### 2027 Rugby World Cup (real draw)
-
-The tournament hasn't been played, but the real pool draw has (3 Dec 2025):
-
-```
-Pool A: New Zealand, Australia, Chile, Hong Kong      Pool D: Ireland, Scotland, Uruguay, Portugal
-Pool B: South Africa, Italy, Georgia, Romania         Pool E: France, Japan, USA, Samoa
-Pool C: Argentina, Fiji, Spain, Canada                Pool F: England, Wales, Tonga, Zimbabwe
-```
-
-```python
-from rugby_sim.tournament import ALL_TEAMS_2027, CODE_BY_NATION, Tournament
-report = Tournament(teams).run_world_cup_2027(fixture_mode="specific", seed=42)
-```
-
-`fixture_mode`: `"specific"` (drawn order) or `"random"` (shuffled pool
-order, same pools). Knockout qualification (top 2 per pool + best 4
-third-placed) is the confirmed real format; the exact Round-of-16 pairing
-rule hadn't been published at draw time, so a reasonable seeded bracket is
-used instead of an official one. Hong Kong and Zimbabwe aren't in
-`rugbydata` at all, so their pools come entirely from Wikipedia.
-
-### Historical Rugby World Cups (1995-2023)
-
-Every professional-era World Cup, with its **real pool draw and real
-squads** (parsed from that edition's own Wikipedia squads page, not
-hand-entered):
-
-```python
-from rugby_sim.data.sources.historical_rwc import get_rwc_year_data
-pools, squads = get_rwc_year_data(2003)
-report = Tournament(teams).run_historical_world_cup(2003, seed=7)
-```
-
-Years: 1995, 1999, 2003, 2007, 2011, 2015, 2019, 2023. Ratings are
-archetype-based scaled by union strength (same convention as Legend mode),
-*unless* a player's career overlaps `rugbydata`'s 2018+ coverage, in which
-case real stats are used (`data_source` tags which). 1999's real format (5
-pools, winners go straight to QF, runners-up + best third play a QF
-play-off round) is reproduced exactly, not flattened into the generic
-top-2-per-pool rule every other edition uses.
-
-### Historical Six Nations (2009-2021)
-
-Same idea for the Six Nations - real squads from each year's Wikipedia
-squads page (earlier years list no position, so 2009 is the floor). 2022+
-is already covered by `run_real`. Match order is a synthetic round-robin
-(no real fixture list on the squads page), so the final table's shape is
-real but who-played-whom-in-what-order isn't.
-
-### Historical squads anywhere
-
-Any historical World Cup/Six Nations squad can be mixed into a normal
-single match or custom tournament too, not just the dedicated historical
-modes - `HIST` in the CLI's free-pool drafting, or the "Historical squad"
-button on any `TeamBuilder` panel in the web UI.
-
-### Tournament awards
-
-Every tournament mode computes, at the end: **team tournament stats**
-(every box-score field, summed across all matches played), **tournament top
-scorers**, **Team of the Tournament** (best average per-match performance -
-`rating_at(position)` plus a scoring bonus - per starting slot, no
-duplicate players), and **Player of the Tournament** (same pool, restricted
-to players who started a semi-final/final if the tournament has one that
-deep). `print_report()` / the web UI show all four.
-
-## Legend mode
-
-```python
-from rugby_sim.data.legends import CURATED_LEGENDS, get_all_legends
-get_all_legends()  # ~100 real Hall of Fame inductees
-```
-
-Every name is checked against Wikipedia's "Category:World Rugby Hall of
-Fame inductees" (190 members) - never invented. `CURATED_LEGENDS` (~30) are
-hand-tuned; the rest have position/nation/era parsed from their own
-Wikipedia infobox but an archetype rating (`rugbydata` doesn't reach most of
-these careers). Not all 190 resolve (teams, tours, non-playing
-administrators are filtered out automatically). In the CLI, `LEG` in
-free-pool mode pulls the full roster.
-
-## How a drive's outcome and a team rating are decided
-
-Each drive is one weighted dice roll across a fixed outcome menu (try,
-defensive penalty at breakdown or scrum, a card, attacking penalty, lineout
-turnover, breakdown turnover, handling error, nothing) - not an independent
-sim of every ruck/scrum/lineout. Each probability is a baseline plus a swing
-term from the edge between the two teams' relevant ratings (see
-`MatchEngine._resolve_drive`). Set-piece outcomes (scrum penalty, lineout
-turnover) and the breakdown turnover are deliberately separate swing terms
-with different inputs - scrum off `scrum_atk`/`scrum_def`, lineout off
-`lineout`/`lineout_throw`, and the breakdown turnover off the defense's
-`tackle_technique` (dominant hits + jackal/turnover threat) against the
-attack's `handling` - so a scrum-dominant pack and a jackal-heavy back row
-produce genuinely different match signatures, not just one shared
-discipline number moving.
-
-`Player.rating_at(position)` is one player's 0-100 fit at a slot
-(position-profile-weighted attributes, penalized off their natural
-position - the "what if" lever). A *team* rating for a category averages
-only the starters actually involved in it (`CATEGORY_POSITION_GROUPS`):
-scrum = front row + locks, lineout = locks + back row, lineout throwing =
-hooker alone, aerial = back three + locks, tactical kicking = 9/10/15.
-Everything else (tackling, attack, handling, discipline) is a whole-team
-average.
-
-## Injuries, substitutions & interactive play
-
-`MatchEngine` uses `Lineup.bench` (up to 8): every drive carries a small
-injury chance to a random on-field player, and a 50th-75th minute window
-has a smaller tactical-substitution chance - either brings on the
-best-fitting bench player (real 8-sub cap), or the team plays a man down if
-the bench is empty. None of this touches your original `Lineup` - the
-engine works from a per-match copy.
-
-**Paced event reveal**: whether a match already finished simulating (a
-plain friendly/draft-mode/tournament-detail report) or is still paused
-mid-match, events appear one at a time with a short delay instead of the
-whole list dumping on screen at once - and the final score/Player of the
-Match/box score stay hidden until the reveal actually reaches full time
-(naturally, or via a skip button), so watching the commentary unfold isn't
-spoiled the instant the page loads. A playback-speed control
-(slower/normal/faster) always sits above the event log.
-
-The **finished-report view** (friendly matches, draft mode's match, a
-tournament's per-match detail) knows its entire event list up front, so it
-gets two unambiguous local buttons: "Skip to next substitution" jumps the
-reveal cursor forward to the next event whose text mentions a substitution
-or injury (matched against the engine's actual commentary wording -
-`"Substitution:"`, `"Tactical substitution:"`, `"Injury: ... comes on."` -
-not guessed; if none remain, it says so and reveals to the end instead of
-silently behaving like the other button), and "Skip to end" reveals
-everything immediately. Downloaded HTML snapshots always contain every
-event regardless of what's been revealed on screen.
-
-The **live/pausable match UI** only ever knows the small handful of events
-in the *current* paused chunk (future minutes haven't been simulated yet),
-so reusing those same two local buttons there made them often reveal the
-exact same tiny chunk - confusingly indistinguishable. It gets its own,
-unambiguous backend-driven controls instead: "Resume play" (advance to the
-next pause checkpoint), "Skip to next substitution point" (exactly the same
-one-checkpoint advance - the checkpoints themselves, e.g. 20'/40'/60'/70',
-*are* the substitution opportunities, so this is never a search/loop that
-could skip past one), and "Skip to end of match" (repeats that same
-`.../continue` call automatically until the match reports finished, then
-shows the full paced reveal of the result). No engine change was needed for
-any of this - `advance_to`/`run_interactive`'s existing checkpoint
-granularity was already exactly what these buttons needed; it's all
-client-side reveal pacing plus repeated calls to the existing
-`.../continue` endpoint.
-
-**Manual substitutions**: `MatchEngine` can be paused mid-match
-(`start()`/`advance_to(minute)`/`finish()`, or `run_interactive(checkpoints,
-on_checkpoint)`) to make a substitution yourself
-(`apply_substitution(team, position, bench_player=...)`) before resuming -
-`run()` is unchanged, just `start()`+`finish()` back to back. Both the CLI
-and web UI offer this as an opt-in checkbox for a single match.
-
-**Interactive tournaments**: every tournament mode can be run with "play
-your own matches, auto-sim the rest" - pick which team is yours
-(`Tournament(..., my_team=..., pause_hook=...)`), and only that team's
-fixtures pause for the manual flow above; everything else auto-sims
-invisibly. `POST /api/tournament/start` (same body as `/run` plus
-`my_team`) returns either a paused live match or a finished report;
-`POST /api/tournament/<id>/resume` feeds the result back in and
-auto-advances to the next pause point or the end. The web UI's tournament
-screen has a "Which team is mine?" picker and a "Play my matches" button,
-reusing the same live-match UI as a single friendly - only *your* side gets
-a "Substitute..." control, never the auto-simmed opponent's.
-
-## Tournament squads: a fresh lineup every match
-
-By default a drafted team is one fixed `Lineup` reused every match. Pass
-`squads={name: [Player, ...]}` instead of `teams={name: Team(...)}` (both
-can be mixed in one tournament) to auto-draft a brand-new best-fit XV
-before every match from that pool instead. Injuries/red cards then
-actually carry over: a player hurt or sent off sits out their team's next
-match (`rugby_sim/tournament/availability.py`, a documented 1-match
-heuristic, not a medical model). Both the CLI and web UI ask "fixed lineup"
-vs. "fresh squad every match" up front.
-
-## Web UI
-
-`python -m rugby_sim.webapp`, then `http://127.0.0.1:5000`. The page is a
-clickable, drill-down flow, not one long scroll: a mode-select screen
-(Friendly match / Tournament mode), a breadcrumb bar to navigate back, and
-within Tournament mode each tournament type (real fixture replay, 2027
-World Cup, historical modes, custom) is its own clickable card/screen. Real
-fixture replay picks a real competition by name (card), not a raw key from
-a dropdown. In-progress tournament data (current standings, pool tables,
-knockout bracket, results so far) is shown as collapsible sections you
-expand on click, rather than all dumped on screen at once.
-
-Within either mode: pick a pool, click a position to see ranked candidates,
-click one to assign, pick a captain and bench, save, then run the match.
-For tournaments, "Auto-draft" instantly builds a team's real best XV, or
-"Draft yourself" expands the normal builder - you don't have to draft every
-team to play. Every scoreline anywhere (group tables, bracket, results
-list) is clickable for that match's full commentary/box score.
-
-Every player list you pick from - candidates for a position, the bench,
-draft mode's remaining pool, the protect/poach dropdowns - can be sorted by
-rating, high-to-low or low-to-high, via a small "Sort: Rating" toggle
-button next to the list (one shared `sortPlayersByRating` helper behind all
-of them, not five separate implementations). Position-candidate lists sort
-by fit-at-that-position (`/api/rank`'s `fit`); every other list (bench,
-draft pool, protect/poach) sorts by natural-position rating (`natural_fit`)
-since it isn't rating candidates against one specific slot.
-
-### Draft mode
-
-A third mode alongside Friendly match / Tournament mode: pick which real
-union pools (and/or Legends) to merge into one *shared* player pool, then a
-coin flip (seedable for tests, real randomness otherwise) decides who picks
-first. You and a simple AI opponent then alternate single-player picks from
-that shared pool until each side has drafted 23 players (15 starters + 8
-bench, a full real matchday squad). The draft itself
-never assigns positions - it only decides whose personal roster a player
-joins, matching this project's "any player in any slot" philosophy; each
-side's starting XV is assigned afterwards.
-
-The shared pool isn't limited to a single union, or a single season of one:
-add as many union+season combinations as you want (e.g. "Ireland 2026" AND
-"Ireland 2025" in the same pool - different squads a single season picker
-could never express together), optionally add Legends, and/or mix in one
-or more real historical World Cup/Six Nations year+team squads through the
-same picker `TeamBuilder`'s own "Historical squad" mode uses - add as many
-of these as you like before clicking "Start draft". The same real person
-showing up in more than one of these (e.g. a player capped in both the 2026
-and 2025 squads) is deduped by name into one pool entry, not two
-(`_dedupe_players_by_name` in `webapp.py` - the same fix as `build_union_pool`
-already applies *within* one union's own pool, now applied across a
-multi-source merge too). `POST /api/draft/start` takes `codes`/`season`
-(one shared season for a simple list of unions, as before) and/or
-`union_squads` (a list of independent `{code, season}` pairs, for mixing
-different seasons of the same or different unions), plus `legends` and an
-optional `historical` list of `{competition: "rwc"|"sn", year, team}`
-selections - all merged into one pool. Fully backward compatible: the
-original `codes`/`season`/`legends`-only request shape still works
-unchanged; `union_squads`/`historical` are purely additive.
-
-While drafting and during the protect phase, a side panel shows a *depth
-chart*: for every one of the 15 positions, the top 3 of your drafted-so-far
-players ranked by their rating **at that specific position**
-(`Player.rating_at(position)`, not just `natural_fit`) - computed
-server-side (`GET /api/draft/<id>/depth_chart`), no rating logic duplicated
-in the browser. This is a preview, not a lock-in: the draft itself still
-never assigns positions, so this is purely "if I had to build my lineup
-right now, here's who'd rank where" - more than one drafted player often
-reasonably fits the same slot, hence showing the top 3, not just one.
-
-After the draft, a PES21/eFootball-style 3-round protect phase runs: each
-round, you (and the AI, automatically) protect one of your own drafted
-players, then may poach one *unprotected* player off the opponent's roster.
-A protected player can never be poached, no matter what. Once the 3 rounds
-are done, you build your final XV from your drafted roster through the same
-`TeamBuilder` flow as the other modes, while the AI's XV is auto-drafted
-(greedy best-fit, the same `auto_draft_lineup` used everywhere else) from
-its own roster - then you run the match exactly like a friendly, including
-the same "Pause mid-match to make substitutions" toggle (only your side
-gets a "Substitute..." control, never the AI's auto-drafted one - same
-convention as the interactive tournament's own matches).
-
-A "Show fit rating" checkbox on both the drafting and protect screens
-reveals each player's natural-position fit rating (`natural_fit` in the API,
-`Player.rating_at(player.natural_position)`) next to their name - off by
-default to keep the list uncluttered, same as every other player listing in
-this project that doesn't show a rating until asked.
-
-The AI's draft pick, protect pick and poach target all use the same simple,
-documented heuristic: whoever currently rates highest at their own natural
-position - not a deep strategy, just "take the best player available",
-consistent with `auto_draft.py`'s own greedy convention. New endpoints:
-`/api/draft/start`, `/api/draft/<id>/state`, `/api/draft/<id>/pick`,
-`/api/draft/<id>/protect_round`, `/api/draft/<id>/finalize_ai` - all
-in-memory, single-process state, same convention as the rest of `webapp.py`.
-
-### Team logos
-
-Every union/Barbarians selector shows a real, transparent-background crest
-pulled from that team's Wikipedia infobox `Badge` field
-(`rugby_sim/data/sources/team_logos.py`), pre-fetched and disk-cached under
-`rugby_sim/web/logos/`. Historical-year squads show the *current* crest,
-not a period-accurate one (not verifiable at this scale). Tonga has no
-`Badge` field on Wikipedia, so no logo shows for it. No official Hall of
-Fame logo exists on Wikipedia, so Legend mode shows no crest.
-
-### Favicon
-
-The browser tab icon is the Webb Ellis Cup (the Rugby World Cup trophy),
-transparent background - sourced from Wikimedia Commons'
-`Rugby World Trophy.svg` (CC BY-SA 2.5) the same way team crests are
-(`rugby_sim/data/sources/favicon.py`, rasterized via MediaWiki's imageinfo
-API, cropped to its real bounding box and padded square so it isn't a
-speck at 16x16). `python -m rugby_sim.data.sources.favicon` regenerates
-`rugby_sim/web/favicon.ico`/`favicon-180.png` (committed static files, not
-fetched per request).
-
-### Background photo
-
-A blurred, dimmed stadium photo behind every screen (the old-school "Rugby
-08 / Football Manager menu" look) - one real, freely-licensed Commons photo
-per stadium (`rugby_sim/data/sources/background_image.py`), wide
-stadium/architecture shots only, deliberately not a close-up action photo,
-so no individual player's likeness is depicted. The 10 stadiums are each of
-the top-10 World Rugby-ranked unions' home ground (South Africa/Ellis Park,
-New Zealand/Eden Park, Ireland/Aviva Stadium, France/Stade de France,
-England/Twickenham, Scotland/Murrayfield, Australia/Accor Stadium,
-Argentina/Estadio José Amalfitani, Fiji/HFC Bank Stadium,
-Wales/Principality Stadium) - that specific top-10, not an arbitrary pick
-of famous grounds. One is chosen at random whenever the main mode-select
-screen or one of the 3 top-level modes (Friendly match / Tournament mode /
-Draft mode) is entered - never the same one twice in a row - but it stays
-fixed while you navigate around inside a mode. Each photo is under a
-Creative Commons license that requires attribution, so the corner of the
-page always shows which photo it is, its photographer, and its exact
-license - this isn't optional decoration, it's how the license is honored.
-Pre-fetched and disk-cached under `rugby_sim/web/backgrounds/` (`python -m
-rugby_sim.data.sources.background_image` to (re-)populate), same
-never-live-per-request convention as team logos. Falls back to the plain
-dark background if none are cached.
-
-### Always port 5000
-
-Always serves on port 5000; a stale server already listening there is
-stopped automatically (Windows only). Override with `WEBAPP_PORT` to run a
-second instance.
-
-## Data pipeline notes
-
-- Tier 1 unions are pulled live from `rugbydata`'s box scores. Tier 2
-  unions merge real `rugbydata` stats where they exist with that union's
-  Wikipedia "Current squad" for everyone else (cross-referenced against
-  rugbydata's global player registry for real stats where possible, else a
-  generic archetype rating - `data_source` always says which). Hong Kong
-  and Zimbabwe (2027 draw only, no `rugbydata` team_id) are Wikipedia-only.
-- **Cross-union calibration**: percentile scaling ranks a player against a
-  cross-union reference pool (not just their own union's roster, which has
-  no absolute calibration), plus `UNION_STRENGTH` - a rough
-  competitiveness multiplier per union - so genuine mismatches stay
-  mismatched while a strong Tier 2 side can still occasionally upset a
-  Tier 1 one.
-- Attribute values are a heuristic approximation (no raw pace/strength
-  numbers in the dataset), not a scouted rating - see `attribute_mapping.py`.
-- The dataset doesn't distinguish Lock 4/5 or which wing/centre slot a
-  player featured in - those entries share one representative position.
-- The same real person can get two different `player_id`s in the dataset;
-  `build_union_pool` dedupes by name, keeping whichever id has more caps.
-- `tackle_technique` is built from two specific real signals, not one
-  catch-all - dominant tackles (winning the collision) and breakdown
-  turnovers won (winning the ball back after it) - since a player can have
-  one without the other. `scrummaging` still leans on `rucks_won` (the
-  dataset has no dedicated scrum-contest stat); this is called out directly
-  in `attribute_mapping.py` and deliberately not used for anything else.
+For tournaments, awards, Legend mode, draft mode, historical squads, and
+every other feature's full details, read the docstrings in the relevant
+module - they're written to be the real documentation, not just comments.
 
 ## Calibration: does the engine pick real winners?
 
 `scripts/calibrate_ratings.py` is a re-runnable sanity check, not a claim of
 predictive accuracy: it auto-drafts all six 2024 Six Nations unions from
-their real rugbydata 2024 box-score stats, simulates every one of the 15
-real fixtures that season 11 times each (different seeds), and compares the
-modal simulated winner against the real result (hardcoded from the public
-2024 Six Nations record, since this dataset has no score field). Run it
-with `python scripts/calibrate_ratings.py`.
+their real rugbydata stats, simulates every real fixture 11 times each, and
+compares the modal winner against the real result. Current result:
+**9/15 (60%) correct winners** - the misses are mostly narrow real
+scorelines, exactly where a heuristic model should struggle. This number
+exists to catch regressions when the model changes, not to be chased to
+100% - real rugby has upsets on purpose.
 
-Current result: **9/15 (60%) correct winners** for the 2024 Six Nations.
-The misses are mostly narrow real results (England 23-22 Ireland, Italy
-31-29 Scotland, Ireland 17-13 Scotland, a 13-13 draw) - exactly where a
-box-score-derived heuristic model should be expected to struggle, since
-those margins come down to individual moments the model has no way to see.
-This number exists to catch *regressions* when the rating/engine model
-changes, not to be chased to 100% - real rugby has upsets on purpose.
+## License
 
+[MIT](LICENSE).
