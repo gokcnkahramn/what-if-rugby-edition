@@ -9,15 +9,20 @@ will actually weigh his pace/footwork/aerial numbers at fullback's profile.
 How a drive's outcome is decided: each drive is one weighted dice roll
 across a fixed menu of outcomes (try / penalty conceded by the defense, at
 the breakdown or the scrum / card / penalty conceded by the attack /
-lineout turnover / handling error / no outcome), not a separate phase-by-
-phase simulation of rucks, mauls, scrums and lineouts individually. Each
-outcome's probability is a baseline plus a swing term built from the
-*edge* between the two teams' relevant `team_sub_rating` categories (e.g.
-`p_scrum_penalty` swings with `scrum_atk - scrum_def`) - see `_resolve_drive`.
-"Scrum penalty" vs "breakdown penalty" are therefore driven by genuinely
-different inputs (scrum fitness/scrummaging vs team discipline), but both
-still resolve through the same single per-drive roll, not independent
-set-piece-by-set-piece contests.
+lineout turnover / breakdown turnover / handling error / no outcome), not
+a separate phase-by-phase simulation of rucks, mauls, scrums and lineouts
+individually. Each outcome's probability is a baseline plus a swing term
+built from the *edge* between the two teams' relevant `team_sub_rating`
+categories (e.g. `p_scrum_penalty` swings with `scrum_atk - scrum_def`)
+- see `_resolve_drive`. Set-piece (scrum penalty, lineout turnover) and
+breakdown/open-play outcomes (breakdown turnover, driven by the
+defense's `tackle_technique` - dominant hits + jackal threat - against
+attacking handling) are deliberately separate swing terms with different
+inputs, so a scrum-dominant pack and a jackal-heavy back row produce
+different, distinguishable match signatures rather than both just moving
+one shared discipline number. All of this still resolves through the
+same single per-drive roll, not independent set-piece-by-set-piece
+contests - a deliberate scope limit, not an oversight.
 
 How a team rating is built from individual fit scores: `Player.rating_at`
 gives one player's 0-100 fit at one position (position-profile-weighted
@@ -498,6 +503,15 @@ class MatchEngine:
         ) / 2 * atk_card_pen
         lineout_def = self._team_sub_rating(defending, "lineout") * def_card_pen
 
+        # Breakdown contest, kept separate from both the scrum penalty and
+        # the lineout turnover above: driven by the defense's
+        # tackle_technique (dominant hits + jackal/turnover threat, see
+        # `attribute_mapping.py`) against the attack's handling, so a
+        # jackal-heavy back row genuinely creates breakdown turnovers
+        # independent of whether either side's scrum or lineout is strong.
+        breakdown_def = self._team_sub_rating(defending, "tackle_technique") * def_card_pen
+        breakdown_atk = self._team_sub_rating(attacking, "handling") * atk_card_pen
+
         # Base probabilities, tuned so an evenly matched drive yields a try
         # roughly 1 time in 7-8, consistent with real Test rugby try counts.
         edge = (attack_rating - tackling_def) / 100  # roughly [-1, 1]
@@ -517,6 +531,9 @@ class MatchEngine:
 
         lineout_edge = (lineout_quality_atk - lineout_def) / 100
         p_lineout_turnover = self._clamp(0.05 - lineout_edge * 0.06, 0.01, 0.14)
+
+        breakdown_edge = (breakdown_def - breakdown_atk) / 100
+        p_breakdown_turnover = self._clamp(0.06 + breakdown_edge * 0.08, 0.01, 0.18)
 
         p_card = 0.015 * self._clamp(1.4 - discipline_atk / 70, 0.3, 2.0)
 
@@ -539,6 +556,13 @@ class MatchEngine:
             result.events.append(self._event(
                 minute, defending,
                 f"{defending.name} win the lineout - overthrow/steal from {attacking.name}.",
+                result,
+            ))
+        elif take(p_breakdown_turnover):
+            result.stats[defending.name].turnovers_won += 1
+            result.events.append(self._event(
+                minute, defending,
+                f"{defending.name} jackal over the ball - turnover won at the breakdown against {attacking.name}.",
                 result,
             ))
         elif take(p_card):

@@ -3,9 +3,12 @@
 <head>
 <meta charset="utf-8">
 <title>What If Rugby Edition</title>
+<link rel="icon" href="favicon.ico?v=2">
+<link rel="apple-touch-icon" href="favicon-180.png?v=2">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="bg-attribution" id="bg-attribution"></div>
 <header>
   <h1>What If Rugby Edition</h1>
   <p>Click-driven squad builder. Pick a pool, click a position, click a player - no typing required.</p>
@@ -24,7 +27,65 @@
       <span class="card-desc">Real fixtures, the 2027 World Cup draw, historical World Cups/Six
         Nations, or a fully custom tournament - play your own matches, auto-sim the rest.</span>
     </button>
+    <button class="card" id="mode-draft">
+      <span class="card-title">Draft mode</span>
+      <span class="card-desc">Merge unions/Legends into one shared pool, coin flip for first pick,
+        draft turn-by-turn against the AI, protect your players over 3 rounds, then build and
+        play your drafted XV.</span>
+    </button>
   </div>
+</div>
+
+<div class="screen hidden" id="screen-draft-pool">
+  <h2>Draft mode - build the shared pool</h2>
+  <p class="muted">Click unions to merge their pools together, optionally include the Legends
+    (Hall of Fame) roster, then start the draft. Both sides will pick from this exact combined pool.</p>
+  <div class="row muted">Season: <span id="draft-season-area"></span></div>
+  <div class="row" id="draft-union-list"></div>
+  <div class="row"><label><input type="checkbox" id="draft-include-legends"> Include Legends (Hall of Fame)</label></div>
+  <div class="row">
+    <span class="muted" id="draft-pool-status">0 players in the shared pool.</span>
+  </div>
+  <div class="row">
+    <label class="muted">Seed (optional, for a repeatable coin flip/draft order):
+      <input type="number" id="draft-seed" style="width:90px"></label>
+    <button id="draft-start-btn">Start draft</button>
+    <span class="muted" id="draft-start-status"></span>
+  </div>
+</div>
+
+<div class="screen hidden" id="screen-draft-coinflip">
+  <h2>Coin flip</h2>
+  <div id="draft-coinflip-area"></div>
+</div>
+
+<div class="screen hidden" id="screen-draft-picking">
+  <h2>Draft in progress</h2>
+  <div id="draft-picking-area"></div>
+</div>
+
+<div class="screen hidden" id="screen-draft-protect">
+  <h2>Protect phase</h2>
+  <p class="muted">3 rounds, PES21/eFootball-style: each round, protect one of your own drafted
+    players (once protected, the opponent can never take them) and optionally poach one
+    unprotected player from the opponent's roster.</p>
+  <div id="draft-protect-area"></div>
+</div>
+
+<div class="screen hidden" id="screen-draft-build">
+  <h2>Draft mode - build your XV</h2>
+  <p class="muted">Assign your drafted roster to the starting XV + bench. The AI's final lineup
+    was already auto-drafted from its own roster.</p>
+  <div class="teams">
+    <div class="panel" id="panel-draft-human"></div>
+  </div>
+  <div class="match-controls">
+    <label class="muted">Seed (optional): <input type="number" id="draft-match-seed" style="width:90px"></label>
+    <button id="draft-run-match" disabled>Run match</button>
+    <span id="draft-run-hint" class="muted"></span>
+    <span id="draft-run-status" class="muted"></span>
+  </div>
+  <div id="draft-report"></div>
 </div>
 
 <div class="screen hidden" id="screen-friendly">

@@ -16,6 +16,38 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  position: relative;
+}
+
+/* Menu-screen atmosphere (Rugby 08 / Football Manager style): a real,
+   freely-licensed stadium photo (see background_image.py), blurred and
+   dimmed behind every screen so text stays readable. Fixed behind
+   everything else via a pseudo-element, not an <img>, so it never
+   interferes with layout/scrolling. Falls back to the plain --bg color
+   (no photo) until one loads, or if none are cached at all. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--bg-photo, none);
+  background-size: cover;
+  background-position: center;
+  filter: blur(6px) brightness(0.45) saturate(1.1);
+  transform: scale(1.08); /* hides the blur's soft edge at the viewport border */
+}
+
+.bg-attribution {
+  position: fixed;
+  right: 10px;
+  bottom: 6px;
+  z-index: 1;
+  font-size: 0.68rem;
+  color: var(--muted);
+  background: rgba(15, 22, 19, 0.55);
+  padding: 2px 8px;
+  border-radius: 6px;
+  pointer-events: none;
 }
 
 header {

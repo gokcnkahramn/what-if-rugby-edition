@@ -1,3 +1,4 @@
 pandas>=2.0
 pyarrow>=14.0
 flask>=3.0
+pillow>=10.0  # only for rugby_sim/data/sources/favicon.py's one-off .ico generation, not the running app

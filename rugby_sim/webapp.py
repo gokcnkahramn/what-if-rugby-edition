@@ -17,6 +17,7 @@ browser tabs expecting isolation.
 
 from __future__ import annotations
 
+import random
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -78,6 +79,13 @@ def _player_json(p: Player) -> dict:
         "nation": p.nation,
         "era": p.era,
         "natural_position": p.natural_position.value,
+        # Fit rating at their own natural position - not the same as /api/rank's
+        # "fit", which is rated against whatever target position *you're*
+        # filling (e.g. a flanker's /api/rank "fit" when considering them for
+        # No. 8 is lower than this). This is just "how good are they at their
+        # own normal job" - useful anywhere a player is listed without a
+        # specific slot in mind yet, like the draft mode pool/roster lists.
+        "natural_fit": round(p.rating_at(p.natural_position), 1),
         "data_source": p.data_source,
         "notes": p.notes,
     }
@@ -173,6 +181,31 @@ def api_logos():
             name_to_code[old_name] = name_to_code[current_name]
 
     return jsonify({"logos": available, "name_to_code": name_to_code})
+
+
+@app.get("/api/backgrounds")
+def api_backgrounds():
+    """Which blurred-background stadium photos are cached and ready to
+    serve at `/backgrounds/<key>.jpg` (see `background_image.py`) - same
+    pre-fetched, never-live-per-request convention as `/api/logos`. Every
+    entry's `license`/`author` is included because every one of these
+    photos is under a Creative Commons license that requires attribution -
+    the web UI shows it, this isn't optional metadata."""
+    import os
+
+    from .data.sources.background_image import BACKGROUND_DIR, BACKGROUND_IMAGES
+
+    available = {}
+    for key, entry in BACKGROUND_IMAGES.items():
+        path = os.path.join(BACKGROUND_DIR, f"{key}.jpg")
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            available[key] = {
+                "url": f"/backgrounds/{key}.jpg",
+                "caption": entry.caption,
+                "license": entry.license,
+                "author": entry.author,
+            }
+    return jsonify({"backgrounds": available})
 
 
 @app.get("/api/legends")
@@ -1020,6 +1053,274 @@ def api_tournament_status(session_id: str):
     if session is None:
         return jsonify({"error": f"unknown tournament session {session_id}"}), 404
     return jsonify(_tournament_session_state_json(session_id, session))
+
+
+# -- API: draft mode ------------------------------------------------------
+# "Draft mode": a shared player pool built from whichever union/Legends
+# codes the user picks, then a PES21/eFootball-style turn-based draft
+# (alternating single-player picks between the human and a simple AI
+# heuristic) followed by a 3-round "protect a player from your opponent"
+# phase, before each side builds their final XV.
+#
+# Design choice (see README/task notes): the draft itself does NOT assign
+# positions - it's purely "whose personal roster does this player join".
+# That fits this project's existing "what if, any player in any slot"
+# philosophy far better than a position-locked draft would, and it means
+# the post-draft step is just the existing `TeamBuilder` UI (for the human,
+# seeded from their drafted roster instead of a union pool) plus the
+# existing `auto_draft_team` greedy best-fit (for the AI side) - no new
+# lineup-building logic needed at all.
+#
+# State is a simple in-memory dataclass + Dict[str, ...] registry, the same
+# convention as `_TEAMS`/`_LIVE_MATCHES`/`_TOURNAMENT_SESSIONS` above -
+# single-process, single-user, local-only, reset on server restart.
+DRAFT_ROSTER_TARGET = 23  # a real matchday squad: 15 starters + 8 bench, each side drafts this many before the protect phase
+PROTECT_ROUNDS = 3
+
+
+@dataclass
+class DraftSession:
+    pool_ids: List[int]           # every player id in the shared pool, in draft order
+    remaining_ids: List[int]      # not yet drafted by either side
+    human_roster: List[int] = field(default_factory=list)
+    ai_roster: List[int] = field(default_factory=list)
+    first_picker: str = "human"   # who the coin flip gave first pick to
+    turn: str = "human"           # whose turn it is right now ("human" | "ai")
+    phase: str = "drafting"       # "drafting" | "protect" | "done"
+    protect_round: int = 0        # 0..PROTECT_ROUNDS, completed rounds so far
+    protected_human: List[int] = field(default_factory=list)
+    protected_ai: List[int] = field(default_factory=list)
+    log: List[str] = field(default_factory=list)
+
+
+_DRAFT_SESSIONS: Dict[str, DraftSession] = {}
+_next_draft_session_id = 1
+
+
+def _ai_best_remaining(ids: List[int]) -> Optional[int]:
+    """AI drafting heuristic: of the remaining pool, take whoever rates
+    highest at their own natural position (a simple, documented stand-in
+    for "best player available" - the same greedy "take the best remaining
+    fit" idea `auto_draft.py` already uses, just picking one player instead
+    of filling a whole lineup)."""
+    if not ids:
+        return None
+    return max(ids, key=lambda pid: _PLAYER_BY_ID[pid].rating_at(_PLAYER_BY_ID[pid].natural_position))
+
+
+def _draft_session_json(session_id: str, s: DraftSession) -> dict:
+    return {
+        "session_id": session_id,
+        "phase": s.phase,
+        "turn": s.turn,
+        "first_picker": s.first_picker,
+        "protect_round": s.protect_round,
+        "protect_rounds_total": PROTECT_ROUNDS,
+        "remaining_pool": [_player_json(_PLAYER_BY_ID[pid]) for pid in s.remaining_ids],
+        "human_roster": [_player_json(_PLAYER_BY_ID[pid]) for pid in s.human_roster],
+        "ai_roster": [_player_json(_PLAYER_BY_ID[pid]) for pid in s.ai_roster],
+        "protected_human": s.protected_human,
+        "protected_ai": s.protected_ai,
+        "log": s.log,
+        "roster_target": DRAFT_ROSTER_TARGET,
+    }
+
+
+@app.post("/api/draft/start")
+def api_draft_start():
+    """Builds the shared pool from `codes` (union codes, merged) and
+    optional `legends` (bool), coin-flips who picks first (seedable via
+    `seed` for tests - real randomness otherwise), and opens a new draft
+    session."""
+    global _next_draft_session_id
+    body = request.get_json(force=True)
+    codes: List[str] = body.get("codes", [])
+    season: str = body.get("season", DEFAULT_SEASON)
+    include_legends: bool = bool(body.get("legends"))
+    seed = body.get("seed")
+
+    pool: List[Player] = []
+    for code in codes:
+        code = code.upper()
+        if code not in POOLS:
+            return jsonify({"error": f"unknown union code {code}"}), 400
+        try:
+            pool.extend(POOLS[code](season=season))
+        except TypeError:
+            pool.extend(POOLS[code]())
+    if include_legends:
+        pool.extend(get_all_legends())
+
+    if len(pool) < 2 * DRAFT_ROSTER_TARGET:
+        return jsonify({
+            "error": f"shared pool only has {len(pool)} players - need at least "
+                     f"{2 * DRAFT_ROSTER_TARGET} for both sides to draft a full XV",
+        }), 400
+
+    _register(pool)
+    pool_ids = [_ID_BY_PLAYER[id(p)] for p in pool]
+
+    rng = random.Random(seed) if seed is not None else random.Random()
+    first_picker = "human" if rng.random() < 0.5 else "ai"
+
+    session_id = f"d{_next_draft_session_id}"
+    _next_draft_session_id += 1
+    session = DraftSession(
+        pool_ids=pool_ids, remaining_ids=list(pool_ids),
+        first_picker=first_picker, turn=first_picker,
+        log=[f"Coin flip: {first_picker} picks first."],
+    )
+    _DRAFT_SESSIONS[session_id] = session
+    return jsonify(_draft_session_json(session_id, session))
+
+
+@app.get("/api/draft/<session_id>/state")
+def api_draft_state(session_id: str):
+    session = _DRAFT_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown draft session {session_id}"}), 404
+    return jsonify(_draft_session_json(session_id, session))
+
+
+def _run_ai_pick(session: DraftSession) -> None:
+    pid = _ai_best_remaining(session.remaining_ids)
+    if pid is None:
+        return
+    session.remaining_ids.remove(pid)
+    session.ai_roster.append(pid)
+    session.log.append(f"AI drafts {_PLAYER_BY_ID[pid].name}.")
+    session.turn = "human"
+    if len(session.human_roster) >= DRAFT_ROSTER_TARGET and len(session.ai_roster) >= DRAFT_ROSTER_TARGET:
+        session.phase = "protect"
+
+
+@app.post("/api/draft/<session_id>/pick")
+def api_draft_pick(session_id: str):
+    """One human pick, immediately followed by one AI pick (if the draft
+    isn't finished and it's the AI's turn next) - keeps the turn-based flow
+    to a single request/response per human action instead of needing the
+    frontend to poll for the AI's move."""
+    session = _DRAFT_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown draft session {session_id}"}), 404
+    if session.phase != "drafting":
+        return jsonify({"error": f"draft is not in its drafting phase (phase: {session.phase})"}), 400
+
+    body = request.get_json(force=True)
+    player_id = body.get("player_id")
+
+    # If it's currently the AI's turn (e.g. AI picks first, or the draft
+    # alternates back to it), let it move and return immediately - this
+    # same request is then just "please let the AI take its turn", not a
+    # human pick, so it never falls through to needing a `player_id`.
+    if session.turn == "ai":
+        _run_ai_pick(session)
+        return jsonify(_draft_session_json(session_id, session))
+
+    if session.turn != "human":
+        return jsonify({"error": "not the human's turn"}), 400
+    if player_id not in session.remaining_ids:
+        return jsonify({"error": "that player isn't in the remaining shared pool"}), 400
+    if len(session.human_roster) >= DRAFT_ROSTER_TARGET:
+        return jsonify({"error": "your roster is already full"}), 400
+
+    session.remaining_ids.remove(player_id)
+    session.human_roster.append(player_id)
+    session.log.append(f"You draft {_PLAYER_BY_ID[player_id].name}.")
+    session.turn = "ai"
+
+    if len(session.human_roster) >= DRAFT_ROSTER_TARGET and len(session.ai_roster) >= DRAFT_ROSTER_TARGET:
+        session.phase = "protect"
+    elif len(session.ai_roster) < DRAFT_ROSTER_TARGET:
+        _run_ai_pick(session)
+
+    return jsonify(_draft_session_json(session_id, session))
+
+
+@app.post("/api/draft/<session_id>/protect_round")
+def api_draft_protect_round(session_id: str):
+    """Resolves one of the 3 post-draft protect/poach rounds (PES21/
+    eFootball-style): the human names up to one of their own already-
+    drafted players to protect (`protect_id`) and, optionally, one
+    unprotected AI-roster player to poach (`poach_id`); the AI auto-
+    protects its own best unprotected player and attempts to poach the
+    human's best unprotected player. The explicit, non-negotiable rule: a
+    player already marked protected (by either side, in this or an earlier
+    round) can never be poached."""
+    session = _DRAFT_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown draft session {session_id}"}), 404
+    if session.phase != "protect":
+        return jsonify({"error": f"not in the protect phase (phase: {session.phase})"}), 400
+    if session.protect_round >= PROTECT_ROUNDS:
+        return jsonify({"error": "all protect rounds are already complete"}), 400
+
+    body = request.get_json(force=True)
+    human_protect_id = body.get("protect_id")
+    human_poach_id = body.get("poach_id")
+
+    # 1) Protections are locked in first, simultaneously, before any poach
+    #    is resolved - so a poach this same round can never target a
+    #    player protected in this same round.
+    if human_protect_id is not None:
+        if human_protect_id in session.human_roster and human_protect_id not in session.protected_human:
+            session.protected_human.append(human_protect_id)
+            session.log.append(f"You protect {_PLAYER_BY_ID[human_protect_id].name}.")
+
+    ai_unprotected = [pid for pid in session.ai_roster if pid not in session.protected_ai]
+    ai_protect_id = _ai_best_remaining(ai_unprotected) if ai_unprotected else None
+    if ai_protect_id is not None:
+        session.protected_ai.append(ai_protect_id)
+        session.log.append(f"AI protects {_PLAYER_BY_ID[ai_protect_id].name}.")
+
+    # 2) Poaches - a protected player (just now, or from an earlier round)
+    #    can never be taken, no matter what.
+    if human_poach_id is not None:
+        if human_poach_id in session.ai_roster and human_poach_id not in session.protected_ai:
+            session.ai_roster.remove(human_poach_id)
+            session.human_roster.append(human_poach_id)
+            session.log.append(f"You poach {_PLAYER_BY_ID[human_poach_id].name} from the AI.")
+        else:
+            session.log.append("Your poach attempt failed (player is protected or not on the AI's roster).")
+
+    human_unprotected = [pid for pid in session.human_roster if pid not in session.protected_human]
+    ai_poach_id = _ai_best_remaining(human_unprotected) if human_unprotected else None
+    if ai_poach_id is not None:
+        session.human_roster.remove(ai_poach_id)
+        session.ai_roster.append(ai_poach_id)
+        session.log.append(f"AI poaches {_PLAYER_BY_ID[ai_poach_id].name} from you.")
+
+    session.protect_round += 1
+    if session.protect_round >= PROTECT_ROUNDS:
+        session.phase = "done"
+        session.log.append("Protect phase complete - build your final lineup.")
+
+    return jsonify(_draft_session_json(session_id, session))
+
+
+@app.post("/api/draft/<session_id>/finalize_ai")
+def api_draft_finalize_ai(session_id: str):
+    """Auto-drafts the AI's final lineup (reusing the existing greedy
+    `auto_draft_team`, same as everywhere else in this codebase) from
+    whatever ended up on its roster after the protect phase. The human
+    side isn't finalized here - they build their own lineup through the
+    normal `TeamBuilder` UI, seeded from `human_roster` below."""
+    session = _DRAFT_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown draft session {session_id}"}), 404
+    if session.phase != "done":
+        return jsonify({"error": f"protect phase isn't finished yet (phase: {session.phase})"}), 400
+
+    ai_pool = [_PLAYER_BY_ID[pid] for pid in session.ai_roster]
+    team = auto_draft_team("AI Draft XV", ai_pool, short_code="AID")
+    team_id = _register_team(team)
+
+    return jsonify({
+        "team_id": team_id,
+        "name": team.name,
+        "problems": team.lineup.validate(),
+        "human_roster": [_player_json(_PLAYER_BY_ID[pid]) for pid in session.human_roster],
+    })
 
 
 def _parse_listening_pids(netstat_output: str, port: int) -> set:

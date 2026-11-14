@@ -1,8 +1,17 @@
-# what-if-rugby-edition
+# What If Rugby Edition
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-84%20passing-brightgreen.svg)](tests/)
 
 A national-team rugby union "what if" simulator: what happens if you put a
 player in a position they never actually played (Jonah Lomu at fullback,
-a hooker at tighthead, etc.)? Build your own squads and simulate the match.
+a hooker at tighthead, etc.)? Build your own squads and simulate the match -
+real players, real pools, real tournaments, a turn-based draft mode against
+an AI, and a clickable web UI, all built from real data, not invented
+stats.
+
+Licensed under the [MIT License](LICENSE).
 
 ## Layout
 
@@ -208,10 +217,17 @@ free-pool mode pulls the full roster.
 
 Each drive is one weighted dice roll across a fixed outcome menu (try,
 defensive penalty at breakdown or scrum, a card, attacking penalty, lineout
-turnover, handling error, nothing) - not an independent sim of every
-ruck/scrum/lineout. Each probability is a baseline plus a swing term from
-the edge between the two teams' relevant ratings (see
-`MatchEngine._resolve_drive`).
+turnover, breakdown turnover, handling error, nothing) - not an independent
+sim of every ruck/scrum/lineout. Each probability is a baseline plus a swing
+term from the edge between the two teams' relevant ratings (see
+`MatchEngine._resolve_drive`). Set-piece outcomes (scrum penalty, lineout
+turnover) and the breakdown turnover are deliberately separate swing terms
+with different inputs - scrum off `scrum_atk`/`scrum_def`, lineout off
+`lineout`/`lineout_throw`, and the breakdown turnover off the defense's
+`tackle_technique` (dominant hits + jackal/turnover threat) against the
+attack's `handling` - so a scrum-dominant pack and a jackal-heavy back row
+produce genuinely different match signatures, not just one shared
+discipline number moving.
 
 `Player.rating_at(position)` is one player's 0-100 fit at a slot
 (position-profile-weighted attributes, penalized off their natural
@@ -280,6 +296,41 @@ For tournaments, "Auto-draft" instantly builds a team's real best XV, or
 team to play. Every scoreline anywhere (group tables, bracket, results
 list) is clickable for that match's full commentary/box score.
 
+### Draft mode
+
+A third mode alongside Friendly match / Tournament mode: pick which real
+union pools (and/or Legends) to merge into one *shared* player pool, then a
+coin flip (seedable for tests, real randomness otherwise) decides who picks
+first. You and a simple AI opponent then alternate single-player picks from
+that shared pool until each side has drafted 23 players (15 starters + 8
+bench, a full real matchday squad). The draft itself
+never assigns positions - it only decides whose personal roster a player
+joins, matching this project's "any player in any slot" philosophy; each
+side's starting XV is assigned afterwards.
+
+After the draft, a PES21/eFootball-style 3-round protect phase runs: each
+round, you (and the AI, automatically) protect one of your own drafted
+players, then may poach one *unprotected* player off the opponent's roster.
+A protected player can never be poached, no matter what. Once the 3 rounds
+are done, you build your final XV from your drafted roster through the same
+`TeamBuilder` flow as the other modes, while the AI's XV is auto-drafted
+(greedy best-fit, the same `auto_draft_lineup` used everywhere else) from
+its own roster - then you run the match exactly like a friendly.
+
+A "Show fit rating" checkbox on both the drafting and protect screens
+reveals each player's natural-position fit rating (`natural_fit` in the API,
+`Player.rating_at(player.natural_position)`) next to their name - off by
+default to keep the list uncluttered, same as every other player listing in
+this project that doesn't show a rating until asked.
+
+The AI's draft pick, protect pick and poach target all use the same simple,
+documented heuristic: whoever currently rates highest at their own natural
+position - not a deep strategy, just "take the best player available",
+consistent with `auto_draft.py`'s own greedy convention. New endpoints:
+`/api/draft/start`, `/api/draft/<id>/state`, `/api/draft/<id>/pick`,
+`/api/draft/<id>/protect_round`, `/api/draft/<id>/finalize_ai` - all
+in-memory, single-process state, same convention as the rest of `webapp.py`.
+
 ### Team logos
 
 Every union/Barbarians selector shows a real, transparent-background crest
@@ -289,6 +340,41 @@ pulled from that team's Wikipedia infobox `Badge` field
 not a period-accurate one (not verifiable at this scale). Tonga has no
 `Badge` field on Wikipedia, so no logo shows for it. No official Hall of
 Fame logo exists on Wikipedia, so Legend mode shows no crest.
+
+### Favicon
+
+The browser tab icon is the Webb Ellis Cup (the Rugby World Cup trophy),
+transparent background - sourced from Wikimedia Commons'
+`Rugby World Trophy.svg` (CC BY-SA 2.5) the same way team crests are
+(`rugby_sim/data/sources/favicon.py`, rasterized via MediaWiki's imageinfo
+API, cropped to its real bounding box and padded square so it isn't a
+speck at 16x16). `python -m rugby_sim.data.sources.favicon` regenerates
+`rugby_sim/web/favicon.ico`/`favicon-180.png` (committed static files, not
+fetched per request).
+
+### Background photo
+
+A blurred, dimmed stadium photo behind every screen (the old-school "Rugby
+08 / Football Manager menu" look) - one real, freely-licensed Commons photo
+per stadium (`rugby_sim/data/sources/background_image.py`), wide
+stadium/architecture shots only, deliberately not a close-up action photo,
+so no individual player's likeness is depicted. The 10 stadiums are each of
+the top-10 World Rugby-ranked unions' home ground (South Africa/Ellis Park,
+New Zealand/Eden Park, Ireland/Aviva Stadium, France/Stade de France,
+England/Twickenham, Scotland/Murrayfield, Australia/Accor Stadium,
+Argentina/Estadio José Amalfitani, Fiji/HFC Bank Stadium,
+Wales/Principality Stadium) - that specific top-10, not an arbitrary pick
+of famous grounds. One is chosen at random whenever the main mode-select
+screen or one of the 3 top-level modes (Friendly match / Tournament mode /
+Draft mode) is entered - never the same one twice in a row - but it stays
+fixed while you navigate around inside a mode. Each photo is under a
+Creative Commons license that requires attribution, so the corner of the
+page always shows which photo it is, its photographer, and its exact
+license - this isn't optional decoration, it's how the license is honored.
+Pre-fetched and disk-cached under `rugby_sim/web/backgrounds/` (`python -m
+rugby_sim.data.sources.background_image` to (re-)populate), same
+never-live-per-request convention as team logos. Falls back to the plain
+dark background if none are cached.
 
 ### Always port 5000
 
@@ -316,9 +402,28 @@ second instance.
   player featured in - those entries share one representative position.
 - The same real person can get two different `player_id`s in the dataset;
   `build_union_pool` dedupes by name, keeping whichever id has more caps.
+- `tackle_technique` is built from two specific real signals, not one
+  catch-all - dominant tackles (winning the collision) and breakdown
+  turnovers won (winning the ball back after it) - since a player can have
+  one without the other. `scrummaging` still leans on `rucks_won` (the
+  dataset has no dedicated scrum-contest stat); this is called out directly
+  in `attribute_mapping.py` and deliberately not used for anything else.
 
-## Roadmap
+## Calibration: does the engine pick real winners?
 
-- Draft mode: a turn-based player draft (alternating picks with an
-  opponent/CPU from a shared pool) as an alternative to freely choosing any
-  player for any slot.
+`scripts/calibrate_ratings.py` is a re-runnable sanity check, not a claim of
+predictive accuracy: it auto-drafts all six 2024 Six Nations unions from
+their real rugbydata 2024 box-score stats, simulates every one of the 15
+real fixtures that season 11 times each (different seeds), and compares the
+modal simulated winner against the real result (hardcoded from the public
+2024 Six Nations record, since this dataset has no score field). Run it
+with `python scripts/calibrate_ratings.py`.
+
+Current result: **9/15 (60%) correct winners** for the 2024 Six Nations.
+The misses are mostly narrow real results (England 23-22 Ireland, Italy
+31-29 Scotland, Ireland 17-13 Scotland, a 13-13 draw) - exactly where a
+box-score-derived heuristic model should be expected to struggle, since
+those margins come down to individual moments the model has no way to see.
+This number exists to catch *regressions* when the rating/engine model
+changes, not to be chased to 100% - real rugby has upsets on purpose.
+

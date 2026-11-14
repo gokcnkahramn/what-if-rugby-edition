@@ -425,11 +425,15 @@ function navTo(id, label, onShow) {
 
 function navReset() {
   navStack = [];
-  navTo("screen-mode-select", "What If Rugby Edition", () => showScreen("screen-mode-select"));
+  navTo("screen-mode-select", "What If Rugby Edition", () => {
+    showScreen("screen-mode-select");
+    randomizeBackground();
+  });
 }
 
 async function enterFriendlyMode() {
   navTo("screen-friendly", "Friendly match", () => showScreen("screen-friendly"));
+  randomizeBackground();
   if (friendlyInitialized) return;
   friendlyInitialized = true;
   homeBuilder = new TeamBuilder("home");
@@ -442,9 +446,46 @@ async function enterTournamentMode() {
     showScreen("screen-tournament");
     if (tournamentInitialized) renderTournamentTypePicker();
   });
+  randomizeBackground();
   if (tournamentInitialized) return;
   tournamentInitialized = true;
   await setupTournamentUI();
+}
+
+// Picks one of the cached, freely-licensed stadium photos (see
+// background_image.py) at random for the blurred menu-screen background,
+// and shows its required CC attribution in the corner. Re-randomized (never
+// twice in a row - see `randomizeBackground`) each time the main
+// mode-select screen or one of the 3 top-level modes is entered, not on
+// every sub-screen navigation within a mode. Silently does nothing if none
+// are cached (plain dark background instead) - a visual nicety, never
+// blocks anything.
+let backgroundEntries = null;
+let lastBackgroundKey = null;
+
+async function setupBackgroundPhoto() {
+  try {
+    const res = await api("/api/backgrounds");
+    backgroundEntries = Object.entries(res.backgrounds || {}); // [[key, {url, caption, license, author}], ...]
+    randomizeBackground();
+  } catch (e) {
+    // no photo, no problem
+  }
+}
+
+function randomizeBackground() {
+  if (!backgroundEntries || !backgroundEntries.length) return;
+  let candidates = backgroundEntries;
+  if (backgroundEntries.length > 1 && lastBackgroundKey) {
+    candidates = backgroundEntries.filter(([key]) => key !== lastBackgroundKey);
+  }
+  const [key, chosen] = candidates[Math.floor(Math.random() * candidates.length)];
+  lastBackgroundKey = key;
+  document.documentElement.style.setProperty("--bg-photo", `url("${chosen.url}")`);
+  const attr = document.getElementById("bg-attribution");
+  if (attr) {
+    attr.textContent = `${chosen.caption} - ${chosen.author} (${chosen.license}), via Wikimedia Commons`;
+  }
 }
 
 async function boot() {
@@ -457,10 +498,12 @@ async function boot() {
   } catch (e) {
     LOGOS = {}; NAME_TO_CODE = {}; // logos are a visual nicety, never block the app
   }
+  setupBackgroundPhoto(); // fire-and-forget, a visual nicety, never blocks boot
 
   navReset();
   document.getElementById("mode-friendly").onclick = enterFriendlyMode;
   document.getElementById("mode-tournament").onclick = enterTournamentMode;
+  document.getElementById("mode-draft").onclick = enterDraftMode;
 
   document.getElementById("run-match").onclick = async () => {
     const seedRaw = document.getElementById("seed").value;
@@ -1433,5 +1476,230 @@ function renderTournamentReport(report) {
     };
   });
 }
+
+// ===================== Draft mode =====================
+// Pool setup -> coin flip -> alternating picks -> 3-round protect/poach ->
+// hand off into the normal TeamBuilder (human side) + auto-draft (AI side).
+// All rugby logic (ratings, auto-draft, match sim) stays server-side -
+// this is rendering + wiring only, same philosophy as the rest of the UI.
+let draftSessionId = null;
+let draftShowFitRatings = false; // toggle: show each player's natural-position fit rating while drafting/protecting
+let draftPoolPlayers = []; // [{code, players}] chosen so far, just for the running count
+let draftHumanBuilder = null;
+let draftAiTeamId = null;
+
+async function enterDraftMode() {
+  navTo("screen-draft-pool", "Draft mode", () => showScreen("screen-draft-pool"));
+  randomizeBackground();
+  renderDraftPoolScreen();
+}
+
+function renderDraftPoolScreen() {
+  const seasonArea = document.getElementById("draft-season-area");
+  seasonArea.innerHTML = seasonSelectHtml("draft-season");
+  const list = document.getElementById("draft-union-list");
+  list.innerHTML = UNIONS.map(u => `<button data-code="${u.code}">${logoImgHtml(u.code, 18)}${u.code}</button>`).join("");
+  const chosenCodes = new Set();
+  const status = document.getElementById("draft-pool-status");
+  list.querySelectorAll("button").forEach(btn => {
+    btn.onclick = () => {
+      if (chosenCodes.has(btn.dataset.code)) {
+        chosenCodes.delete(btn.dataset.code);
+        btn.classList.remove("active");
+      } else {
+        chosenCodes.add(btn.dataset.code);
+        btn.classList.add("active");
+      }
+      status.textContent = `${chosenCodes.size} union(s) selected so far.`;
+    };
+  });
+  document.getElementById("draft-start-btn").onclick = async () => {
+    const startStatus = document.getElementById("draft-start-status");
+    const seedRaw = document.getElementById("draft-seed").value;
+    const season = document.getElementById("draft-season").value || "2026";
+    const legends = document.getElementById("draft-include-legends").checked;
+    if (chosenCodes.size === 0 && !legends) {
+      startStatus.textContent = "Pick at least one union (or Legends) first.";
+      return;
+    }
+    startStatus.textContent = "building shared pool and flipping a coin...";
+    try {
+      const data = await api("/api/draft/start", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          codes: Array.from(chosenCodes), season, legends,
+          seed: seedRaw ? parseInt(seedRaw, 10) : null,
+        }),
+      });
+      draftSessionId = data.session_id;
+      navTo("screen-draft-coinflip", "Coin flip", () => showScreen("screen-draft-coinflip"));
+      renderDraftCoinflip(data);
+    } catch (e) {
+      startStatus.textContent = "Error: " + e.message;
+    }
+  };
+}
+
+function renderDraftCoinflip(state) {
+  const area = document.getElementById("draft-coinflip-area");
+  const winner = state.first_picker === "human" ? "You" : "The AI";
+  area.innerHTML = `
+    <p>${state.remaining_pool.length} players in the shared pool.</p>
+    <p><strong>${winner} won the coin flip and picks first.</strong></p>
+    <button id="draft-to-picking">Start drafting</button>`;
+  document.getElementById("draft-to-picking").onclick = () => {
+    navTo("screen-draft-picking", "Draft", () => showScreen("screen-draft-picking"));
+    renderDraftPicking(state);
+  };
+}
+
+function renderDraftPicking(state) {
+  const area = document.getElementById("draft-picking-area");
+  if (state.phase !== "drafting") {
+    area.innerHTML = `<p>Draft complete - moving to the protect phase...</p>`;
+    navTo("screen-draft-protect", "Protect phase", () => showScreen("screen-draft-protect"));
+    renderDraftProtect(state);
+    return;
+  }
+  const turnText = state.turn === "human" ? "Your turn - click a player to draft them." : "AI is picking...";
+  const showFit = !!draftShowFitRatings;
+  const fitSpan = (p) => showFit ? `<span class="fit">${p.natural_fit.toFixed(1)}</span>` : "";
+  area.innerHTML = `
+    <div class="row">
+      <div class="muted">You: ${state.human_roster.length}/${state.roster_target} drafted</div>
+      <div class="muted">AI: ${state.ai_roster.length}/${state.roster_target} drafted</div>
+      <label class="muted"><input type="checkbox" id="draft-show-fit" ${showFit ? "checked" : ""}>
+        Show fit rating (natural-position rating)</label>
+    </div>
+    <p><strong>${turnText}</strong></p>
+    <div class="candidates" id="draft-remaining-list">
+      ${state.remaining_pool.map(p => `
+        <div class="candidate" data-id="${p.id}">
+          <span>${p.name} (${p.nation}${p.era ? ", " + p.era : ""}) - ${p.natural_position}</span>
+          ${fitSpan(p)}
+        </div>`).join("")}
+    </div>
+    <div class="row"><strong>Your roster:</strong> ${state.human_roster.map(p => `${p.name}${showFit ? ` (${p.natural_fit.toFixed(1)})` : ""}`).join(", ") || "(none yet)"}</div>
+    <div class="row"><strong>AI roster:</strong> ${state.ai_roster.map(p => `${p.name}${showFit ? ` (${p.natural_fit.toFixed(1)})` : ""}`).join(", ") || "(none yet)"}</div>
+    <div class="row muted" id="draft-log">${state.log.slice(-5).join("<br>")}</div>`;
+  const fitToggle = document.getElementById("draft-show-fit");
+  if (fitToggle) {
+    fitToggle.onchange = (e) => { draftShowFitRatings = e.target.checked; renderDraftPicking(state); };
+  }
+  if (state.turn === "human") {
+    area.querySelectorAll(".candidate").forEach(row => {
+      row.onclick = async () => {
+        try {
+          const data = await api(`/api/draft/${draftSessionId}/pick`, {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({player_id: parseInt(row.dataset.id, 10)}),
+          });
+          renderDraftPicking(data);
+        } catch (e) {
+          alert("Could not draft that player: " + e.message);
+        }
+      };
+    });
+  } else {
+    // It's the AI's turn with nothing pending from the human (this only
+    // happens right after the coin flip, if the AI won it) - nudge the
+    // server to make the AI's move, then re-render.
+    api(`/api/draft/${draftSessionId}/pick`, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({}),
+    }).then(renderDraftPicking);
+  }
+}
+
+function renderDraftProtect(state) {
+  const area = document.getElementById("draft-protect-area");
+  if (state.phase !== "protect") {
+    area.innerHTML = `<p>Protect phase complete - preparing your lineup builder...</p>`;
+    finishDraftIntoBuild(state);
+    return;
+  }
+  const showFit = !!draftShowFitRatings;
+  const optLabel = (p) => showFit ? `${p.name} (${p.natural_fit.toFixed(1)})` : p.name;
+  area.innerHTML = `
+    <h3>Round ${state.protect_round + 1} of ${state.protect_rounds_total}</h3>
+    <div class="row"><label class="muted"><input type="checkbox" id="draft-show-fit" ${showFit ? "checked" : ""}>
+      Show fit rating (natural-position rating)</label></div>
+    <div class="row"><label class="muted">Protect one of your players:
+      <select id="draft-protect-select">
+        <option value="">(none)</option>
+        ${state.human_roster.filter(p => !state.protected_human.includes(p.id))
+          .map(p => `<option value="${p.id}">${optLabel(p)}</option>`).join("")}
+      </select>
+    </label></div>
+    <div class="row"><label class="muted">Poach an unprotected AI player (optional):
+      <select id="draft-poach-select">
+        <option value="">(none)</option>
+        ${state.ai_roster.filter(p => !state.protected_ai.includes(p.id))
+          .map(p => `<option value="${p.id}">${optLabel(p)}</option>`).join("")}
+      </select>
+    </label></div>
+    <div class="row">
+      <button id="draft-protect-submit">Confirm round</button>
+    </div>
+    <div class="row muted">${state.log.slice(-6).join("<br>")}</div>`;
+  document.getElementById("draft-show-fit").onchange = (e) => {
+    draftShowFitRatings = e.target.checked;
+    renderDraftProtect(state);
+  };
+  document.getElementById("draft-protect-submit").onclick = async () => {
+    const protectVal = document.getElementById("draft-protect-select").value;
+    const poachVal = document.getElementById("draft-poach-select").value;
+    const data = await api(`/api/draft/${draftSessionId}/protect_round`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        protect_id: protectVal ? parseInt(protectVal, 10) : null,
+        poach_id: poachVal ? parseInt(poachVal, 10) : null,
+      }),
+    });
+    renderDraftProtect(data);
+  };
+}
+
+async function finishDraftIntoBuild(state) {
+  const finalized = await api(`/api/draft/${draftSessionId}/finalize_ai`, {method: "POST"});
+  draftAiTeamId = finalized.team_id;
+  navTo("screen-draft-build", "Build your XV", () => showScreen("screen-draft-build"));
+  draftHumanBuilder = new TeamBuilder("draft-human", {
+    title: "Your drafted XV", fixedPool: finalized.human_roster,
+  });
+  updateDraftRunButton();
+  document.getElementById("draft-run-match").onclick = async () => {
+    const seedRaw = document.getElementById("draft-match-seed").value;
+    const seed = seedRaw ? parseInt(seedRaw, 10) : null;
+    const status = document.getElementById("draft-run-status");
+    status.textContent = "simulating...";
+    try {
+      const data = await api("/api/match", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({home_team_id: draftHumanBuilder.teamId, away_team_id: draftAiTeamId, seed}),
+      });
+      renderReport(data, "draft-report");
+      status.textContent = "";
+    } catch (e) {
+      status.textContent = "Error: " + e.message;
+    }
+  };
+}
+
+function updateDraftRunButton() {
+  const btn = document.getElementById("draft-run-match");
+  const ready = !!(draftHumanBuilder && draftHumanBuilder.teamId && draftAiTeamId);
+  btn.disabled = !ready;
+  document.getElementById("draft-run-hint").textContent = ready ? "" : "Click \"Save team\" on your drafted XV first.";
+}
+
+// `TeamBuilder.renderFinish`'s "Save team" handler calls the global
+// `updateRunButton()` (friendly mode's) unconditionally - wrap it so a
+// save from the draft-mode builder also refreshes the draft run button
+// without friendly mode's own button needing to exist yet.
+const _originalUpdateRunButton = updateRunButton;
+updateRunButton = function () {
+  try { _originalUpdateRunButton(); } catch (e) { /* friendly mode not initialized yet - fine */ }
+  if (draftHumanBuilder) updateDraftRunButton();
+};
 
 boot();

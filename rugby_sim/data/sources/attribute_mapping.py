@@ -118,6 +118,7 @@ def _compute_proxies(stats: Mapping, caps: int) -> Dict[str, float]:
     total_lineouts = _get(stats, "total_lineouts") / caps
 
     rucks_won = _get(stats, "rucks_won") / caps
+    turnovers_won = _get(stats, "turnovers_won") / caps
 
     penalties_conceded = _get(stats, "penalties_conceded") / caps
     cards = (_get(stats, "yellow_cards") + _get(stats, "red_cards") * 2) / caps
@@ -133,7 +134,20 @@ def _compute_proxies(stats: Mapping, caps: int) -> Dict[str, float]:
         "kicking_game": kicks_from_hand,
         "lineout_jumping": lineouts_won,
         "lineout_throwing": total_lineouts,
+        # Weak, honestly-flagged proxy: the dataset has no dedicated
+        # scrum-contest stat (no scrums_won/scrums_lost column), so
+        # `rucks_won` - general breakdown involvement - is the closest
+        # available signal. It's deliberately NOT used for anything else
+        # (tackle_technique below uses the more specific `turnovers_won`
+        # instead), and `position.py` leans on `strength` more than
+        # `scrummaging` for the front row/locks specifically to avoid
+        # over-trusting this proxy for the positions that matter most.
         "scrummaging": rucks_won,
+        # Breakdown-steal skill: a more specific signal than `rucks_won`
+        # for "wins the ball back", used for `tackle_technique` (the
+        # defensive-breakdown-craft attribute, most relevant for opensides
+        # and back row) rather than folding it into the scrum proxy above.
+        "turnover_threat": turnovers_won,
         "discipline_raw": 2.0 - penalties_conceded - cards * 20,
         "lineouts_won_flag": 1.0 if lineouts_won else 0.0,
     }
@@ -152,7 +166,15 @@ def map_stats_to_attributes(
         return _scale(value, lo, hi, out_lo, out_hi)
 
     tackling = scaled("tackle_success", 0.70, 0.95)
-    tackle_technique = scaled("dominant_tackles", 0.0, 3.0)
+    # tackle_technique blends two specific, distinct real signals rather
+    # than one catch-all: dominant tackles (physically winning the
+    # collision) and breakdown turnovers won (winning the ball back after
+    # it) - both more specific than a generic "defensive involvement"
+    # number, and each feeds a different real skill a player can have one
+    # of without the other (a dominant hitter isn't necessarily a jackal).
+    dominant_tackle_score = scaled("dominant_tackles", 0.0, 3.0)
+    turnover_threat_score = scaled("turnover_threat", 0.0, 1.2)
+    tackle_technique = round((dominant_tackle_score + turnover_threat_score) / 2)
     pace = scaled("pace", 0.0, 1.5)
     footwork = scaled("footwork", 0.0, 2.5)
     strength = scaled("strength", 2.0, 7.0)
