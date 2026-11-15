@@ -606,15 +606,28 @@ async function startLiveMatch(homeTeamId, awayTeamId, seed, boxId, allowSubsFor,
 // tournament fixture, where the opponent is an auto-drafted/CPU side the
 // user shouldn't get to make substitution calls for).
 let liveBenchSortDir = "desc";
+// Mid-match "swap positions" selection in progress - null, or
+// {side, position} for the first of the two on-field players picked so far
+// (see `liveLineupTable`/`wireSwapButtons`). Reset whenever the lineup
+// re-renders (a new state object) so a stale pending swap from a previous
+// checkpoint/side can never leak into a later render.
+let pendingSwap = null;
 
+// Position fit and match condition are two separate numbers, never combined
+// into one - `natural_fit` (how good a player is at their own normal job)
+// comes from `Player.rating_at` and never changes mid-match; `condition` is
+// the engine's own live in-match stamina (0-100, see
+// `MatchEngine.condition_for`) and ticks down as the match goes on. Both are
+// shown side by side here so it's clear which is which.
 function liveLineupTable(side, lineup, bench, allowSubs) {
   const rows = lineup.map(p => `
-    <tr><td>${p.position}</td><td>${p.name}</td>
-    <td>${allowSubs ? `<button class="live-sub-btn" data-side="${side}" data-pos="${p.position}">Substitute...</button>` : ""}</td></tr>
+    <tr><td>${p.position}</td><td>${p.name}</td><td>${p.natural_fit.toFixed(1)}</td><td>${p.condition.toFixed(0)}</td>
+    <td>${allowSubs ? `<button class="live-sub-btn" data-side="${side}" data-pos="${p.position}">Substitute...</button>
+      <button class="live-swap-btn" data-side="${side}" data-pos="${p.position}">Swap positions...</button>` : ""}</td></tr>
   `).join("");
   const sortedBench = sortPlayersByRating(bench, liveBenchSortDir, "natural_fit");
-  const benchText = sortedBench.map(p => `${p.name} (${p.natural_fit.toFixed(1)})`).join(", ") || "(none left)";
-  return `<table class="stats"><tr><th>Position</th><th>Player</th><th></th></tr>${rows}</table>
+  const benchText = sortedBench.map(p => `${p.name} (fit ${p.natural_fit.toFixed(1)}, condition ${p.condition.toFixed(0)})`).join(", ") || "(none left)";
+  return `<table class="stats"><tr><th>Position</th><th>Player</th><th>Fit</th><th>Condition</th><th></th></tr>${rows}</table>
     <p class="muted">Bench (by natural-position rating): ${benchText}</p>`;
 }
 
@@ -654,6 +667,7 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   if (!liveRevealProgress[boxKey] || liveRevealProgress[boxKey].sessionId !== state.session_id) {
     liveRevealProgress[boxKey] = {sessionId: state.session_id, shown: 0};
   }
+  pendingSwap = null;
   const startAt = Math.min(liveRevealProgress[boxKey].shown, state.events.length);
   const playbackId = `${boxKey}-live-playback`;
 
@@ -685,6 +699,9 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
 
   box.querySelectorAll(".live-sub-btn").forEach(btn => {
     btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor, reportTargetId);
+  });
+  box.querySelectorAll(".live-swap-btn").forEach(btn => {
+    btn.onclick = () => handleSwapClick(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor, reportTargetId);
   });
 
   const continueBtn = document.getElementById("live-continue");
@@ -745,19 +762,43 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   };
 }
 
-function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor, reportTargetId) {
+// Like draft mode's depth chart / `/api/rank`, the bench picker shows each
+// candidate's OWN natural position plus their fit rating AT THE SPECIFIC
+// POSITION being substituted into (never the same number) - computed
+// server-side via `/api/rank` (`Player.rating_at`), not duplicated in JS.
+async function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor, reportTargetId) {
   const picker = document.getElementById("live-sub-picker");
   const bench = state[side].bench;
   if (!bench.length) {
     picker.innerHTML = `<p class="muted">No bench players left for ${state[side].name}.</p>`;
     return;
   }
-  const sortedBench = sortPlayersByRating(bench, liveBenchSortDir, "natural_fit");
+  picker.innerHTML = `<p class="muted">Loading fit ratings...</p>`;
+  let ranked;
+  try {
+    ranked = await api("/api/rank", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({player_ids: bench.map(p => p.id), position}),
+    });
+  } catch (e) {
+    picker.innerHTML = `<p class="muted">Could not load fit ratings: ${e.message}</p>`;
+    return;
+  }
+  const sorted = liveBenchSortDir === "desc"
+    ? [...ranked].sort((a, b) => b.fit - a.fit)
+    : [...ranked].sort((a, b) => a.fit - b.fit);
+  // `/api/rank` only returns fit (it's a pure position-fit lookup, reused
+  // from draft mode) - condition is live in-match stamina the bench list
+  // already carries (`_bench_json`), so it's merged in here by id rather
+  // than duplicated into `/api/rank` itself.
+  const conditionById = new Map(bench.map(p => [p.id, p.condition]));
   picker.innerHTML = `
     <div class="row">
-      <span class="muted">Bring on for ${state[side].name} at ${position} (sorted by natural-position rating):</span>
+      <span class="muted">Bring on for ${state[side].name} at ${position} (name, natural position, fit at ${position}, condition):</span>
       ${sortToggleHtml("live-sub-picker-sort")}
-      ${sortedBench.map(p => `<button class="live-sub-pick" data-id="${p.id}">${p.name} (${p.natural_fit.toFixed(1)})</button>`).join("")}
+    </div>
+    <div class="row">
+      ${sorted.map(p => `<button class="live-sub-pick" data-id="${p.id}">${p.name} (${p.natural_position}) - fit ${p.fit.toFixed(1)}, condition ${(conditionById.get(p.id) ?? 100).toFixed(0)}</button>`).join("")}
     </div>`;
   wireSortToggle("live-sub-picker-sort", () => liveBenchSortDir, (d) => { liveBenchSortDir = d; },
     () => renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubsFor, reportTargetId));
@@ -774,6 +815,40 @@ function renderLiveSubPicker(state, side, position, boxId, onFinished, allowSubs
       }
     };
   });
+}
+
+// First click on a "Swap positions..." button remembers that on-field
+// player; a second click (same side, different position) performs the
+// actual swap via `/api/match/live/<id>/swap`. Clicking the SAME position
+// again cancels the pending swap, and picking a position on the OTHER side
+// restarts the pending swap on that side instead (a swap is always within
+// one team, same as the real rugby mechanic this models).
+function handleSwapClick(state, side, position, boxId, onFinished, allowSubsFor, reportTargetId) {
+  const picker = document.getElementById("live-sub-picker");
+  if (!pendingSwap || pendingSwap.side !== side) {
+    pendingSwap = {side, position};
+    picker.innerHTML = `<p class="muted">Swap ${position} with which other on-field position for ${state[side].name}? Click "Swap positions..." on the other player.</p>`;
+    return;
+  }
+  if (pendingSwap.position === position) {
+    pendingSwap = null;
+    picker.innerHTML = "";
+    return;
+  }
+  const positionA = pendingSwap.position;
+  const positionB = position;
+  pendingSwap = null;
+  (async () => {
+    try {
+      const next = await api(`/api/match/live/${state.session_id}/swap`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({team: side, position_a: positionA, position_b: positionB}),
+      });
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+    } catch (e) {
+      alert("Could not make that swap: " + e.message);
+    }
+  })();
 }
 
 // A self-contained HTML file (inlined CSS, no external requests) of
@@ -969,6 +1044,20 @@ function renderReport(data, targetId, startRevealed) {
   const scorerRows = (data.top_scorers || []).slice(0, 6).map(s =>
     `<tr><td>${s.name}</td><td>${s.team}</td><td>${s.points}</td><td>${s.tries}</td><td>${s.conversions}</td><td>${s.penalty_goals}</td></tr>`
   ).join("");
+  // "Injuries this match" - a clear, standalone section (not just buried in
+  // the commentary log, see task notes) built straight from `data.injuries`
+  // (`MatchResult.injury_details` server-side - who, which team, which
+  // position, at what minute).
+  const injuryRows = (data.injuries || []).map(inj => `
+    <tr><td>${inj.minute}'</td><td>${inj.team}</td><td>${inj.player}</td><td>${inj.position}</td>
+    <td>${inj.severity || ""}</td><td>${layoffText(inj.layoff_matches)}</td></tr>`
+  ).join("");
+  const injuryHtml = injuryRows
+    ? `<h3>Injuries this match</h3><table class="stats">
+        <tr><th>Minute</th><th>Team</th><th>Player</th><th>Position</th><th>Severity</th><th>Expected out</th></tr>
+        ${injuryRows}
+      </table>`
+    : "";
   const playbackId = `${targetId || "report"}-playback`;
   const fullEventsHtml = data.events.map(formatEventLine).join("");
   // `reportHtml` (used for the downloadable snapshot) always shows every
@@ -986,7 +1075,8 @@ function renderReport(data, targetId, startRevealed) {
     ${scorerRows ? `<h3>Top scorers</h3><table class="stats">
       <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
       ${scorerRows}
-    </table>` : ""}`;
+    </table>` : ""}
+    ${injuryHtml}`;
   // The final score/Player of the Match/box score are spoilers - they stay
   // hidden (`spoilersId`, class "hidden") until the paced reveal actually
   // reaches full time (naturally, or via "Skip to end"/"Skip to next
@@ -1009,6 +1099,7 @@ function renderReport(data, targetId, startRevealed) {
         <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
         ${scorerRows}
       </table>` : ""}
+      ${injuryHtml}
     </div>`;
   const snapshotBtnId = `${targetId || "report"}-snapshot-btn`;
   box.innerHTML = liveHtml + snapshotButtonHtml(snapshotBtnId);
@@ -1595,7 +1686,43 @@ function wireCollapsibles(box) {
   });
 }
 
-function renderTournamentProgress(resultsSoFar, progress) {
+// Shared by the interactive tournament's live progress view and the final
+// (interactive AND non-interactive /api/tournament/run) report - every
+// injury recorded so far, which team, which match (links to that match's
+// full report the same way "Results so far" rows already do).
+// "Expected out": at the moment the injury happened, this many of that
+// team's matches (this match itself doesn't count); 0 ("knock") means it
+// never actually cost them a match. See `engine/match_engine.py`'s
+// INJURY_SEVERITY_TIERS for the honest, documented severity table this
+// number comes from - never a continuous/invented recovery estimate.
+function layoffText(matches) {
+  if (matches === undefined || matches === null) return "";
+  return matches > 0 ? `out ${matches} match${matches === 1 ? "" : "es"}` : "played through";
+}
+
+function injuryReportTable(injuryReport) {
+  const rows = injuryReport.map(inj => {
+    // `matches_remaining` is LIVE (as of right now, in this tournament's
+    // current state) - can be less than `layoff_matches` (the original
+    // tier roll) if further matches have already been played since the
+    // injury happened; it's only present when the server had a running
+    // tournament's availability ledger to read it from (see
+    // `_injury_report_json` in webapp.py).
+    const remaining = inj.matches_remaining;
+    const statusText = remaining === undefined
+      ? layoffText(inj.layoff_matches)
+      : (remaining > 0 ? `out for ${remaining} more match${remaining === 1 ? "" : "es"}` : "available now");
+    return `
+    <tr><td>${inj.minute}'</td><td>${inj.team}</td><td>${inj.player}</td><td>${inj.position}</td>
+    <td>${inj.severity || ""}</td><td>${statusText}</td>
+    <td>${matchLink({home: inj.home, away: inj.away, scoreline: inj.scoreline, match_id: inj.match_id})}</td></tr>`;
+  }).join("");
+  return `<table class="stats">
+    <tr><th>Minute</th><th>Team</th><th>Player</th><th>Position</th><th>Severity</th><th>Status</th><th>Match</th></tr>
+    ${rows}</table>`;
+}
+
+function renderTournamentProgress(resultsSoFar, progress, injuryReport) {
   const box = document.getElementById("tournament-progress");
   if (!box) return;
   if ((!resultsSoFar || !resultsSoFar.length) && !progress) { box.innerHTML = ""; return; }
@@ -1624,6 +1751,9 @@ function renderTournamentProgress(resultsSoFar, progress) {
     const resultsHtml = `<table class="stats"><tr><th>Home</th><th>Score</th><th>Away</th></tr>${rows}</table>`;
     html += collapsibleHtml("results", `Results so far (${resultsSoFar.length})`, resultsHtml, false);
   }
+  if (injuryReport && injuryReport.length) {
+    html += collapsibleHtml("injuries", `Injury report (${injuryReport.length})`, injuryReportTable(injuryReport), false);
+  }
   html += `<div id="tournament-match-detail-live"></div>`;
   box.innerHTML = html;
   wireCollapsibles(box);
@@ -1645,7 +1775,7 @@ function renderTournamentProgress(resultsSoFar, progress) {
 function handleTournamentSessionState(state, status, myTeam) {
   const liveArea = document.getElementById("tournament-live-area");
   const banner = document.getElementById("tournament-stage-banner");
-  renderTournamentProgress(state.results_so_far, state.progress);
+  renderTournamentProgress(state.results_so_far, state.progress, state.injury_report);
   if (state.status === "error") {
     if (banner) banner.innerHTML = "";
     status.textContent = "Error: " + state.error;
@@ -1783,6 +1913,9 @@ function renderTournamentReport(report) {
   }
   const resultsHtml = report.results.map(r => `<div>${matchLink(r)}</div>`).join("");
   html += collapsibleHtml("final-all-results", "All results (click any match for the full simulation)", resultsHtml, false);
+  if (report.injury_report && report.injury_report.length) {
+    html += collapsibleHtml("final-injuries", `Injury report (${report.injury_report.length})`, injuryReportTable(report.injury_report), false);
+  }
   const snapshotHtml = html; // captured before the match-detail div fills in and before the button itself
   box.innerHTML = html + snapshotButtonHtml("tournament-snapshot-btn");
   wireCollapsibles(box);

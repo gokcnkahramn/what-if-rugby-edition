@@ -312,3 +312,103 @@ def test_tournament_resume_rejects_unknown_or_not_paused_session():
     # Already finished - resuming it again should be rejected, not hang.
     res = client.post(f"/api/tournament/{start['session_id']}/resume")
     assert res.status_code == 400
+
+
+def test_live_match_swap_endpoint_swaps_two_on_field_players():
+    client = _client()
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+
+    start = client.post("/api/match/live/start", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "seed": 11,
+    }).get_json()
+    session_id = start["session_id"]
+    pos_a = start["home"]["lineup"][0]["position"]
+    pos_b = start["home"]["lineup"][1]["position"]
+    name_a = start["home"]["lineup"][0]["name"]
+    name_b = start["home"]["lineup"][1]["name"]
+
+    swapped = client.post(f"/api/match/live/{session_id}/swap", json={
+        "team": "home", "position_a": pos_a, "position_b": pos_b,
+    }).get_json()
+    assert "error" not in swapped
+    by_pos = {p["position"]: p["name"] for p in swapped["home"]["lineup"]}
+    assert by_pos[pos_a] == name_b
+    assert by_pos[pos_b] == name_a
+    # Not a substitution - the sub counter is untouched.
+    assert swapped["events"][-1]["text"].startswith("Positional swap")
+
+
+def test_live_match_swap_rejects_unknown_session_or_bad_positions():
+    client = _client()
+    assert client.post("/api/match/live/does-not-exist/swap", json={
+        "team": "home", "position_a": "Hooker", "position_b": "Fullback",
+    }).status_code == 404
+
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+    start = client.post("/api/match/live/start", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "seed": 11,
+    }).get_json()
+    bad = client.post(f"/api/match/live/{start['session_id']}/swap", json={
+        "team": "home", "position_a": "Hooker", "position_b": "Hooker",
+    })
+    assert bad.status_code == 400
+
+
+def test_match_report_includes_injury_detail_list():
+    client = _client()
+    home = _build_minimal_team(client, "ENG", "England")
+    away = _build_minimal_team(client, "FRA", "France")
+    match = client.post("/api/match", json={
+        "home_team_id": home, "away_team_id": away, "seed": 1,
+    }).get_json()
+    assert "injuries" in match
+    for inj in match["injuries"]:
+        # "severity"/"layoff_matches" - each injury's own rolled tier, see
+        # `engine/match_engine.py`'s INJURY_SEVERITY_TIERS.
+        assert {"minute", "team", "player", "position", "severity", "layoff_matches"} <= set(inj.keys())
+
+
+def test_live_match_lineup_and_bench_expose_condition_separately_from_fit():
+    # Position fit and match condition are two separate numbers (see
+    # README/webapp.py's `_lineup_json`) - this confirms both are present,
+    # under different keys, in the live-match JSON a real client reads.
+    client = _client()
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+    start = client.post("/api/match/live/start", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "seed": 11,
+    }).get_json()
+    for p in start["home"]["lineup"] + start["home"]["bench"]:
+        assert "natural_fit" in p
+        assert "condition" in p
+    # Condition is a live in-match stamina reading (0-100) - having played
+    # some of the match already, at least someone on the park isn't still
+    # sitting at a fresh 100.
+    assert any(p["condition"] < 100.0 for p in start["home"]["lineup"])
+
+
+def test_tournament_report_and_session_state_include_injury_report():
+    client = _client()
+    squad_player_ids = {}
+    for code in ["ENG", "FRA", "IRE", "SCO"]:
+        players = client.get(f"/api/pool/{code}?season=2026").get_json()
+        squad_player_ids[code] = [p["id"] for p in players]
+
+    report = client.post("/api/tournament/run", json={
+        "type": "custom", "format": "round_robin",
+        "squad_player_ids": squad_player_ids, "seed": 4,
+    }).get_json()
+    assert "injury_report" in report
+    for inj in report["injury_report"]:
+        assert {"minute", "team", "player", "position", "match_id"} <= set(inj.keys())
+
+    team_ids = {
+        "A": _build_minimal_team(client, "ENG", "A"),
+        "B": _build_minimal_team(client, "FRA", "B"),
+    }
+    start = client.post("/api/tournament/start", json={
+        "type": "custom", "team_ids": team_ids, "format": "round_robin", "seed": 4,
+    }).get_json()
+    assert "injury_report" in start

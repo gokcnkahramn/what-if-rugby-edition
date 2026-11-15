@@ -71,6 +71,44 @@ P_INJURY_PER_DRIVE = 0.012
 P_TACTICAL_SUB_PER_DRIVE = 0.02
 TACTICAL_SUB_WINDOW = (50, 75)  # minute range tactical subs are allowed in
 
+# -- Stamina/fatigue (heuristic, documented honestly - no real sports-science
+# fatigue model is being claimed here) --------------------------------------
+# Every player starts a match at condition 100 (single friendlies and draft
+# mode ALWAYS start here - see module docstring; tournament squads mode can
+# start a player below 100, see `tournament/availability.py`). Condition
+# decays every drive while a player is actively on the field, at a rate
+# driven by their `Attributes.fitness` (1-100): a fitness-50 player loses it
+# at the "base" rate, fitness 100 loses it at half that rate, fitness 1 loses
+# it at 1.5x that rate - not a physiological model, just a plausible, tunable
+# gradient so "fitness" (an attribute that otherwise barely mattered outside
+# a couple of position-profile weights) has a visible in-match payoff.
+STAMINA_DECAY_PER_MINUTE = 0.5
+STAMINA_FLOOR = 20.0  # a gassed player still plays, just at reduced effectiveness
+# How much a player's condition actually softens their rating contribution:
+# at condition 100 this is 1.0 (no change); at the floor (20) it's 0.76 - a
+# deliberately modest effect (fatigue should be noticeable late in a tight
+# match, not swing the whole simulation on its own).
+STAMINA_MIN_FACTOR = 0.7
+STAMINA_MAX_FACTOR = 1.0
+
+# -- Injury severity (heuristic, documented honestly - not a medical model) -
+# When an injury happens (see `_apply_injury`), one of these tiers is rolled
+# (weighted, not uniform) to decide how many of that player's team's FUTURE
+# matches they miss - real recovery time obviously varies continuously and
+# by injury specifics, but a small, named, inspectable table beats inventing
+# a continuous "days to heal" formula we have no data to back up. "knock"
+# (a stinger/bruise/HIA-type knock) can mean going off for this match with
+# no lingering layoff at all; the more severe tiers cost 1-3 further
+# matches. Each tuple is (name, selection weight, matches missed
+# afterwards - this match itself doesn't count). Tune the weights/layoffs
+# here, nowhere else - `availability.py` just reads whatever is rolled.
+INJURY_SEVERITY_TIERS: Tuple[Tuple[str, float, int], ...] = (
+    ("knock", 0.45, 0),
+    ("muscle strain", 0.30, 1),
+    ("significant injury", 0.18, 2),
+    ("serious injury", 0.07, 3),
+)
+
 
 @dataclass
 class TeamMatchStats:
@@ -129,6 +167,11 @@ class MatchResult:
     # a single match report has no use for this itself.
     injured_players: List[Tuple[str, Player]] = field(default_factory=list)
     carded_players: List[Tuple[str, Player, str]] = field(default_factory=list)
+    # Structured, display-ready detail for each injury in `injured_players`
+    # (same events, just with the minute/position already pulled out instead
+    # of making a caller re-parse the commentary text) - for the web UI's
+    # "Injuries this match" / tournament-wide injury report (see README).
+    injury_details: List[dict] = field(default_factory=list)
 
     @property
     def winner(self) -> Optional[Team]:
@@ -172,7 +215,14 @@ class MatchResult:
 
 class MatchEngine:
     def __init__(self, home: Team, away: Team, seed: Optional[int] = None,
-                 weather: str = "dry"):
+                 weather: str = "dry", initial_condition: Optional[Dict[int, float]] = None):
+        """`initial_condition`, if given, maps `id(player)` -> starting
+        stamina (0-100) for any player who should NOT start this match at a
+        fresh 100 - the hook tournament squads mode uses to carry a
+        short-rest penalty into a player's next match (see
+        `tournament/availability.py`). Omit it (the default) for a single
+        friendly or draft-mode match: every player starts at 100, no
+        exceptions, exactly as before stamina existed."""
         self.home = home
         self.away = away
         self.weather = weather  # "dry" | "wet" | "windy" - mild modifiers
@@ -187,6 +237,8 @@ class MatchEngine:
         self.result: Optional[MatchResult] = None
         self._started = False
         self._finalized = False
+        self._initial_condition = initial_condition or {}
+        self._stamina: Dict[int, float] = {}  # keyed by id(player) - see STAMINA_* above
 
     # ------------------------------------------------------------------
     # Public API
@@ -200,6 +252,26 @@ class MatchEngine:
         team already in this match - for showing "who's on" when deciding
         a manual substitution."""
         return dict(self._active.get(team.name, {}))
+
+    def condition_for(self, player: Player) -> float:
+        """A player's current in-match stamina/condition (0-100, see the
+        STAMINA_* constants) - 100 if they haven't been tracked yet (not
+        started, or this match predates stamina tracking for them)."""
+        return self._stamina.get(id(player), 100.0)
+
+    def _stamina_factor(self, player: Player) -> float:
+        condition = self.condition_for(player)
+        span = STAMINA_MAX_FACTOR - STAMINA_MIN_FACTOR
+        return STAMINA_MIN_FACTOR + span * self._clamp(condition / 100.0, 0.0, 1.0)
+
+    def _decay_stamina(self, team: Team, drive_minutes: int) -> None:
+        for slot in self._active[team.name].values():
+            fitness = slot.player.attributes.fitness
+            fitness_factor = 1.5 - fitness / 100.0  # 0.5 (fitness=100) .. 1.5 (fitness=0)
+            key = id(slot.player)
+            current = self._stamina.get(key, 100.0)
+            current -= STAMINA_DECAY_PER_MINUTE * fitness_factor * drive_minutes
+            self._stamina[key] = max(STAMINA_FLOOR, current)
 
     def bench_for(self, team: Team) -> List[Player]:
         return list(self._bench.get(team.name, []))
@@ -225,6 +297,10 @@ class MatchEngine:
                 for pos, slot in team.lineup.starters.items()
             }
             self._bench[team.name] = list(team.lineup.bench)
+            for slot in team.lineup.starters.values():
+                self._stamina[id(slot.player)] = self._initial_condition.get(id(slot.player), 100.0)
+            for p in team.lineup.bench:
+                self._stamina[id(p)] = self._initial_condition.get(id(p), 100.0)
 
         self.result = MatchResult(home=self.home, away=self.away)
         self.result.stats[self.home.name] = TeamMatchStats()
@@ -242,6 +318,8 @@ class MatchEngine:
 
         self._expire_cards(attacking, self._minute)
         self._expire_cards(defending, self._minute)
+        self._decay_stamina(attacking, drive_minutes)
+        self._decay_stamina(defending, drive_minutes)
 
         self._resolve_drive(attacking, defending, self._minute, self.result)
         self._maybe_personnel_change(self._minute, self.result)
@@ -353,12 +431,41 @@ class MatchEngine:
         bench.remove(replacement)
         self._subs_used[team.name] += 1
         self._active[team.name][position] = SquadSlot(position=position, player=replacement)
+        self._stamina[id(replacement)] = self._initial_condition.get(id(replacement), 100.0)
         if self.result is not None:
             self.result.stats[team.name].substitutions += 1
             self.result.events.append(self._event(
                 self._minute, team,
                 f"Substitution: {replacement.name} replaces "
                 f"{outgoing.player.name if outgoing else '(empty slot)'} ({team.name}, {position.value}).",
+                self.result,
+            ))
+        return True
+
+    def swap_positions(self, team: Team, position_a: Position, position_b: Position) -> bool:
+        """Swaps two of a team's own currently-on-field players between
+        their two positions (e.g. fly-half <-> fullback mid-match) - NOT a
+        substitution: nobody leaves the field, so this doesn't touch
+        `_subs_used`/the 8-replacement cap, and isn't logged as one. Each
+        player keeps their own tracked stamina (keyed by player identity,
+        not by slot), so a tired player is still tired after moving
+        position. Returns False if either position isn't currently filled
+        for this team, or if the two positions are the same."""
+        if position_a == position_b:
+            return False
+        active = self._active.get(team.name, {})
+        slot_a = active.get(position_a)
+        slot_b = active.get(position_b)
+        if slot_a is None or slot_b is None:
+            return False
+        player_a, player_b = slot_a.player, slot_b.player
+        active[position_a] = SquadSlot(position=position_a, player=player_b)
+        active[position_b] = SquadSlot(position=position_b, player=player_a)
+        if self.result is not None:
+            self.result.events.append(self._event(
+                self._minute, team,
+                f"Positional swap: {player_a.name} and {player_b.name} swap "
+                f"({position_a.value} <-> {position_b.value}) for {team.name}.",
                 self.result,
             ))
         return True
@@ -385,7 +492,14 @@ class MatchEngine:
         slots = [s for s in all_slots if s.position in group] if group else all_slots
         if not slots:
             slots = all_slots
-        values = [slot.player.sub_ratings(slot.position).get(category, 50) for slot in slots]
+        # Stamina softens every category's contribution a little (see
+        # STAMINA_* above) - a tired team is a worse team at everything, not
+        # just one stat, which is why this is applied here rather than
+        # singled out to e.g. just tackling or handling.
+        values = [
+            slot.player.sub_ratings(slot.position).get(category, 50) * self._stamina_factor(slot.player)
+            for slot in slots
+        ]
         return sum(values) / len(values) if values else 50.0
 
     def _maybe_personnel_change(self, minute: int, result: MatchResult) -> None:
@@ -410,6 +524,17 @@ class MatchEngine:
         injured = slot.player
         result.stats[team.name].injuries += 1
         result.injured_players.append((team.name, injured))
+        severity, _weight, layoff_matches = self.rng.choices(
+            INJURY_SEVERITY_TIERS, weights=[t[1] for t in INJURY_SEVERITY_TIERS],
+        )[0]
+        result.injury_details.append({
+            "minute": minute, "team": team.name, "player": injured.name,
+            "position": position.value,
+            # See `INJURY_SEVERITY_TIERS` above - `layoff_matches` is this
+            # specific injury's roll, read by `availability.record_match`
+            # instead of a single flat constant.
+            "severity": severity, "layoff_matches": layoff_matches,
+        })
 
         bench = self._bench[team.name]
         if bench and self._subs_used[team.name] < MAX_SUBSTITUTIONS:
@@ -417,6 +542,7 @@ class MatchEngine:
             bench.remove(replacement)
             self._subs_used[team.name] += 1
             self._active[team.name][position] = SquadSlot(position=position, player=replacement)
+            self._stamina[id(replacement)] = self._initial_condition.get(id(replacement), 100.0)
             result.stats[team.name].substitutions += 1
             result.events.append(self._event(
                 minute, team,
@@ -442,16 +568,25 @@ class MatchEngine:
             return
         # Bring on whichever bench player would be the biggest upgrade at
         # whichever position they'd replace - a simple proxy for "freshest
-        # legs for a tiring starter" rather than a specific injury.
+        # legs for a tiring starter" rather than a specific injury. The
+        # starter's side of the comparison uses their *current* (stamina-
+        # adjusted) rating, not their fresh one - this is the literal "why"
+        # a tactical sub happens: a tired starter's effective rating has
+        # dropped, making them look like a bigger upgrade target than an
+        # equally-rated-on-paper but fresher teammate.
         position, slot = max(
             slots,
-            key=lambda item: max(p.rating_at(item[0]) for p in bench) - item[1].player.rating_at(item[0]),
+            key=lambda item: (
+                max(p.rating_at(item[0]) for p in bench)
+                - item[1].player.rating_at(item[0]) * self._stamina_factor(item[1].player)
+            ),
         )
         replacement = max(bench, key=lambda p: p.rating_at(position))
         outgoing = slot.player
         bench.remove(replacement)
         self._subs_used[team.name] += 1
         self._active[team.name][position] = SquadSlot(position=position, player=replacement)
+        self._stamina[id(replacement)] = self._initial_condition.get(id(replacement), 100.0)
         result.stats[team.name].substitutions += 1
         result.events.append(self._event(
             minute, team,

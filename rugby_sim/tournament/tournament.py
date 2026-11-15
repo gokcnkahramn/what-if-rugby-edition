@@ -141,6 +141,7 @@ class Tournament:
         self.teams = teams or {}
         self.squads = squads or {}
         self.availability = TournamentAvailability()
+        self._pending_condition: Dict[str, Dict[int, float]] = {}
         self.my_team = my_team
         self.pause_hook = pause_hook
         self.on_match_played = on_match_played
@@ -176,16 +177,49 @@ class Tournament:
                     f"No available players left for '{name}' this match - "
                     f"everyone in their pool is currently sidelined."
                 )
-            return auto_draft_team(name, pool, short_code=name[:3].upper())
-        return self._team(name)
+            # Condition reflects THIS team's rest since its own last match
+            # (see `availability.starting_condition`) - it also discounts
+            # who the greedy auto-draft picks (a tired starter can lose a
+            # close call to a fresher squad player), not just the resulting
+            # match's stamina starting point.
+            condition = self.availability.starting_condition(name, pool)
+            team = auto_draft_team(name, pool, short_code=name[:3].upper(), condition=condition)
+            selected_ids = {id(slot.player) for slot in team.lineup.starters.values()}
+            selected_ids |= {id(p) for p in team.lineup.bench}
+            self.availability.mark_squad(name, selected_ids)
+            self._pending_condition[name] = condition
+            return team
+
+        # `teams=` mode (fixed lineup reused for the whole tournament): the
+        # lineup itself never changes, but the SAME rest-penalty condition
+        # bookkeeping still applies to whoever's actually in it - a fixed
+        # squad's players should still show up more tired as a tournament's
+        # fixtures pile up, not just squads-mode's fresh-draft-every-match
+        # players. No auto-draft needed here (the lineup is already fixed);
+        # just mark its existing starters/bench as "selected" and read back
+        # their condition the same way squads mode does.
+        team = self._team(name)
+        pool = [slot.player for slot in team.lineup.starters.values()] + list(team.lineup.bench)
+        condition = self.availability.starting_condition(name, pool)
+        selected_ids = {id(p) for p in pool}
+        self.availability.mark_squad(name, selected_ids)
+        self._pending_condition[name] = condition
+        return team
 
     def _play(self, home_name: str, away_name: str, seed: Optional[int]) -> MatchResult:
         home_team = self._resolve_team_for_match(home_name)
         away_team = self._resolve_team_for_match(away_name)
+        # Combined starting-condition map (id(player) -> condition) for
+        # whichever side(s) played a previous match recently enough to carry
+        # a rest penalty - `_resolve_team_for_match` now populates this for
+        # BOTH squads mode and teams mode (see its teams-mode branch above).
+        initial_condition: Dict[int, float] = {}
+        initial_condition.update(self._pending_condition.pop(home_name, {}))
+        initial_condition.update(self._pending_condition.pop(away_name, {}))
         if self.pause_hook is not None and self.my_team is not None and self.my_team in (home_name, away_name):
-            result = self.pause_hook(home_name, away_name, home_team, away_team, seed)
+            result = self.pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition)
         else:
-            result = MatchEngine(home_team, away_team, seed=seed).run()
+            result = MatchEngine(home_team, away_team, seed=seed, initial_condition=initial_condition or None).run()
         self.availability.record_match(result)
         if self.on_match_played is not None:
             self.on_match_played(home_name, away_name, result)

@@ -117,13 +117,24 @@ _next_team_id = 1
 # drilled into afterwards, same detail as a single friendly) ---------------
 _MATCH_RESULTS: Dict[str, MatchResult] = {}
 _next_match_id = 1
+# A tournament's progress/results-so-far gets rebuilt from scratch on every
+# status poll (see `_tournament_session_state_json`) - this caches one
+# `match_id` per result (keyed by python id(result)) so re-describing the
+# same already-played match across polls doesn't keep minting fresh ids for
+# it, which would break any link to it (e.g. from the injury report below)
+# saved from an earlier poll.
+_MATCH_ID_BY_RESULT: Dict[int, str] = {}
 
 
 def _register_match(result: MatchResult) -> str:
     global _next_match_id
+    existing = _MATCH_ID_BY_RESULT.get(id(result))
+    if existing is not None:
+        return existing
     match_id = f"m{_next_match_id}"
     _next_match_id += 1
     _MATCH_RESULTS[match_id] = result
+    _MATCH_ID_BY_RESULT[id(result)] = match_id
     return match_id
 
 
@@ -456,6 +467,7 @@ def _match_json(result: MatchResult) -> dict:
              "score_home": e.score_home, "score_away": e.score_away}
             for e in result.events
         ],
+        "injuries": list(result.injury_details),
         "stats": {
             name: {
                 "tries": s.tries, "conversions": s.conversions,
@@ -517,7 +529,45 @@ def _player_tournament_stats_json(s) -> dict:
     }
 
 
-def _report_json(report: TournamentReport) -> dict:
+def _injury_report_json(results: List[MatchResult], availability=None) -> list:
+    """Every injury across every match in `results` (auto-simmed AND the
+    user's own, in an interactive tournament - `results` is just whichever
+    list the caller has: `session.completed` mid-tournament, or
+    `report.results` for the final/non-interactive report), each one
+    carrying its own match's `match_id` so the web UI can link straight to
+    that match's full report, same convention as "Results so far".
+
+    `availability`, if given (the `Tournament`/`CustomTournament`'s own
+    `TournamentAvailability`), adds a LIVE `matches_remaining` - how many
+    more of that player's team's matches they're sidelined for as of right
+    now, which can be less than the injury's original `layoff_matches` if
+    further matches have already been played since. Without it (no
+    tournament context, e.g. called on a plain list of results), each entry
+    still has its own `layoff_matches`/`severity` from the match itself,
+    just not a live countdown."""
+    out = []
+    for result in results:
+        if not result.injury_details:
+            continue
+        match_id = _register_match(result)
+        # Lines up with `injury_details` by index - see
+        # `availability.record_match`'s own identical assumption.
+        players_by_index = list(result.injured_players)
+        for i, detail in enumerate(result.injury_details):
+            entry = {
+                **detail,
+                "match_id": match_id,
+                "scoreline": result.scoreline(),
+                "home": result.home.name, "away": result.away.name,
+            }
+            if availability is not None and i < len(players_by_index):
+                team_name, player = players_by_index[i]
+                entry["matches_remaining"] = availability.matches_remaining(team_name, player)
+            out.append(entry)
+    return out
+
+
+def _report_json(report: TournamentReport, availability=None) -> dict:
     top_scorers = sorted(
         (s for s in report.player_stats_aggregate.values() if s.points > 0),
         key=lambda s: s.points, reverse=True,
@@ -545,6 +595,7 @@ def _report_json(report: TournamentReport) -> dict:
             _player_tournament_stats_json(report.player_of_tournament)
             if report.player_of_tournament else None
         ),
+        "injury_report": _injury_report_json(report.results, availability=availability),
     }
 
 
@@ -622,14 +673,23 @@ _next_live_match_id = 1
 
 
 def _lineup_json(engine: MatchEngine, team: Team) -> list:
+    # `condition` (live, in-match stamina, see `MatchEngine.condition_for`) is
+    # deliberately a separate field from `natural_fit` - position fit and
+    # match condition are two different numbers, never folded into one on
+    # the wire, even though the engine itself multiplies them together
+    # internally when computing a team's rating (see `_stamina_factor`).
     return [
-        {"position": pos.value, **_player_json(slot.player)}
+        {"position": pos.value, "condition": round(engine.condition_for(slot.player), 1),
+         **_player_json(slot.player)}
         for pos, slot in engine.active_lineup(team).items()
     ]
 
 
 def _bench_json(engine: MatchEngine, team: Team) -> list:
-    return [_player_json(p) for p in engine.bench_for(team)]
+    return [
+        {"condition": round(engine.condition_for(p), 1), **_player_json(p)}
+        for p in engine.bench_for(team)
+    ]
 
 
 def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
@@ -657,14 +717,17 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
     }
 
 
-def _start_live_match(home: Team, away: Team, seed: Optional[int]) -> str:
+def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condition: Optional[Dict[int, float]] = None) -> str:
     """Starts a pausable match (engine advanced to its first checkpoint) and
     registers it in `_LIVE_MATCHES`, returning its session id. Shared by the
     single-friendly `/api/match/live/start` endpoint and the interactive
     tournament's pause hook, which needs the exact same pausable flow for
-    whichever fixture involves the user's own team."""
+    whichever fixture involves the user's own team. `initial_condition`:
+    see `MatchEngine.__init__` - carries a squads-mode team's short-rest
+    stamina penalty (if any) into their own interactively-played match too,
+    same as an auto-simmed one (`Tournament._play`)."""
     global _next_live_match_id
-    engine = MatchEngine(home, away, seed=seed)
+    engine = MatchEngine(home, away, seed=seed, initial_condition=initial_condition)
     engine.start()
     if LIVE_MATCH_CHECKPOINTS:
         engine.advance_to(LIVE_MATCH_CHECKPOINTS[0])
@@ -743,6 +806,29 @@ def api_match_live_substitute(session_id: str):
     return jsonify(_live_match_state_json(session_id, engine))
 
 
+@app.post("/api/match/live/<session_id>/swap")
+def api_match_live_swap(session_id: str):
+    """Swaps two of a team's own ON-FIELD players between their two
+    positions (e.g. fly-half <-> fullback mid-match) - not a substitution,
+    see `MatchEngine.swap_positions`. `team` is "home"/"away";
+    `position_a`/`position_b` are both currently-filled positions."""
+    engine = _LIVE_MATCHES.get(session_id)
+    if engine is None:
+        return jsonify({"error": f"unknown live match session {session_id}"}), 404
+    body = request.get_json(force=True)
+    team = engine.home if body.get("team") == "home" else engine.away
+    try:
+        position_a = Position(body["position_a"])
+        position_b = Position(body["position_b"])
+    except ValueError:
+        return jsonify({"error": "unknown position"}), 400
+
+    ok = engine.swap_positions(team, position_a, position_b)
+    if not ok:
+        return jsonify({"error": "could not make that swap (both positions must be currently filled, and different)"}), 400
+    return jsonify(_live_match_state_json(session_id, engine))
+
+
 # -- API: tournament modes ------------------------------------------------
 @app.get("/api/tournament/options")
 def api_tournament_options():
@@ -800,27 +886,28 @@ def api_tournament_run():
 
     try:
         if kind == "real":
-            report = Tournament(teams=teams, squads=squads).run_real(
-                body["key"], season=body.get("season", "2026"), seed=seed,
-            )
+            t = Tournament(teams=teams, squads=squads)
+            report = t.run_real(body["key"], season=body.get("season", "2026"), seed=seed)
         elif kind == "world_cup_2027":
-            report = Tournament(teams=teams, squads=squads).run_world_cup_2027(
-                fixture_mode=body.get("fixture_mode", "specific"), seed=seed,
-            )
+            t = Tournament(teams=teams, squads=squads)
+            report = t.run_world_cup_2027(fixture_mode=body.get("fixture_mode", "specific"), seed=seed)
         elif kind == "historical_world_cup":
-            report = Tournament(teams=teams, squads=squads).run_historical_world_cup(int(body["year"]), seed=seed)
+            t = Tournament(teams=teams, squads=squads)
+            report = t.run_historical_world_cup(int(body["year"]), seed=seed)
         elif kind == "historical_six_nations":
-            report = Tournament(teams=teams, squads=squads).run_historical_six_nations(int(body["year"]), seed=seed)
+            t = Tournament(teams=teams, squads=squads)
+            report = t.run_historical_six_nations(int(body["year"]), seed=seed)
         elif kind == "custom":
             fmt = body.get("format", "round_robin")
             pool_count = int(body.get("pool_count", 2))
-            report = CustomTournament(teams=teams, format=fmt, squads=squads).run(pool_count=pool_count, seed=seed)
+            t = CustomTournament(teams=teams, format=fmt, squads=squads)
+            report = t.run(pool_count=pool_count, seed=seed)
         else:
             return jsonify({"error": f"unknown tournament type {kind}"}), 400
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    return jsonify(_report_json(report))
+    return jsonify(_report_json(report, availability=t.availability))
 
 
 # -- API: interactive ("my team") tournaments ----------------------------
@@ -862,6 +949,11 @@ class TournamentSession:
     # every match (see `_tournament_progress_json`) - lets the web UI show
     # "what stage am I in, what's the table like right now" mid-tournament.
     progress: Optional[dict] = None
+    # The running `Tournament`/`CustomTournament` instance's own
+    # `TournamentAvailability`, once it exists - lets `_injury_report_json`
+    # compute a LIVE "matches remaining" for each injury (see
+    # `_tournament_session_state_json`).
+    availability: Optional[object] = None
 
 
 _TOURNAMENT_SESSIONS: Dict[str, TournamentSession] = {}
@@ -895,6 +987,7 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
     # running feed + current stage/standings to show alongside whatever
     # else is happening.
     results_so_far = [_match_summary_json(r) for r in session.completed]
+    injury_report = _injury_report_json(session.completed, availability=session.availability)
     progress = session.progress
     if session.status == "paused":
         live = _LIVE_MATCHES[session.live_session_id]
@@ -903,21 +996,25 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
             "home": session.home_name, "away": session.away_name,
             "live_match": _live_match_state_json(session.live_session_id, live),
             "results_so_far": results_so_far, "progress": progress,
+            "injury_report": injury_report,
         }
     if session.status == "finished":
         return {
             "session_id": session_id, "status": "finished",
-            "report": _report_json(session.report), "results_so_far": results_so_far,
-            "progress": progress,
+            "report": _report_json(session.report, availability=session.availability),
+            "results_so_far": results_so_far,
+            "progress": progress, "injury_report": injury_report,
         }
     if session.status == "error":
         return {
             "session_id": session_id, "status": "error", "error": session.error,
             "results_so_far": results_so_far, "progress": progress,
+            "injury_report": injury_report,
         }
     return {
         "session_id": session_id, "status": session.status,
         "results_so_far": results_so_far, "progress": progress,
+        "injury_report": injury_report,
     }
 
 
@@ -961,8 +1058,8 @@ def _build_tournament(kind: str, body: dict, teams: Dict[str, Team], squads: Dic
 
 def _run_tournament_session(session: TournamentSession, kind: str, body: dict,
                              teams: Dict[str, Team], squads: Dict[str, List[Player]], my_team: Optional[str]):
-    def pause_hook(home_name, away_name, home_team, away_team, seed):
-        live_session_id = _start_live_match(home_team, away_team, seed)
+    def pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition=None):
+        live_session_id = _start_live_match(home_team, away_team, seed, initial_condition)
         session.live_session_id = live_session_id
         session.home_name, session.away_name = home_name, away_name
         session.status = "paused"
@@ -978,6 +1075,7 @@ def _run_tournament_session(session: TournamentSession, kind: str, body: dict,
         instance = holder.get("instance")
         if instance is not None:
             session.progress = _tournament_progress_json(instance)
+            session.availability = instance.availability
 
     try:
         report = _build_tournament(kind, body, teams, squads, my_team, pause_hook, on_match_played, holder)

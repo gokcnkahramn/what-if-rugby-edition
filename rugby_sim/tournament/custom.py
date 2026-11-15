@@ -30,6 +30,10 @@ class CustomTournament:
 
     # -- live-progress passthrough (see `Tournament.current_stage` etc.) --
     @property
+    def availability(self):
+        return self._tournament.availability
+
+    @property
     def current_stage(self):
         return self._tournament.current_stage
 

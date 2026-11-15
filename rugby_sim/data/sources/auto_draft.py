@@ -10,25 +10,57 @@ of being copy-pasted into test scripts and ad-hoc checks.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from ...models.player import Player
 from ...models.position import Position
 from ...models.team import Lineup, Team
 
+# How much a player's currently-recovered condition (0-100, from
+# `tournament/availability.py`'s short-rest tracking - always 100/absent for
+# a plain pool with no tournament rest bookkeeping) discounts their raw fit
+# rating during greedy auto-draft selection. Deliberately the SAME
+# 0.7-1.0 scaling `MatchEngine` uses for in-match stamina (see
+# `engine/match_engine.py` STAMINA_MIN_FACTOR/STAMINA_MAX_FACTOR) so "how
+# much a tired player is worth" means the same thing whether it's being
+# judged for live-match ratings or for "should the AI start them again so
+# soon". This can let a fresher, slightly-lower-rated squad player edge out
+# a fatigued starter for a slot - it never makes a tired player unselectable.
+CONDITION_MIN_FACTOR = 0.7
+CONDITION_MAX_FACTOR = 1.0
 
-def auto_draft_lineup(pool: List[Player], bench_size: int = 8) -> Lineup:
+
+def _condition_factor(player: Player, condition: Optional[Dict[int, float]]) -> float:
+    if not condition:
+        return 1.0
+    cond = condition.get(id(player), 100.0)
+    cond = max(0.0, min(100.0, cond))
+    span = CONDITION_MAX_FACTOR - CONDITION_MIN_FACTOR
+    return CONDITION_MIN_FACTOR + span * (cond / 100.0)
+
+
+def auto_draft_lineup(
+    pool: List[Player], bench_size: int = 8, condition: Optional[Dict[int, float]] = None,
+) -> Lineup:
     """Fills all 15 starting positions by always taking, for each position
-    in turn, whichever remaining player rates highest at it - then fills
-    the bench with the next-best remaining players by their own natural
-    position, and names whoever has the highest `leadership` as captain."""
+    in turn, whichever remaining player rates highest at it (discounted by
+    their current recovered `condition`, if given - see `_condition_factor`
+    above) - then fills the bench with the next-best remaining players by
+    their own natural position, and names whoever has the highest
+    `leadership` as captain.
+
+    `condition`: optional `{id(player): 0-100}` of currently-recovered
+    condition, from `TournamentAvailability.starting_condition` - a player
+    missing from this dict (or `condition=None`, the default - every caller
+    outside tournament squads mode) is treated as fully fresh (100), so a
+    friendly/draft-mode auto-draft is completely unaffected by this feature."""
     lineup = Lineup()
     remaining = list(pool)
 
     for position in Position:
         if not remaining:
             break
-        best = max(remaining, key=lambda p: p.rating_at(position))
+        best = max(remaining, key=lambda p: p.rating_at(position) * _condition_factor(p, condition))
         lineup.set_starter(position, best)
         remaining = [p for p in remaining if p is not best]
 
@@ -46,6 +78,9 @@ def auto_draft_lineup(pool: List[Player], bench_size: int = 8) -> Lineup:
     return lineup
 
 
-def auto_draft_team(name: str, pool: List[Player], short_code: Optional[str] = None) -> Team:
-    lineup = auto_draft_lineup(pool)
+def auto_draft_team(
+    name: str, pool: List[Player], short_code: Optional[str] = None,
+    condition: Optional[Dict[int, float]] = None,
+) -> Team:
+    lineup = auto_draft_lineup(pool, condition=condition)
     return Team(name=name, short_code=short_code or name[:3].upper(), lineup=lineup)
