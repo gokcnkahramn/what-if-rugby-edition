@@ -632,6 +632,7 @@ def _report_json(report: TournamentReport, availability=None) -> dict:
             if report.player_of_tournament else None
         ),
         "injury_report": _injury_report_json(report.results, availability=availability),
+        "card_report": _card_report_json(report.results, availability=availability),
     }
 
 
@@ -1024,6 +1025,7 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
     # else is happening.
     results_so_far = [_match_summary_json(r) for r in session.completed]
     injury_report = _injury_report_json(session.completed, availability=session.availability)
+    card_report = _card_report_json(session.completed, availability=session.availability)
     progress = session.progress
     if session.status == "paused":
         live = _LIVE_MATCHES[session.live_session_id]
@@ -1032,7 +1034,7 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
             "home": session.home_name, "away": session.away_name,
             "live_match": _live_match_state_json(session.live_session_id, live),
             "results_so_far": results_so_far, "progress": progress,
-            "injury_report": injury_report,
+            "injury_report": injury_report, "card_report": card_report,
         }
     if session.status == "finished":
         return {
@@ -1040,17 +1042,18 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
             "report": _report_json(session.report, availability=session.availability),
             "results_so_far": results_so_far,
             "progress": progress, "injury_report": injury_report,
+            "card_report": card_report,
         }
     if session.status == "error":
         return {
             "session_id": session_id, "status": "error", "error": session.error,
             "results_so_far": results_so_far, "progress": progress,
-            "injury_report": injury_report,
+            "injury_report": injury_report, "card_report": card_report,
         }
     return {
         "session_id": session_id, "status": session.status,
         "results_so_far": results_so_far, "progress": progress,
-        "injury_report": injury_report,
+        "injury_report": injury_report, "card_report": card_report,
     }
 
 
