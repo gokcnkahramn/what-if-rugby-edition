@@ -40,6 +40,26 @@ front row's scrum rating with two wingers who barely scrummage. Categories
 not in that map (tackling, attack, handling, discipline) are deliberately
 whole-team averages, since those really are universal involvements.
 
+Cards: a yellow card is a 10-minute sin-bin (`_issue_card`); a red card is
+off for the rest of the match (modeled as a sin-bin lasting `MATCH_MINUTES`,
+i.e. it never expires before full time), with no replacement brought on -
+the team simply plays the rest of the match a player short (same rating
+penalty machinery, `_active_card_penalty`, that a no-cover injury uses). A
+second yellow card for the SAME player in the SAME match is escalated to a
+red (real World Rugby law 19.2), tracked per-player for the match's
+duration regardless of whether the first yellow's 10 minutes have actually
+elapsed - see `_issue_card`. This project does NOT model the newer,
+still-trialled "20-minute red card" law variant (where the team can bring
+on a like-for-like replacement after 20 minutes following a send-off,
+trialled in parts of the game since 2024-2026) - every red card here is the
+older, simpler "player's gone, team's down a body for good" version, the
+same as before this feature existed. Yellow cards do NOT carry any
+automatic suspension into a player's next match - only a real disciplinary
+citation/panel process could do that in actual rugby law, and (consistent
+with this project's existing stance on not modeling injury tribunals) that
+process isn't modeled here; see `tournament/availability.py` for exactly
+what a red card (and only a red card) costs a player going forward.
+
 In-match injuries and substitutions: each drive carries a small chance of
 an injury to a random on-field player, and (in a ~50th-75th minute window)
 a smaller chance of a tactical/fatigue substitution. Either swaps in the
@@ -172,6 +192,12 @@ class MatchResult:
     # of making a caller re-parse the commentary text) - for the web UI's
     # "Injuries this match" / tournament-wide injury report (see README).
     injury_details: List[dict] = field(default_factory=list)
+    # Same idea as `injury_details`, but for `carded_players` - minute/card
+    # type plus whether this was a real law-19.2 "second yellow -> red"
+    # escalation for this specific player in this match (see `_issue_card`),
+    # not just a raw first-time red. For the web UI's "Cards this match" /
+    # tournament-wide card report (see README).
+    card_details: List[dict] = field(default_factory=list)
 
     @property
     def winner(self) -> Optional[Team]:
@@ -228,6 +254,15 @@ class MatchEngine:
         self.weather = weather  # "dry" | "wet" | "windy" - mild modifiers
         self.rng = random.Random(seed)
         self._carded: Dict[str, List[int]] = {home.name: [], away.name: []}  # expiry minutes
+        # Per-player card history for THIS match only (law 19.2: a second
+        # yellow card shown to the SAME player in the SAME match is a send-
+        # off, i.e. treated as a red for the rest of the match) - see
+        # `_issue_card`. Keyed by id(player), not by slot, so it survives a
+        # positional swap. `_sent_off` excludes a player who's already off
+        # (red, including an escalated one) from being picked for any
+        # further card - they're off the field, not just "down a player".
+        self._yellow_history: Dict[str, set] = {home.name: set(), away.name: set()}
+        self._sent_off: Dict[str, set] = {home.name: set(), away.name: set()}
         self._active: Dict[str, Dict[Position, SquadSlot]] = {}
         self._bench: Dict[str, List] = {}
         self._subs_used: Dict[str, int] = {home.name: 0, away.name: 0}
@@ -702,7 +737,11 @@ class MatchEngine:
             ))
         elif take(p_card):
             is_red, carded_player = self._issue_card(defending, minute, result)
-            card_word = "red card" if is_red else "yellow card"
+            detail = result.card_details[-1] if result.card_details else None
+            if detail and detail.get("escalated_second_yellow"):
+                card_word = "second yellow card - RED CARD"
+            else:
+                card_word = "red card" if is_red else "yellow card"
             who = f"{carded_player.name} ({defending.name})" if carded_player else defending.name
             result.events.append(self._event(minute, defending, f"{who} is shown a {card_word}.", result))
         elif take(p_pen_conceded_by_atk):
@@ -715,21 +754,53 @@ class MatchEngine:
             result.events.append(self._event(minute, attacking, f"{attacking.name} work through the phases but {defending.name}'s defense holds firm.", result))
 
     def _issue_card(self, team: Team, minute: int, result: MatchResult) -> Tuple[bool, Optional[Player]]:
+        # A player already sent off this match can't be carded again - they're
+        # off the field, not merely "a player down" (same reasoning as an
+        # injured-off player not being eligible for the next injury roll).
+        slots = [
+            s for s in self._active[team.name].values()
+            if id(s.player) not in self._sent_off[team.name]
+        ]
+        carded_player = self.rng.choice(slots).player if slots else None
+
         is_red = self.rng.random() < 0.12
+        escalated = False
+        if (
+            not is_red and carded_player is not None
+            and id(carded_player) in self._yellow_history[team.name]
+        ):
+            # Law 19.2: a second yellow card for the SAME player in the SAME
+            # match is a send-off - treated as a red for the rest of this
+            # match (not the newer, still-trialled "20-minute red" variant -
+            # see README). This project doesn't model the sin-bin clock at
+            # all finely enough to distinguish "still in the bin" from
+            # "already back on" when the second yellow is shown, so this
+            # escalates regardless of whether the first yellow has expired -
+            # which matches the real law: it's about the match, not the bin.
+            is_red = True
+            escalated = True
+
         duration = MATCH_MINUTES if is_red else 10
         self._carded[team.name].append(minute + duration)
-
-        slots = list(self._active[team.name].values())
-        carded_player = self.rng.choice(slots).player if slots else None
 
         if is_red:
             result.stats[team.name].red_cards += 1
             if carded_player is not None:
                 result.carded_players.append((team.name, carded_player, "red"))
+                self._sent_off[team.name].add(id(carded_player))
+                result.card_details.append({
+                    "minute": minute, "team": team.name, "player": carded_player.name,
+                    "card_type": "red", "escalated_second_yellow": escalated,
+                })
         else:
             result.stats[team.name].yellow_cards += 1
             if carded_player is not None:
                 result.carded_players.append((team.name, carded_player, "yellow"))
+                self._yellow_history[team.name].add(id(carded_player))
+                result.card_details.append({
+                    "minute": minute, "team": team.name, "player": carded_player.name,
+                    "card_type": "yellow", "escalated_second_yellow": False,
+                })
         return is_red, carded_player
 
     def _best_kicker(self, team: Team):

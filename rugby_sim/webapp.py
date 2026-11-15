@@ -468,6 +468,7 @@ def _match_json(result: MatchResult) -> dict:
             for e in result.events
         ],
         "injuries": list(result.injury_details),
+        "cards": list(result.card_details),
         "stats": {
             name: {
                 "tries": s.tries, "conversions": s.conversions,
@@ -562,6 +563,41 @@ def _injury_report_json(results: List[MatchResult], availability=None) -> list:
             }
             if availability is not None and i < len(players_by_index):
                 team_name, player = players_by_index[i]
+                entry["matches_remaining"] = availability.matches_remaining(team_name, player)
+            out.append(entry)
+    return out
+
+
+def _card_report_json(results: List[MatchResult], availability=None) -> list:
+    """Every card across every match in `results` - same shape/purpose as
+    `_injury_report_json` (see there for the general pattern), each entry
+    carrying its own match's `match_id` to link back to the full report.
+
+    `availability`, if given, adds a LIVE `matches_remaining` for a red
+    card (first-time or escalated from a second yellow) - whether that
+    player's suspension for their team's next match is still in effect
+    right now. A plain yellow never gets this field: it never carries a
+    tournament-level suspension at all (see `tournament/availability.py`)."""
+    out = []
+    for result in results:
+        if not result.card_details:
+            continue
+        match_id = _register_match(result)
+        # Lines up with `card_details` by index - see
+        # `availability.record_match`'s own identical assumption for injuries.
+        players_by_index = list(result.carded_players)
+        for i, detail in enumerate(result.card_details):
+            entry = {
+                **detail,
+                "match_id": match_id,
+                "scoreline": result.scoreline(),
+                "home": result.home.name, "away": result.away.name,
+            }
+            if (
+                availability is not None and detail.get("card_type") == "red"
+                and i < len(players_by_index)
+            ):
+                team_name, player, _card_type = players_by_index[i]
                 entry["matches_remaining"] = availability.matches_remaining(team_name, player)
             out.append(entry)
     return out

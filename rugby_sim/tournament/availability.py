@@ -26,6 +26,14 @@ INJURY_LAYOFF_MATCHES = 1  # fallback only - a real injury's own layoff comes
 # is used only if a `MatchResult` has no `injury_details` for some reason
 # (e.g. a hand-built test double), so old callers keep working unchanged.
 RED_CARD_SUSPENSION_MATCHES = 1
+# Yellow cards deliberately do NOT appear anywhere in this module: a yellow
+# is purely an in-match sin-bin (see `engine/match_engine.py`) and does not,
+# on its own, cost a player any future match under real World Rugby law -
+# only a citation/disciplinary panel could do that, and (like this project's
+# injury model) that process isn't simulated here. Only a red card (a
+# first-time one, or one escalated from a second yellow to the same player
+# in the same match - see `MatchEngine._issue_card`) sidelines a player,
+# below.
 
 # -- Short-rest condition penalty (stamina carryover between tournament
 # matches, see `engine/match_engine.py`'s per-match stamina model and
