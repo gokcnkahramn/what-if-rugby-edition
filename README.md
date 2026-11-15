@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](<https://img.shields.io/badge/tests-110%20passing-brightgreen.svg>)](tests/)
+[![Tests](<https://img.shields.io/badge/tests-116%20passing-brightgreen.svg>)](tests/)
 
 **What if you played Antoine Dupont at fullback? What if Jonah Lomu started
 at tighthead?** Build real squads from real players, drop anyone into any
@@ -82,6 +82,25 @@ click a player, run the match.
   "out for N more matches" for each one - a live lookup against the
   tournament's current sidelining ledger, which only goes down as further
   matches are actually played, not just the original injury's tier length.
+- **Card report** - the same treatment for yellow/red cards: every match
+  screen lists who was carded, for which team, at what minute, and which
+  colour, and a tournament's progress/report view aggregates every card
+  into its own collapsible section with the same match-linking and a LIVE
+  "out for N more matches"/"available now" for anyone currently serving a
+  red-card suspension. The underlying rules (verified, not guessed): a
+  yellow card is a 10-minute sin-bin and carries NO suspension into a
+  future match on its own - only a real citation/disciplinary panel could
+  do that, and (consistent with this project's stance on not modeling
+  injury tribunals) that process isn't simulated here; a red card is off
+  for the rest of that match AND sits the player out for their team's next
+  tournament match (`tournament/availability.py`); and a second yellow card
+  shown to the SAME player in the SAME match is escalated to a red exactly
+  as real World Rugby law 19.2 requires, which the engine tracks per-player
+  for the match's duration (`engine/match_engine.py`'s `_issue_card`). This
+  project does not model the newer, still-trialled "20-minute red card"
+  variant (a like-for-like replacement after 20 minutes following a
+  send-off) - every red card here plays out the older, simpler way, the
+  team simply finishes the match a player short.
 
 Every rating comes from real player data (not invented stats), every
 tournament/draw is the real thing where one exists, and every heuristic or
@@ -99,7 +118,7 @@ in-repo docstrings for the honest details.
 | `rugby_sim/tournament/`                    | Real & synthetic tournament formats, standings, awards                  |
 | `rugby_sim/webapp.py` + `rugby_sim/web/` | The Flask API + clickable web UI (no rugby logic in JS)                 |
 | `rugby_sim/interactive_cli.py`             | A terminal-only alternative to the web UI                               |
-| `tests/`                                   | 110 tests across data, tournaments, the engine, and the web API          |
+| `tests/`                                   | 116 tests across data, tournaments, the engine, and the web API          |
 
 Run the tests with `pip install pytest && pytest -q`.
 

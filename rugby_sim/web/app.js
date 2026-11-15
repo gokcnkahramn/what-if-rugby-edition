@@ -1058,6 +1058,21 @@ function renderReport(data, targetId, startRevealed) {
         ${injuryRows}
       </table>`
     : "";
+  // "Cards this match" - same convention as "Injuries this match" above,
+  // built from `data.cards` (`MatchResult.card_details` server-side). A red
+  // card that came from a second yellow to the same player is flagged so
+  // it doesn't read like an ordinary straight red (see README/engine).
+  const cardRows = (data.cards || []).map(c => `
+    <tr><td>${c.minute}'</td><td>${c.team}</td><td>${c.player}</td>
+    <td>${c.card_type === "red" ? "Red" : "Yellow"}</td>
+    <td>${c.escalated_second_yellow ? "2nd yellow - sent off" : ""}</td></tr>`
+  ).join("");
+  const cardHtml = cardRows
+    ? `<h3>Cards this match</h3><table class="stats">
+        <tr><th>Minute</th><th>Team</th><th>Player</th><th>Card</th><th>Note</th></tr>
+        ${cardRows}
+      </table>`
+    : "";
   const playbackId = `${targetId || "report"}-playback`;
   const fullEventsHtml = data.events.map(formatEventLine).join("");
   // `reportHtml` (used for the downloadable snapshot) always shows every
@@ -1076,7 +1091,8 @@ function renderReport(data, targetId, startRevealed) {
       <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
       ${scorerRows}
     </table>` : ""}
-    ${injuryHtml}`;
+    ${injuryHtml}
+    ${cardHtml}`;
   // The final score/Player of the Match/box score are spoilers - they stay
   // hidden (`spoilersId`, class "hidden") until the paced reveal actually
   // reaches full time (naturally, or via "Skip to end"/"Skip to next
@@ -1722,7 +1738,35 @@ function injuryReportTable(injuryReport) {
     ${rows}</table>`;
 }
 
-function renderTournamentProgress(resultsSoFar, progress, injuryReport) {
+// Tournament-wide card report - same convention as `injuryReportTable`
+// above. A red card's `matches_remaining` (only present when the server
+// had a running tournament's availability ledger) is a LIVE countdown of
+// the next-match suspension it costs - see `_card_report_json` in
+// webapp.py. A yellow card never gets a "status" at all: it doesn't carry
+// any tournament-level suspension (see README/`tournament/availability.py`).
+function cardReportTable(cardReport) {
+  const rows = cardReport.map(c => {
+    let statusText = "";
+    if (c.card_type === "red") {
+      const remaining = c.matches_remaining;
+      statusText = remaining === undefined
+        ? "misses next match"
+        : (remaining > 0 ? `out for ${remaining} more match${remaining === 1 ? "" : "es"}` : "available now");
+    }
+    const cardText = c.card_type === "red"
+      ? (c.escalated_second_yellow ? "Red (2nd yellow)" : "Red")
+      : "Yellow";
+    return `
+    <tr><td>${c.minute}'</td><td>${c.team}</td><td>${c.player}</td>
+    <td>${cardText}</td><td>${statusText}</td>
+    <td>${matchLink({home: c.home, away: c.away, scoreline: c.scoreline, match_id: c.match_id})}</td></tr>`;
+  }).join("");
+  return `<table class="stats">
+    <tr><th>Minute</th><th>Team</th><th>Player</th><th>Card</th><th>Status</th><th>Match</th></tr>
+    ${rows}</table>`;
+}
+
+function renderTournamentProgress(resultsSoFar, progress, injuryReport, cardReport) {
   const box = document.getElementById("tournament-progress");
   if (!box) return;
   if ((!resultsSoFar || !resultsSoFar.length) && !progress) { box.innerHTML = ""; return; }
@@ -1754,6 +1798,9 @@ function renderTournamentProgress(resultsSoFar, progress, injuryReport) {
   if (injuryReport && injuryReport.length) {
     html += collapsibleHtml("injuries", `Injury report (${injuryReport.length})`, injuryReportTable(injuryReport), false);
   }
+  if (cardReport && cardReport.length) {
+    html += collapsibleHtml("cards", `Card report (${cardReport.length})`, cardReportTable(cardReport), false);
+  }
   html += `<div id="tournament-match-detail-live"></div>`;
   box.innerHTML = html;
   wireCollapsibles(box);
@@ -1775,7 +1822,7 @@ function renderTournamentProgress(resultsSoFar, progress, injuryReport) {
 function handleTournamentSessionState(state, status, myTeam) {
   const liveArea = document.getElementById("tournament-live-area");
   const banner = document.getElementById("tournament-stage-banner");
-  renderTournamentProgress(state.results_so_far, state.progress, state.injury_report);
+  renderTournamentProgress(state.results_so_far, state.progress, state.injury_report, state.card_report);
   if (state.status === "error") {
     if (banner) banner.innerHTML = "";
     status.textContent = "Error: " + state.error;
@@ -1915,6 +1962,9 @@ function renderTournamentReport(report) {
   html += collapsibleHtml("final-all-results", "All results (click any match for the full simulation)", resultsHtml, false);
   if (report.injury_report && report.injury_report.length) {
     html += collapsibleHtml("final-injuries", `Injury report (${report.injury_report.length})`, injuryReportTable(report.injury_report), false);
+  }
+  if (report.card_report && report.card_report.length) {
+    html += collapsibleHtml("final-cards", `Card report (${report.card_report.length})`, cardReportTable(report.card_report), false);
   }
   const snapshotHtml = html; // captured before the match-detail div fills in and before the button itself
   box.innerHTML = html + snapshotButtonHtml("tournament-snapshot-btn");
