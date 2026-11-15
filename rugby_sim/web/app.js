@@ -642,7 +642,7 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   if (state.finished) {
     box.innerHTML = "";
     if (state.result) {
-      renderReport(state.result, reportTargetId);
+      renderReport(state.result, reportTargetId, true);
     }
     if (onFinished) onFinished(state);
     return;
@@ -947,7 +947,16 @@ function wirePlaybackControls(idPrefix, reveal) {
   if (skipEndBtn) skipEndBtn.onclick = () => reveal.skipToEnd();
 }
 
-function renderReport(data, targetId) {
+// `startRevealed`: true skips the paced-reveal animation entirely, showing
+// every event and the final score/stats immediately. Used when a live/
+// pausable match (friendly, tournament, or draft) finishes - the user
+// already watched it unfold checkpoint by checkpoint (or explicitly chose
+// "Skip to end of match"), so re-animating the *entire* match from minute 0
+// here would be a confusing, redundant ~30-second replay, not a reveal of
+// anything new. A genuinely fresh, never-before-seen report (a plain
+// "Run match" with no live toggle, or a tournament match clicked open from
+// "Results so far") still animates from 0 by default.
+function renderReport(data, targetId, startRevealed) {
   const box = document.getElementById(targetId || "report");
   const statRows = Object.entries(data.stats).map(([name, s]) => `
     <tr><td>${name}</td><td>${s.tries}</td><td>${s.penalty_goals}</td><td>${s.drop_goals}</td>
@@ -988,7 +997,7 @@ function renderReport(data, targetId) {
     ${playbackControlsHtml(playbackId)}
     <div class="row muted" id="${playbackId}-skip-status"></div>
     <div id="${playbackId}-events" class="events"></div>
-    <div id="${spoilersId}" class="hidden">
+    <div id="${spoilersId}" class="${startRevealed ? "" : "hidden"}">
       <div id="scoreline">${data.scoreline}</div>
       ${pomLine}
       <table class="stats">
@@ -1007,7 +1016,7 @@ function renderReport(data, targetId) {
     downloadHtmlSnapshot(data.scoreline, reportHtml, data.scoreline);
   };
   const eventsEl = document.getElementById(`${playbackId}-events`);
-  const reveal = pacedEventReveal(eventsEl, data.events, 0, undefined, () => {
+  const reveal = pacedEventReveal(eventsEl, data.events, startRevealed ? data.events.length : 0, undefined, () => {
     const spoilers = document.getElementById(spoilersId);
     if (spoilers) spoilers.classList.remove("hidden");
   });
@@ -1660,9 +1669,12 @@ function handleTournamentSessionState(state, status, myTeam) {
   }
   status.textContent = `Your match (${stageLabel}): ${state.home} v ${state.away} - play it out below.`;
   renderLiveMatchState(state.live_match, (finishedState) => {
-    // Match just finished - renderLiveMatchState already left its full-time
-    // scoreline/events/stats in #tournament-live-area. Don't auto-advance;
-    // wait for the user to say they're done looking at it.
+    // Match just finished - renderLiveMatchState rendered its full-time
+    // scoreline/events/stats into #tournament-live-area itself (the explicit
+    // `reportTargetId` below - without it, the finished report defaults to
+    // the single-friendly-match screen's hidden "#report" div, leaving this
+    // area with nothing in it but the "Continue tournament" button). Don't
+    // auto-advance; wait for the user to say they're done looking at it.
     const row = document.createElement("div");
     row.className = "row";
     row.innerHTML = `<button id="t-continue-after-my-match">Continue tournament</button>`;
@@ -1676,7 +1688,7 @@ function handleTournamentSessionState(state, status, myTeam) {
         status.textContent = "Error: " + e.message;
       }
     };
-  }, "tournament-live-area", mySide);
+  }, "tournament-live-area", mySide, "tournament-live-area");
 }
 
 function standingsTable(rows) {
