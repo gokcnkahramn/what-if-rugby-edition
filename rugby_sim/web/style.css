@@ -226,3 +226,7 @@ table.stats th, table.stats td { border: 1px solid var(--border); padding: 6px 8
 .collapsible-body { padding: 10px 2px; }
 .collapsible-body.hidden { display: none !important; }
 .chevron { color: var(--muted); font-size: 0.8rem; }
+
+/* Team form / rankings (12b) - rating change colour cues */
+.positive { color: #3fae5a; }
+.negative { color: #d4584a; }

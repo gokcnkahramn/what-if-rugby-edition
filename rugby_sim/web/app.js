@@ -563,6 +563,7 @@ async function boot() {
   document.getElementById("mode-friendly").onclick = enterFriendlyMode;
   document.getElementById("mode-tournament").onclick = enterTournamentMode;
   document.getElementById("mode-draft").onclick = enterDraftMode;
+  document.getElementById("mode-season").onclick = enterSeasonMode;
 
   document.getElementById("run-match").onclick = async () => {
     const seedRaw = document.getElementById("seed").value;
@@ -1138,7 +1139,7 @@ let squadModeEnabled = false; // "fresh squad every match" toggle, see setupTour
 const tournamentBuilders = {};
 
 const TOURNAMENT_TYPE_CARDS = [
-  {ttype: "real", title: "Real fixture replay", desc: "Replay the actual fixture list for a real competition (Six Nations, Rugby Championship, Autumn Nations Series) and season."},
+  {ttype: "real", title: "Real fixture replay", desc: "Replay the actual fixture list for a real competition (Six Nations, Rugby Championship, Nations Championship, Autumn Nations Series) and season."},
   {ttype: "wc2027", title: "2027 Rugby World Cup", desc: "24 teams, the real pool draw - play it out before it's happened for real."},
   {ttype: "historical", title: "Historical Rugby World Cup", desc: "Every real edition, 1995-2023, with that year's real squads."},
   {ttype: "historical_sn", title: "Historical Six Nations", desc: "2009-2021, with that year's real squads."},
@@ -1766,7 +1767,25 @@ function cardReportTable(cardReport) {
     ${rows}</table>`;
 }
 
-function renderTournamentProgress(resultsSoFar, progress, injuryReport, cardReport) {
+// World-Rugby-style team rankings movement (see `tournament/rankings.py`) -
+// "change" is net movement versus that team's starting `WR_RANKING_SEED`/
+// default baseline point value, not just within this one tournament -
+// for a shared Season-mode tracker this reflects the whole season so far.
+function teamFormTable(teamForm) {
+  const rows = teamForm.map(row => {
+    const changeText = row.change > 0 ? `+${row.change}` : `${row.change}`;
+    const changeClass = row.change > 0 ? "positive" : (row.change < 0 ? "negative" : "");
+    return `
+    <tr><td>${logoImgHtml(row.team, 18)}${row.team}</td><td>${row.rating}</td>
+    <td class="${changeClass}">${changeText}</td>
+    <td>${row.wins}-${row.draws}-${row.losses}</td></tr>`;
+  }).join("");
+  return `<table class="stats">
+    <tr><th>Team</th><th>Rating</th><th>Change</th><th>W-D-L</th></tr>
+    ${rows}</table>`;
+}
+
+function renderTournamentProgress(resultsSoFar, progress, injuryReport, cardReport, teamForm) {
   const box = document.getElementById("tournament-progress");
   if (!box) return;
   if ((!resultsSoFar || !resultsSoFar.length) && !progress) { box.innerHTML = ""; return; }
@@ -1801,6 +1820,9 @@ function renderTournamentProgress(resultsSoFar, progress, injuryReport, cardRepo
   if (cardReport && cardReport.length) {
     html += collapsibleHtml("cards", `Card report (${cardReport.length})`, cardReportTable(cardReport), false);
   }
+  if (teamForm && teamForm.length) {
+    html += collapsibleHtml("form", "Team form / rankings", teamFormTable(teamForm), false);
+  }
   html += `<div id="tournament-match-detail-live"></div>`;
   box.innerHTML = html;
   wireCollapsibles(box);
@@ -1822,7 +1844,7 @@ function renderTournamentProgress(resultsSoFar, progress, injuryReport, cardRepo
 function handleTournamentSessionState(state, status, myTeam) {
   const liveArea = document.getElementById("tournament-live-area");
   const banner = document.getElementById("tournament-stage-banner");
-  renderTournamentProgress(state.results_so_far, state.progress, state.injury_report, state.card_report);
+  renderTournamentProgress(state.results_so_far, state.progress, state.injury_report, state.card_report, state.team_form);
   if (state.status === "error") {
     if (banner) banner.innerHTML = "";
     status.textContent = "Error: " + state.error;
@@ -1965,6 +1987,9 @@ function renderTournamentReport(report) {
   }
   if (report.card_report && report.card_report.length) {
     html += collapsibleHtml("final-cards", `Card report (${report.card_report.length})`, cardReportTable(report.card_report), false);
+  }
+  if (report.team_form && report.team_form.length) {
+    html += collapsibleHtml("final-form", "Team form / rankings", teamFormTable(report.team_form), false);
   }
   const snapshotHtml = html; // captured before the match-detail div fills in and before the button itself
   box.innerHTML = html + snapshotButtonHtml("tournament-snapshot-btn");
@@ -2341,5 +2366,229 @@ updateRunButton = function () {
   try { _originalUpdateRunButton(); } catch (e) { /* friendly mode not initialized yet - fine */ }
   if (draftHumanBuilder) updateDraftRunButton();
 };
+
+// ===================== Season mode (12c) =====================
+// Thin orchestration layer over existing tournament-mode rendering
+// (`renderTournamentProgress`/`renderTournamentReport`,
+// `collapsibleHtml`/`wireCollapsibles`) - not a parallel UI. v1 is
+// non-interactive: every block is fully auto-simmed server-side
+// (`/api/season/<id>/play_block`), one block at a time, with a
+// "Continue to <next block>" button driving the season forward.
+let seasonSessionId = null;
+let seasonInitialized = false;
+
+// 13b: Season mode reworked to be fully interactive, like Tournament mode -
+// pick one nation as "my team", draft it from the WIDEST real pool (capped
+// internationals + 12d/13a's uncapped club players, via
+// `/api/season/start` with no `my_team` yet - that first call just returns
+// the plan + pool to draft from), then start the season for real with
+// `my_team` + the drafted squad's player ids: every one of that nation's
+// own fixtures, across every chained block, pauses on the exact same
+// live-match UI (`renderLiveMatchState`) Tournament mode's `my_team`
+// fixtures use, while every other nation auto-drafts/auto-sims unattended
+// and blocks auto-advance with no manual "play next block" click.
+let seasonNation = null; // display name of the drafted nation, once planned
+let seasonBuilder = null; // TeamBuilder drafting my_team's matchday-23
+
+async function enterSeasonMode() {
+  navTo("screen-season", "Season mode", () => showScreen("screen-season"));
+  randomizeBackground();
+  if (seasonInitialized) return;
+  seasonInitialized = true;
+
+  const nationSel = document.getElementById("season-nation-select");
+  nationSel.innerHTML = UNIONS.map(u => `<option value="${u.code}">${u.code} - ${u.name}</option>`).join("");
+
+  document.getElementById("season-plan-btn").onclick = async () => {
+    const status = document.getElementById("season-start-status");
+    const nationCode = nationSel.value;
+    const year = parseInt(document.getElementById("season-year-input").value, 10);
+    status.textContent = "Finding this union's real blocks + widest draft pool...";
+    document.getElementById("season-blocks-area").innerHTML = "";
+    document.getElementById("season-progress").innerHTML = "";
+    document.getElementById("season-report").innerHTML = "";
+    document.getElementById("season-live-area").innerHTML = "";
+    document.getElementById("season-uncapped-pool").innerHTML = "";
+    document.getElementById("season-draft-area").innerHTML = "";
+    seasonSessionId = null;
+    try {
+      const data = await api("/api/season/start", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({nation_code: nationCode, year}),
+      });
+      seasonNation = UNIONS.find(u => u.code === nationCode).name;
+      // 13b: drafting uses the WIDEST pool (capped + uncapped/eligible,
+      // merged) - a separate lookup from the plain plan/pool above, which
+      // stays capped-only for backward compatibility (see webapp.py).
+      const widest = await api(`/api/season/widest_pool?nation=${nationCode}&year=${year}`);
+      status.textContent = `${data.blocks.length} real tournament block(s) found for ${nationCode} ${year} - draft your squad below, then start the season.`;
+      renderSeasonBlocksList(data);
+      renderSeasonUncappedPool(data, widest);
+      renderSeasonDraftArea(widest, nationCode, year);
+    } catch (e) {
+      status.textContent = `Could not plan season: ${e.message || e}`;
+    }
+  };
+}
+
+function renderSeasonBlocksList(data) {
+  const area = document.getElementById("season-blocks-area");
+  const rows = data.blocks.map((b, i) => {
+    const marker = i < data.current_block_index ? "done" : (i === data.current_block_index ? "next" : "");
+    return `<li>${b.display_name}${marker ? ` (${marker})` : ""}</li>`;
+  }).join("");
+  area.innerHTML = `<p class="muted">These blocks play automatically, one after another - your own
+    matches pause for you to play live, every other fixture auto-sims in the background.</p><ol>${rows}</ol>`;
+}
+
+function uncappedPoolTable(players) {
+  const rows = players.map(p => `<tr><td>${p.name}</td><td>${p.natural_position}</td><td>${p.natural_fit}</td><td class="muted">${p.notes}</td></tr>`).join("");
+  return `<table><thead><tr><th>Name</th><th>Position</th><th>Fit</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderSeasonUncappedPool(data, widest) {
+  const uncappedBox = document.getElementById("season-uncapped-pool");
+  const cappedNames = new Set(data.pool.map(p => p.name));
+  const uncapped = (widest.pool || []).filter(p => !cappedNames.has(p.name));
+  if (uncapped.length) {
+    uncappedBox.innerHTML = collapsibleHtml(
+      "season-uncapped", `Uncapped / eligible players in your widest draft pool (${uncapped.length}) - never capped internationally, drawn from club Wikipedia squads`,
+      uncappedPoolTable(uncapped), false,
+    );
+    wireCollapsibles(uncappedBox);
+  } else {
+    uncappedBox.innerHTML = "";
+  }
+}
+
+// Drafting my_team's own matchday-23 from the widest pool: a normal
+// `TeamBuilder` in `fixedPool` mode (same pattern Draft mode's
+// finalize-build step uses, see `panel-draft-human_builder` there) - once
+// all 15 starting slots + any bench picks are filled, "Start season" reads
+// the builder's own `slots`/`bench` directly (no "Save team" call needed -
+// squads mode just wants the pool of ids, not one locked lineup) and kicks
+// off the real interactive season.
+function renderSeasonDraftArea(planData, nationCode, year) {
+  const area = document.getElementById("season-draft-area");
+  area.innerHTML = `
+    <h3>Draft ${seasonNation}'s matchday-23 (${planData.pool.length} players available)</h3>
+    <p class="muted">Pick all 15 starters, then optionally up to 8 bench players - this whole
+      squad becomes the pool a fresh best-fit XV is auto-drafted from before every one of
+      ${seasonNation}'s matches this season (same "squad, not one fixed XV" mode Tournament
+      mode's squads use), so pick broadly, not just one ideal matchday.</p>
+    <div id="panel-season_builder"></div>
+    <div class="row">
+      <button id="season-confirm-draft-btn">Start season with this squad</button>
+      <span class="muted" id="season-draft-status"></span>
+    </div>`;
+  seasonBuilder = new TeamBuilder("season_builder", {
+    title: `${seasonNation} - your squad`, fixedName: seasonNation, fixedPool: planData.pool,
+  });
+  document.getElementById("season-confirm-draft-btn").onclick = async () => {
+    const status = document.getElementById("season-draft-status");
+    const filled = Object.keys(seasonBuilder.slots).length;
+    if (filled < POSITIONS.length) {
+      status.textContent = `Fill all ${POSITIONS.length} starting positions first (${filled}/${POSITIONS.length} so far).`;
+      return;
+    }
+    const squadIds = Array.from(new Set([...Object.values(seasonBuilder.slots), ...Array.from(seasonBuilder.bench)]));
+    status.textContent = "Starting season...";
+    try {
+      const body = {
+        nation_code: nationCode, year, my_team: seasonNation,
+        squad_player_ids: {[seasonNation]: squadIds},
+      };
+      const state = await api("/api/season/start", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      seasonSessionId = state.session_id;
+      status.textContent = "";
+      area.innerHTML = `<p class="muted">Squad locked in (${squadIds.length} players) - season running below.</p>`;
+      handleSeasonSessionState(state);
+    } catch (e) {
+      status.textContent = `Could not start season: ${e.message || e}`;
+    }
+  };
+}
+
+// Mirrors `handleTournamentSessionState` exactly, for a season session
+// instead of a single tournament: paused -> my_team's live match (via the
+// unchanged `renderLiveMatchState`/live-match endpoints); finished -> the
+// final block's report; error -> show it. "Continue season" (after my_team's
+// match ends) calls `/api/season/<id>/resume`, which auto-advances the
+// background thread - possibly straight into the NEXT block with no pause
+// at all - until the next my_team fixture pauses it again or the season ends.
+function handleSeasonSessionState(state) {
+  const liveArea = document.getElementById("season-live-area");
+  const progressBox = document.getElementById("season-progress");
+  const reportBox = document.getElementById("season-report");
+  const status = document.getElementById("season-start-status");
+
+  let html = "";
+  if (state.team_form && state.team_form.length) {
+    html += collapsibleHtml("season-form", "Team form / rankings (whole season so far)", teamFormTable(state.team_form), true);
+  }
+  if (state.injury_report && state.injury_report.length) {
+    html += collapsibleHtml("season-injuries", `Injury report (${state.injury_report.length})`, injuryReportTable(state.injury_report), false);
+  }
+  if (state.card_report && state.card_report.length) {
+    html += collapsibleHtml("season-cards", `Card report (${state.card_report.length})`, cardReportTable(state.card_report), false);
+  }
+  if (state.progress && state.progress.stage) {
+    html += `<h4>Current block stage: ${state.progress.stage}</h4>`;
+  }
+  if (state.progress && state.progress.standings) {
+    html += collapsibleHtml("season-standings", "Current block standings", standingsTable(state.progress.standings), true);
+  }
+  if (state.progress && state.progress.pools) {
+    const poolsHtml = Object.entries(state.progress.pools).map(([name, rows]) =>
+      `<p class="muted">${name}:</p>${standingsTable(rows)}`).join("");
+    html += collapsibleHtml("season-pools", "Current block pool standings", poolsHtml, true);
+  }
+  if (state.results_so_far && state.results_so_far.length) {
+    const rows = state.results_so_far.map(m => `<tr><td>${m.home}</td><td>${matchLink(m)}</td><td>${m.away}</td></tr>`).join("");
+    html += collapsibleHtml("season-results", `Results so far (${state.results_so_far.length})`,
+      `<table class="stats"><tr><th>Home</th><th>Score</th><th>Away</th></tr>${rows}</table>`, false);
+  }
+  progressBox.innerHTML = html;
+  wireCollapsibles(progressBox);
+  progressBox.querySelectorAll(".match-link").forEach(btn => {
+    btn.onclick = () => showMatchDetail(btn.dataset.matchId, "season-progress");
+  });
+
+  if (state.status === "error") {
+    status.textContent = "Error: " + state.error;
+    return;
+  }
+  if (state.status === "finished") {
+    status.textContent = "Season complete.";
+    liveArea.innerHTML = "";
+    if (state.latest_block_report) {
+      reportBox.innerHTML = `<h3>Final block: ${state.latest_block_report.name}</h3><div id="tournament-report"></div>`;
+      renderTournamentReport(state.latest_block_report); // reuses tournament mode's own final-report renderer
+    }
+    return;
+  }
+  // paused: it's my_team's own fixture - play it out live, exactly like
+  // Tournament mode's my_team fixtures.
+  const mySide = seasonNation === state.home ? "home" : seasonNation === state.away ? "away" : null;
+  status.textContent = `Your match: ${state.home} v ${state.away} - play it out below.`;
+  renderLiveMatchState(state.live_match, (finishedState) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<button id="season-continue-btn">Continue season</button>`;
+    liveArea.appendChild(row);
+    document.getElementById("season-continue-btn").onclick = async () => {
+      status.textContent = "continuing season...";
+      try {
+        const next = await api(`/api/season/${state.session_id}/resume`, {method: "POST"});
+        handleSeasonSessionState(next);
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+      }
+    };
+  }, "season-live-area", mySide, "season-live-area");
+}
 
 boot();

@@ -33,7 +33,37 @@
         draft turn-by-turn against the AI, protect your players over 3 rounds, then build and
         play your drafted XV.</span>
     </button>
+    <button class="card" id="mode-season">
+      <span class="card-title">Season mode</span>
+      <span class="card-desc">Pick one nation and a real calendar year, then play through every
+        real tournament that union actually played that year back to back - injuries,
+        suspensions, condition, and team rankings all carry over between tournaments.</span>
+    </button>
   </div>
+</div>
+
+<div class="screen hidden" id="screen-season">
+  <h2>Season mode</h2>
+  <p class="muted">Pick a union and a real calendar year - this union's actual real tournaments
+    that year (whichever of Six Nations / Rugby Championship / Autumn Nations Series / a Rugby
+    World Cup year it really played in) are chained into one season. Draft your own matchday-23
+    for this union from its widest real pool, then play through every block live/pausable for
+    your own matches while every other nation auto-sims unattended - no manual "play next block"
+    needed. Injuries/suspensions/condition and the "Team form / rankings" ratings all carry over
+    between blocks, not reset per tournament.</p>
+  <div class="row">
+    <label class="muted">Union (this is your team): <select id="season-nation-select"></select></label>
+    <label class="muted">Year: <input type="number" id="season-year-input" value="2026" style="width:90px"></label>
+    <label class="muted"><input type="checkbox" id="season-include-uncapped"> Include uncapped/eligible players (ENG, FRA, IRE, SCO, WAL, ITA, RSA via Premiership/Top 14/URC clubs; NZL, AUS, FIJ via Super Rugby Pacific clubs)</label>
+    <button id="season-plan-btn">Find this union's real blocks</button>
+    <span class="muted" id="season-start-status"></span>
+  </div>
+  <div id="season-blocks-area"></div>
+  <div id="season-uncapped-pool"></div>
+  <div id="season-draft-area"></div>
+  <div id="season-progress"></div>
+  <div id="season-live-area"></div>
+  <div id="season-report"></div>
 </div>
 
 <div class="screen hidden" id="screen-draft-pool">

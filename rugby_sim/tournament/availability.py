@@ -50,7 +50,28 @@ RED_CARD_SUSPENSION_MATCHES = 1
 # at a full 100. This only tracks "one match ago", not a running fatigue
 # total across a whole tournament - deliberately simple, flagged here rather
 # than presented as a real travel/recovery model.
-REST_PENALTY_CONDITION = 70.0  # starting condition for someone in last match's squad
+REST_PENALTY_CONDITION_MIN = 85.0
+REST_PENALTY_CONDITION_MAX = 95.0
+# Re-tuned (was a flat 90.0, before that a flat 70.0): a single fixed number
+# meant EVERY quick-turnaround player started their next match at exactly
+# the same condition, no variation at all - unrealistic, and a wasted
+# opportunity given this module already has a real per-player attribute
+# that plausibly affects recovery sitting right there. `starting_condition`
+# below now lands each affected player somewhere in this 85-95 band,
+# modulated by their own `Attributes.fitness` (fitter players recover
+# closer to 95, less fit players closer to 85) rather than by unseeded
+# randomness - deliberately NOT a `random.Random(seed)` roll, because
+# unlike this module's other probabilistic-looking things (e.g. injury
+# severity tiers, which are genuinely random events rolled inside
+# `MatchEngine`'s own seeded `self.rng`), this module has no seed of its
+# own to thread through, and "recovery quality tracks an existing,
+# already-meaningful attribute" fits this codebase's general preference
+# (see e.g. the fitness/workload/strength/pace terms in
+# `engine/match_engine.py`'s stamina decay) for driving variation from real
+# attributes over inventing new randomness. Still a deliberate step down
+# from 100 for everyone in the band, so a quick-turnaround player is always
+# worse off than someone rested, just not crippled by it - and now with
+# the spread the user asked for instead of one pinned number.
 
 
 @dataclass
@@ -75,7 +96,14 @@ class TournamentAvailability:
         last = self._last_squad.get(team_name)
         if not last:
             return {}
-        return {id(p): REST_PENALTY_CONDITION for p in pool if id(p) in last}
+        span = REST_PENALTY_CONDITION_MAX - REST_PENALTY_CONDITION_MIN
+        result = {}
+        for p in pool:
+            if id(p) not in last:
+                continue
+            fitness = max(0.0, min(100.0, p.attributes.fitness))
+            result[id(p)] = REST_PENALTY_CONDITION_MIN + span * (fitness / 100.0)
+        return result
 
     def filter_available(self, team_name: str, pool: List[Player]) -> List[Player]:
         """The subset of `pool` that isn't currently sidelined for this

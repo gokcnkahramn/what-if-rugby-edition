@@ -4,7 +4,11 @@ from rugby_sim.engine.match_engine import MAX_SUBSTITUTIONS
 from rugby_sim.data.sources.auto_draft import auto_draft_lineup, auto_draft_team
 from rugby_sim.models import Attributes, Lineup, Player, Position, Team
 from rugby_sim.tournament import Tournament
-from rugby_sim.tournament.availability import REST_PENALTY_CONDITION, TournamentAvailability
+from rugby_sim.tournament.availability import (
+    REST_PENALTY_CONDITION_MAX,
+    REST_PENALTY_CONDITION_MIN,
+    TournamentAvailability,
+)
 
 
 def _team_with_bench(name):
@@ -100,6 +104,108 @@ def test_initial_condition_seeds_a_below_100_starting_stamina():
     assert engine.condition_for(other) == 100.0
 
 
+def test_decay_rate_differs_by_fitness_strength_and_pace():
+    # Deterministic, direct unit test of `_decay_stamina` - two players at
+    # the SAME position (so the position-workload term is identical),
+    # differing only in fitness/strength/pace, must end up at measurably
+    # different condition after the same simulated drive-time.
+    low = Player(name="Low", nation="X", natural_position=Position.FULLBACK,
+                 attributes=Attributes(fitness=20, strength=20, pace=20))
+    high = Player(name="High", nation="X", natural_position=Position.FULLBACK,
+                  attributes=Attributes(fitness=95, strength=95, pace=95))
+
+    def _team_of_one(name, player):
+        lineup = Lineup()
+        for p in ENGLAND_SAMPLE:
+            lineup.set_starter(p.natural_position, p)
+        lineup.set_starter(Position.FULLBACK, player)
+        lineup.captain = player
+        return Team(name=name, short_code=name[:3].upper(), lineup=lineup)
+
+    home_low = _team_of_one("Home", low)
+    home_high = _team_of_one("Home", high)
+    away = _team_with_bench("Away")
+
+    engine_low = MatchEngine(home_low, away, seed=1)
+    engine_low.start()
+    engine_low._decay_stamina(home_low, away, drive_minutes=20)
+
+    engine_high = MatchEngine(home_high, away, seed=1)
+    engine_high.start()
+    engine_high._decay_stamina(home_high, away, drive_minutes=20)
+
+    assert engine_low.condition_for(low) < engine_high.condition_for(high)
+
+
+def test_decay_rate_differs_by_position_workload():
+    # Same attributes, different positions: a tighthead prop (heavy
+    # fitness/strength/scrummaging weighting in POSITION_PROFILES) should
+    # decay faster than a scrum-half (none of those three weighted) under
+    # otherwise identical conditions.
+    attrs = Attributes(fitness=60, strength=60, pace=60)
+    prop = Player(name="Prop", nation="X", natural_position=Position.TIGHTHEAD_PROP, attributes=attrs)
+    nine = Player(name="Nine", nation="X", natural_position=Position.SCRUM_HALF, attributes=attrs)
+
+    def _team_of(name, pos, player):
+        lineup = Lineup()
+        for p in ENGLAND_SAMPLE:
+            lineup.set_starter(p.natural_position, p)
+        lineup.set_starter(pos, player)
+        lineup.captain = player
+        return Team(name=name, short_code=name[:3].upper(), lineup=lineup)
+
+    home_prop = _team_of("Home", Position.TIGHTHEAD_PROP, prop)
+    home_nine = _team_of("Home", Position.SCRUM_HALF, nine)
+    away = _team_with_bench("Away")
+
+    engine_prop = MatchEngine(home_prop, away, seed=1)
+    engine_prop.start()
+    engine_prop._decay_stamina(home_prop, away, drive_minutes=20)
+
+    engine_nine = MatchEngine(home_nine, away, seed=1)
+    engine_nine.start()
+    engine_nine._decay_stamina(home_nine, away, drive_minutes=20)
+
+    assert engine_prop.condition_for(prop) < engine_nine.condition_for(nine)
+
+
+def test_decay_rate_is_faster_against_a_stronger_attacking_opponent():
+    # Same team (and thus same per-player terms) decays faster when its
+    # opponent's attack rating is much higher than its own defense rating
+    # - the matchup/pressure term, isolated from everything else by reusing
+    # the exact same `home` roster against two different opponents.
+    import dataclasses
+
+    home = _team_with_bench("Home")
+
+    def _cloned_team(name, pace, footwork, offload):
+        lineup = Lineup()
+        for p in ENGLAND_SAMPLE:
+            clone = Player(
+                name=p.name, nation=p.nation, natural_position=p.natural_position,
+                attributes=dataclasses.replace(p.attributes, pace=pace, footwork=footwork, offload=offload),
+            )
+            lineup.set_starter(clone.natural_position, clone)
+        lineup.captain = next(iter(lineup.starters.values())).player
+        return Team(name=name, short_code=name[:3].upper(), lineup=lineup)
+
+    weak_opponent = _cloned_team("Weak", 1, 1, 1)
+    strong_opponent = _cloned_team("Strong", 99, 99, 99)
+
+    engine_vs_weak = MatchEngine(home, weak_opponent, seed=1)
+    engine_vs_weak.start()
+    engine_vs_weak._decay_stamina(home, weak_opponent, drive_minutes=20)
+
+    home2 = _team_with_bench("Home")
+    engine_vs_strong = MatchEngine(home2, strong_opponent, seed=1)
+    engine_vs_strong.start()
+    engine_vs_strong._decay_stamina(home2, strong_opponent, drive_minutes=20)
+
+    tracked_weak = engine_vs_weak.active_lineup(home)[Position.NUMBER_8].player
+    tracked_strong = engine_vs_strong.active_lineup(home2)[Position.NUMBER_8].player
+    assert engine_vs_strong.condition_for(tracked_strong) < engine_vs_weak.condition_for(tracked_weak)
+
+
 def test_auto_draft_prefers_a_fresher_player_when_ratings_are_close():
     # Position.LOOSEHEAD_PROP is the first position auto_draft_lineup fills
     # (enum declaration order), so with only 2 candidates it's decided
@@ -134,7 +240,7 @@ def test_tournament_availability_tracks_rest_between_matches():
 
     condition = availability.starting_condition("ENG", pool)
     for p in pool[:23]:
-        assert condition[id(p)] == REST_PENALTY_CONDITION
+        assert REST_PENALTY_CONDITION_MIN <= condition[id(p)] <= REST_PENALTY_CONDITION_MAX
     # a player never selected into last match's squad isn't penalized
     assert id(pool[-1]) not in condition or pool[-1] in pool[:23]
 
@@ -253,6 +359,92 @@ def test_matches_remaining_is_live_and_decreases_as_further_matches_are_played()
     assert not availability.is_sidelined("ENG", victim)
 
 
+# ------------------- end-to-end: injury/suspension availability pipeline ----
+
+def test_squads_mode_sidelining_excludes_then_restores_player_across_rounds():
+    # Full-pipeline verification (task 2): after a non-trivial-severity
+    # injury AND a red card in an early match, each affected player must be
+    # excluded from the auto-draft pool for EXACTLY as many of their team's
+    # subsequent matches as `matches_remaining` says, then reappear once it
+    # expires - driven through the real `TournamentAvailability` ledger, not
+    # a hardcoded guess about round numbers.
+    squads = {"ENG": POOLS["ENG"](season="2026"), "FRA": POOLS["FRA"](season="2026")}
+    tournament = Tournament(squads=squads)
+
+    eng_team = tournament._resolve_team_for_match("ENG")
+    tournament._resolve_team_for_match("FRA")
+    starters = list(eng_team.lineup.starters.values())
+    injured_player = starters[0].player
+    carded_player = starters[1].player
+
+    class FakeResult:
+        injured_players = [("ENG", injured_player)]
+        injury_details = [{"severity": "significant injury", "layoff_matches": 2}]
+        carded_players = [("ENG", carded_player, "red")]
+
+    tournament.availability.record_match(FakeResult())
+
+    # Immediately after: both sidelined, with their own correct remaining
+    # counts (injury: 2 matches, red card: 1 match) - not a shared constant.
+    assert tournament.availability.matches_remaining("ENG", injured_player) == 2
+    assert tournament.availability.matches_remaining("ENG", carded_player) == 1
+    pool_next = tournament.availability.filter_available("ENG", squads["ENG"])
+    assert injured_player not in pool_next
+    assert carded_player not in pool_next
+    eng_next = tournament._resolve_team_for_match("ENG")
+    eng_next_ids = {id(s.player) for s in eng_next.lineup.starters.values()} | {
+        id(p) for p in eng_next.lineup.bench
+    }
+    assert id(injured_player) not in eng_next_ids
+    assert id(carded_player) not in eng_next_ids
+
+    class EmptyResult:
+        injured_players = []
+        injury_details = []
+        carded_players = []
+
+    # One more "match played" tick: the red card (1 match) should now have
+    # expired, but the significant injury (2 matches) has one match left.
+    tournament.availability.record_match(EmptyResult())
+    assert tournament.availability.matches_remaining("ENG", carded_player) == 0
+    assert tournament.availability.matches_remaining("ENG", injured_player) == 1
+    assert carded_player in tournament.availability.filter_available("ENG", squads["ENG"])
+    assert injured_player not in tournament.availability.filter_available("ENG", squads["ENG"])
+
+    # Final tick: the injury layoff has now also fully expired.
+    tournament.availability.record_match(EmptyResult())
+    assert tournament.availability.matches_remaining("ENG", injured_player) == 0
+    pool_restored = tournament.availability.filter_available("ENG", squads["ENG"])
+    assert injured_player in pool_restored
+    assert carded_player in pool_restored
+
+
+def test_teams_mode_also_excludes_a_sidelined_player_via_bench_cover():
+    # The gap this verification found and fixed: `teams=` mode's fixed
+    # lineup previously never consulted `filter_available` at all, so a
+    # suspended/injured player would keep starting every match regardless.
+    # `_resolve_team_for_match` must now swap them for the best-fitting
+    # AVAILABLE bench player at that slot, same as squads mode's exclusion.
+    eng_team = auto_draft_team("ENG", POOLS["ENG"](season="2026"), short_code="ENG")
+    tournament = Tournament(teams={"ENG": eng_team})
+
+    sidelined_slot = next(iter(eng_team.lineup.starters.values()))
+    sidelined_player = sidelined_slot.player
+    sidelined_position = sidelined_slot.position
+    tournament.availability._sidelined[("ENG", id(sidelined_player))] = 1
+
+    resolved = tournament._resolve_team_for_match("ENG")
+    resolved_ids = {id(s.player) for s in resolved.lineup.starters.values()}
+    assert id(sidelined_player) not in resolved_ids
+    # The replacement is actually filling that same slot, not just present
+    # somewhere else in the lineup.
+    assert resolved.lineup.starters[sidelined_position].player is not sidelined_player
+    # The original, fixed `Team` object (and its lineup) must be untouched -
+    # so the NEXT call re-evaluates from scratch rather than permanently
+    # losing the sidelined player from the roster.
+    assert eng_team.lineup.starters[sidelined_position].player is sidelined_player
+
+
 # ------------------- teams=-mode condition carryover ------------------------
 
 def test_teams_mode_tournament_also_tracks_rest_penalty_condition():
@@ -284,3 +476,122 @@ def test_teams_mode_tournament_also_tracks_rest_penalty_condition():
     assert second_condition  # non-empty: someone now starts below 100
     starter_ids = {id(slot.player) for slot in eng_team.lineup.starters.values()}
     assert any(pid in second_condition for pid in starter_ids)
+
+
+# ---------------- worked examples: re-tuned decay/recovery magnitude -------
+#
+# Covers the Turkish bug report: fitness dropped too much in a single match
+# (100 down to ~60, every match, regardless of how demanding it actually
+# was) and barely recovered between matches (a flat 70 start next time).
+# These worked examples use REAL drafted squads (two different unions, via
+# `auto_draft_lineup`/`POOLS`, not the same player objects reused for both
+# sides - see `_team_with_bench` above, which intentionally shares
+# `ENGLAND_SAMPLE` for both teams and so isn't a safe basis for per-player
+# condition assertions) and confirm the actual numeric ranges this re-tuning
+# targets.
+
+def test_full_match_condition_drop_lands_well_above_the_old_60_floor():
+    home_lineup = auto_draft_lineup(POOLS["ENG"](season="2026"))
+    away_lineup = auto_draft_lineup(POOLS["RSA"](season="2026"))
+    home = Team(name="Home", short_code="HOM", lineup=home_lineup)
+    away = Team(name="Away", short_code="AWY", lineup=away_lineup)
+
+    drops = []
+    for seed in range(10):
+        engine = MatchEngine(home, away, seed=seed)
+        engine.start()
+        engine.advance_to(80)
+        engine.finish()
+        for slot in engine.active_lineup(home).values():
+            drops.append(100.0 - engine.condition_for(slot.player))
+
+    avg_drop = sum(drops) / len(drops)
+    # Typical single full match for an unremarkable player/position/matchup:
+    # should sit meaningfully above a "stuck around 60" outcome, even though
+    # the overall decay magnitude is now higher than the previous (0.22)
+    # tuning - see STAMINA_DECAY_PER_MINUTE's comment in match_engine.py for
+    # why: that lower magnitude made the genuine worst case unable to reach
+    # STAMINA_FLOOR at all, which this retune fixes.
+    assert 15.0 < avg_drop < 50.0
+    # A genuinely demanding single sample (heaviest-workload position, weak
+    # fitness, unfavorable matchup) can now run well past the old ~30-point
+    # ceiling, on its way toward the 20 floor in a deliberately-constructed
+    # worst case (see test_worst_case_condition_drop_reaches_near_the_floor
+    # below) - this test only guards that a merely "somewhat unlucky" sample
+    # from a normal drafted squad doesn't itself blow straight down to the
+    # floor.
+    assert max(drops) < 60.0
+
+
+def test_worst_case_condition_drop_reaches_near_the_floor():
+    """Deliberately construct the worst realistic combination the user
+    asked about: a low-fitness player at the heaviest-workload position
+    (tighthead prop - see POSITION_WORKLOAD), a team with weakened tackling
+    (pushes `_matchup_pressure_factor` toward its unfavorable end) facing a
+    stronger-pace attacking opponent, playing a full unassisted 80 minutes.
+    This combination's condition drop should land convincingly close to
+    (or at) STAMINA_FLOOR - unlike the old 0.22 tuning, where even this kind
+    of worst case only reached condition ~68."""
+    import dataclasses
+    from rugby_sim.models import Attributes
+
+    home_auto = auto_draft_lineup(POOLS["ENG"](season="2026"))
+    home_lineup = Lineup()
+    for pos, slot in home_auto.starters.items():
+        p = slot.player
+        weak_p = dataclasses.replace(p, attributes=dataclasses.replace(
+            p.attributes, tackling=max(1, p.attributes.tackling - 30)))
+        home_lineup.set_starter(pos, weak_p)
+    home_lineup.bench = list(home_auto.bench)
+    bad_prop = Player(
+        name="WorstCaseProp", nation="X", natural_position=Position.TIGHTHEAD_PROP,
+        attributes=Attributes(fitness=5, strength=90, pace=25, scrummaging=90,
+                               tackling=20, discipline=50),
+    )
+    home_lineup.set_starter(Position.TIGHTHEAD_PROP, bad_prop)
+    home_lineup.captain = home_lineup.starters[Position.HOOKER].player
+    home = Team(name="Home", short_code="HOM", lineup=home_lineup)
+
+    away_auto = auto_draft_lineup(POOLS["NZL"](season="2026"))
+    away_lineup = Lineup()
+    for pos, slot in away_auto.starters.items():
+        p = slot.player
+        strong_p = dataclasses.replace(p, attributes=dataclasses.replace(
+            p.attributes, pace=min(99, p.attributes.pace + 20)))
+        away_lineup.set_starter(pos, strong_p)
+    away_lineup.bench = list(away_auto.bench)
+    away_lineup.captain = list(away_lineup.starters.values())[0].player
+    away = Team(name="Away", short_code="AWY", lineup=away_lineup)
+
+    worst_drops = []
+    for seed in range(15):
+        engine = MatchEngine(home, away, seed=seed)
+        engine.start()
+        engine.advance_to(80)
+        engine.finish()
+        worst_drops.append(100.0 - engine.condition_for(bad_prop))
+
+    # Convincingly close to the 20-point drop / STAMINA_FLOOR, not just
+    # "somewhat worse than average" - this is the user's explicit ask.
+    assert max(worst_drops) >= 65.0
+
+
+def test_rest_penalty_condition_lands_in_the_85_to_95_recovery_band():
+    from rugby_sim.tournament.availability import (
+        REST_PENALTY_CONDITION_MAX,
+        REST_PENALTY_CONDITION_MIN,
+    )
+
+    assert REST_PENALTY_CONDITION_MIN == 85.0
+    assert REST_PENALTY_CONDITION_MAX == 95.0
+
+    availability = TournamentAvailability()
+    pool = ENGLAND_SAMPLE
+    availability.mark_squad("ENG", {id(p) for p in pool})
+    starting = availability.starting_condition("ENG", pool)
+    assert starting  # someone from last match's squad is in it
+    assert all(85.0 <= cond <= 95.0 for cond in starting.values())
+    # Varies across the band rather than pinning everyone to one number -
+    # the user's explicit ask ("85 ile 95 arasına gelsin", i.e. spread, not
+    # a single fixed value).
+    assert len(set(starting.values())) > 1

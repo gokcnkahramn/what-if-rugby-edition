@@ -148,10 +148,17 @@ def parse_current_squad(wikitext: str) -> List[dict]:
     -templated "Current squad" section. Returns [] if that section/template
     isn't present on this page (format varies page to page - never guess)."""
     start = wikitext.find("Current squad")
+    heading_len = 13
+    if start == -1:
+        # Germany's page (confirmed live 2026-11-16) titles this section
+        # plain "==Squad==" rather than "==Current squad==" - same
+        # template underneath, just a shorter heading.
+        start = wikitext.find("Squad==")
+        heading_len = 7
     if start == -1:
         return []
-    heading_match = re.search(r"\n==[^=]", wikitext[start + 10:])
-    end = start + 10 + heading_match.start() if heading_match else len(wikitext)
+    heading_match = re.search(r"\n==[^=]", wikitext[start + heading_len:])
+    end = start + heading_len + heading_match.start() if heading_match else len(wikitext)
     section = wikitext[start:end]
 
     entries = []
@@ -159,12 +166,35 @@ def parse_current_squad(wikitext: str) -> List[dict]:
     for line in section.splitlines():
         if "nat rs player" not in line:
             continue
-        pos_m = re.search(r"pos=(\w+)", line)
+        pos_m = re.search(r"pos=\s*(\w+)", line)
+        caps_m = re.search(r"\|caps=\s*(\d+)", line)
         name_m = re.search(r"name=\{\{sortname\|([^|}]+)\|([^|}]+)", line)
-        caps_m = re.search(r"\|caps=(\d+)", line)
-        if not (pos_m and name_m):
+        if pos_m and name_m:
+            first, last = name_m.group(1).strip(), name_m.group(2).strip()
+        elif pos_m:
+            # Some national-team pages (confirmed live for Switzerland/
+            # Poland - a dated Rugby Europe Trophy squad listing on each)
+            # spell the name as a plain `name=[[Full Name]]` (or
+            # `name=[[Full Name]] ([[Captain (sports)|c]])`) wikilink
+            # instead of the `{{sortname|First|Last}}` template - same
+            # bracket-stripping convention `uncapped_pool._parse_senior_squad`
+            # already uses for an equivalent plain-wikilink name. Split on
+            # the LAST space for first/last (best-effort; a multi-word
+            # surname is mis-split, same documented limitation as every
+            # other name-parsing path in this project).
+            plain_m = re.search(r"name=\s*\[\[([^\]|]+)", line)
+            if not plain_m:
+                continue
+            full_name = plain_m.group(1).strip()
+            if not full_name:
+                continue
+            parts = full_name.rsplit(" ", 1)
+            if len(parts) == 2:
+                first, last = parts
+            else:
+                first, last = "", parts[0]
+        else:
             continue
-        first, last = name_m.group(1).strip(), name_m.group(2).strip()
         # Some pages genuinely list a utility player twice (once per position
         # group they cover, e.g. lock *and* flanker) - keep only their first
         # (primary) listing so a drafted lineup never sees the same name twice.
@@ -242,6 +272,17 @@ WIKI_UNION_PAGES = {
     "CAN": "Canada national rugby union team",
     "HKG": "Hong Kong national rugby union team",
     "ZIM": "Zimbabwe national rugby union team",
+    # Rugby Europe Championship coverage (see `pool_builder.py`'s
+    # `TIER2_WIKI_ONLY_TEAM_IDS`) - confirmed live 2026-11-16, standard
+    # `{{nat rs player}}` "Current squad" section on all three, though
+    # dated (Switzerland/Poland: 2021-22 Rugby Europe Trophy; Germany:
+    # November 2024).
+    "SUI": "Switzerland national rugby union team",
+    "GER": "Germany national rugby union team",
+    "POL": "Poland national rugby union team",
+    "NED": "Netherlands national rugby union team",
+    "BEL": "Belgium national rugby union team",
+    "RUS": "Russia national rugby union team",
 }
 
 
@@ -272,7 +313,7 @@ def build_wikipedia_pool(short_code: str, nation: str, season: str = "2026") -> 
         position = POS_CODE_MAP.get(entry["pos"])
         if position is None:
             continue
-        full_name = f"{entry['first']} {entry['last']}"
+        full_name = f"{entry['first']} {entry['last']}".strip()
         attrs, source = _cross_reference_attributes(
             full_name, peer_proxies=peer_proxies_by_position.get(position)
         )

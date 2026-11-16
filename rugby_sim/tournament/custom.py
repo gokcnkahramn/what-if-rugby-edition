@@ -15,6 +15,7 @@ class CustomTournament:
         self, teams: Optional[Dict[str, Team]] = None, format: str = "round_robin",
         squads: Optional[Dict[str, List[Player]]] = None,
         my_team: Optional[str] = None, pause_hook=None, on_match_played=None,
+        rankings=None, availability=None,
     ):
         """`format`: "round_robin" | "round_robin_home_away" | "pool_knockout".
         `squads`, like `Tournament`'s own, drafts a fresh lineup for that
@@ -26,12 +27,17 @@ class CustomTournament:
         self.format = format
         self._tournament = Tournament(
             teams=teams, squads=squads, my_team=my_team, pause_hook=pause_hook, on_match_played=on_match_played,
+            rankings=rankings, availability=availability,
         )
 
     # -- live-progress passthrough (see `Tournament.current_stage` etc.) --
     @property
     def availability(self):
         return self._tournament.availability
+
+    @property
+    def rankings(self):
+        return self._tournament.rankings
 
     @property
     def current_stage(self):

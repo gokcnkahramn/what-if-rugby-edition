@@ -72,7 +72,45 @@ TIER2_TEAM_IDS = {
     "NAM": ("03b35a84", "Namibia", "Namibia"),
 }
 
-ALL_TEAM_IDS = {**TIER1_TEAM_IDS, **TIER2_TEAM_IDS}
+# Rugby Europe Championship coverage (added to unblock that competition for
+# Georgia/Romania/Spain/Portugal - see `real_fixtures.py`'s
+# "rugby_europe_championship" entry): Switzerland/Germany/Poland have NO
+# usable rugbydata player-level data (`fetch_team_matches` has their match
+# logs, but every match's `players` id list is empty - confirmed live across
+# 2022-2026 - so `_collect_raw_entries`'s box-score aggregation would always
+# return 0 players). Re-checked live on 2026-11-16 (a prior pass wrongly
+# concluded these three had no scrapeable Wikipedia squad either): all three
+# DO have a standard `==Current squad==` / `{{nat rs player|...}}` section
+# on their " national rugby union team" page - same template
+# `wikipedia_squad.py` already parses for Georgia/Romania/Spain/Portugal/etc.
+# (Poland's/Switzerland's squad listing is dated to the 2021-22 Rugby Europe
+# Trophy season - the most recent one Wikipedia editors have filled in for
+# those two - Germany's to a November 2024 friendly; still real, named,
+# sourced squads, not invented rosters.) So these get a `team_id=None`
+# placeholder here (no rugbydata roster pull possible) paired with a real
+# `WIKI_UNION_PAGES` entry each - `build_union_pool` below skips straight to
+# `build_wikipedia_pool` for a `team_id is None` union, same mechanism
+# Hong Kong/Zimbabwe already use via `WIKI_ONLY_NATIONS`, just folded into
+# `ALL_TEAM_IDS` here (unlike HKG/ZIM) so every other part of this project
+# that resolves a union by walking `ALL_TEAM_IDS` (season blocks, squad
+# lookups, fixture name canonicalization) picks these three up automatically.
+TIER2_WIKI_ONLY_TEAM_IDS = {
+    "SUI": (None, "Switzerland", "Switzerland"),
+    "GER": (None, "Germany", "Germany"),
+    "POL": (None, "Poland", "Poland"),
+    # Rugby Europe Championship's other 3 unions without rugbydata
+    # player-level caps. Netherlands/Belgium DO appear as team names in
+    # rugbydata's fixture index (Russia doesn't, even at match level) but
+    # none of the three has a resolvable per-player box score any more
+    # than Switzerland/Germany/Poland do, so they get the identical
+    # wiki-only treatment - also confirmed live 2026-11-16 to have a
+    # standard, parseable `{{nat rs player}}` squad section.
+    "NED": (None, "Netherlands", "Netherlands"),
+    "BEL": (None, "Belgium", "Belgium"),
+    "RUS": (None, "Russia", "Russia"),
+}
+
+ALL_TEAM_IDS = {**TIER1_TEAM_IDS, **TIER2_TEAM_IDS, **TIER2_WIKI_ONLY_TEAM_IDS}
 
 # Unions with no rugbydata team_id at all (not found in the dataset under
 # any name) but needed for the 2027 Rugby World Cup draw - display name
@@ -160,6 +198,13 @@ def _collect_raw_entries(short_code: str, season: str, _allow_fallback: bool = T
     union's own pool AND the cross-union reference pool used to calibrate
     percentile scaling (see `_global_reference_peer_proxies`)."""
     team_id, dataset_name, _nation = ALL_TEAM_IDS[short_code]
+    if team_id is None:
+        # Wiki-only union (see `TIER2_WIKI_ONLY_TEAM_IDS`) - no rugbydata
+        # box scores to aggregate, so this union contributes nothing to the
+        # cross-union reference pool either; it never reaches here via
+        # `build_union_pool` itself (that function returns earlier for a
+        # `None` team_id).
+        return {}
 
     player_ids = _collect_season_player_ids(team_id, season)
     if not player_ids and _allow_fallback:
@@ -243,8 +288,52 @@ def build_union_pool(short_code: str, season: str = DEFAULT_SEASON, _allow_fallb
         raise ValueError(f"Unknown union short code: {short_code}")
     _team_id, _dataset_name, nation = ALL_TEAM_IDS[short_code]
 
+    if _team_id is None:
+        # Wiki-only union (see `TIER2_WIKI_ONLY_TEAM_IDS` above) - no
+        # rugbydata roster to pull, go straight to its real Wikipedia
+        # "Current squad" listing.
+        from .wikipedia_squad import build_wikipedia_pool
+        pool = build_wikipedia_pool(short_code, nation, season=season)
+        for p in pool:
+            p.era = _era_suffix(season)
+        return pool
+
     best_by_name = _collect_raw_entries(short_code, season, _allow_fallback=_allow_fallback)
     era = _era_suffix(season)
+
+    # Minimum distinct names needed to field a legal XV (15 starters across
+    # 9 distinct position slots, allowing for some doubling-up) - found
+    # while wiring the Rugby Europe Championship in: Spain has a real
+    # rugbydata `team_id` but, confirmed live, genuinely NO match in the
+    # dataset ever carries a populated `players` id list for it
+    # (`best_by_name` empty, every season); Romania has a team_id AND some
+    # matches with populated rosters, but only ever 8 distinct capped names
+    # dataset-wide (confirmed live, every season 2022-2026) - enough for
+    # `build_union_pool` to return *something*, but not enough to actually
+    # field a team (`MatchEngine` rejects a lineup missing e.g. a fly-half
+    # or any centre). Both already have a real, sourced Wikipedia squad
+    # page (`wikipedia_squad.WIKI_UNION_PAGES`), previously only reachable
+    # through `build_union_pool_2026`'s separate merge path for 2026 - this
+    # merges it in here too (real rugbydata names always kept over their
+    # weaker Wikipedia-archetype counterpart, same precedence
+    # `build_union_pool_2026` already uses) so `build_union_pool`/
+    # `build_season_pool` (what Season mode and `rugby_europe_championship`
+    # actually call) stop returning a too-thin-to-field pool for a union
+    # whose rugbydata box scores are just structurally sparse.
+    _MIN_FIELDABLE_NAMES = 15
+    extra: List[Player] = []
+    if len(best_by_name) < _MIN_FIELDABLE_NAMES and _allow_fallback:
+        from .wikipedia_squad import WIKI_UNION_PAGES, build_wikipedia_pool
+        if short_code in WIKI_UNION_PAGES:
+            wiki_pool = build_wikipedia_pool(short_code, nation, season=season)
+            covered = {n.strip().lower() for n in best_by_name}
+            extra = [p for p in wiki_pool if p.name.strip().lower() not in covered]
+            if not best_by_name:
+                for p in extra:
+                    p.era = era
+                return extra
+            # fall through to the normal rugbydata-pool build below, then
+            # top up with `extra` afterward.
 
     # Percentile-normalize each attribute against the cross-union reference
     # pool for that position (e.g. "better tackler than 80% of real-world
@@ -270,7 +359,82 @@ def build_union_pool(short_code: str, season: str = DEFAULT_SEASON, _allow_fallb
             )
         )
 
+    if extra:
+        for p in extra:
+            p.era = era
+        pool.extend(extra)
+
     return pool
+
+
+def build_season_pool(short_code: str, year: int, include_uncapped: bool = False) -> List[Player]:
+    """Season mode's (12c) roster for one union/year: every real capped
+    player `build_union_pool` can pull for that union in `year`, deduped by
+    name (`_dedupe_players_by_name`-equivalent, inlined here to avoid a
+    webapp.py import).
+
+    Simplified vs. the full plan: the plan describes merging each
+    *per-competition* squad pull across the year's detected real
+    tournaments (Six Nations/Rugby Championship/Autumn Nations Series/
+    World Cup); this pipeline only ever pulls a union's roster at
+    *season* granularity (`build_union_pool(code, season=...)`), not
+    per-competition, so there's nothing further to union here - one
+    season-level pull already covers every competition that union played
+    in that real year. Documented honestly, same as `build_union_pool_2026`:
+    every CAPPED player across the year's real rugbydata rows for this
+    union, not every eligible-but-uncapped player.
+
+    `include_uncapped=True` (12d) additionally merges in
+    `uncapped_pool.build_uncapped_pool`'s real-but-never-capped club players
+    for unions it covers (currently ENG/FRA only - see that module's
+    `CLUB_PAGES`), deduped against the capped pool by name (capped entry
+    always wins). Defaults to False so existing callers of this function
+    are unaffected; `webapp.py`'s `/api/season/start` keeps the two pools
+    separate in its own response rather than relying on this flag (see
+    that endpoint), but the flag is here for any other caller that just
+    wants one merged list."""
+    pool = build_union_pool(short_code, season=str(year))
+    era = f"'{year % 100:02d}"
+    for p in pool:
+        p.era = era
+
+    seen: set = set()
+    deduped: List[Player] = []
+    for p in pool:
+        key = p.name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(p)
+
+    if include_uncapped:
+        from .uncapped_pool import build_uncapped_pool
+        nation = ALL_TEAM_IDS[short_code][2]
+        for p in build_uncapped_pool(short_code, nation):
+            key = p.name.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(p)
+
+    return deduped
+
+
+def build_widest_season_pool(short_code: str, year: int) -> List[Player]:
+    """13b: the widest possible real draft pool for interactive Season
+    mode's own nation - every capped player `build_season_pool` already
+    pulls for that union/year, topped up with that union's real-but-never-
+    capped club pool (`uncapped_pool.build_uncapped_pool`, 12d/13a), deduped
+    by name (a capped entry always wins over an uncapped one with the same
+    name). This is just `build_season_pool(..., include_uncapped=True)` -
+    that flag already does exactly this merge - kept as its own named
+    function per the plan so callers (webapp.py's interactive season start)
+    have an explicit, self-documenting entry point distinct from the plain
+    (capped-only) pool every OTHER (AI-controlled) nation in a season keeps
+    using. Returns the same (possibly unchanged) pool as `build_season_pool`
+    for a union `uncapped_pool` doesn't cover yet - a graceful no-op, not a
+    crash or an error."""
+    return build_season_pool(short_code, year, include_uncapped=True)
 
 
 def build_union_pool_2026(short_code: str) -> List[Player]:

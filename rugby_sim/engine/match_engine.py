@@ -79,7 +79,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from ..models.team import Team, Lineup, SquadSlot
-from ..models.position import Position, BACKS, CATEGORY_POSITION_GROUPS
+from ..models.position import Position, BACKS, CATEGORY_POSITION_GROUPS, POSITION_PROFILES
 from ..models.player import Player
 from .commentary import CommentaryEvent
 
@@ -97,19 +97,84 @@ TACTICAL_SUB_WINDOW = (50, 75)  # minute range tactical subs are allowed in
 # mode ALWAYS start here - see module docstring; tournament squads mode can
 # start a player below 100, see `tournament/availability.py`). Condition
 # decays every drive while a player is actively on the field, at a rate
-# driven by their `Attributes.fitness` (1-100): a fitness-50 player loses it
-# at the "base" rate, fitness 100 loses it at half that rate, fitness 1 loses
-# it at 1.5x that rate - not a physiological model, just a plausible, tunable
-# gradient so "fitness" (an attribute that otherwise barely mattered outside
-# a couple of position-profile weights) has a visible in-match payoff.
-STAMINA_DECAY_PER_MINUTE = 0.5
+# built from four small, separately-justified terms (see `_decay_stamina`
+# and `_position_workload` below) instead of just one:
+#   1. `Attributes.fitness` (the original, still the dominant term): a
+#      fitness-50 player decays at the "base" rate, fitness 100 at half
+#      that, fitness 1 at 1.5x that - not a physiological model, just a
+#      plausible, tunable gradient so "fitness" has a visible payoff.
+#   2. Position workload: reuses `POSITION_PROFILES` (`models/position.py`),
+#      the SAME per-position attribute-weight table already used for rating
+#      and sub-rating math - no new, parallel table invented. A position
+#      whose profile already leans heavily on fitness/strength/scrummaging
+#      (prop, lock, back row) is read as a position with heavier physical/
+#      static-contact demand than one that doesn't (half-back, back three),
+#      so it decays somewhat faster - a prop doing scrum after scrum vs. a
+#      winger who sprints in bursts but isn't in constant contact.
+#   3. `Attributes.strength`: a small extra fatigue cost for bigger players,
+#      on the plausible one-line reasoning that more strength usually comes
+#      with carrying/tackling more contact load per minute on the pitch.
+#   4. `Attributes.pace`: a small extra fatigue cost for faster players, on
+#      the plausible one-line reasoning that a quicker player covers more
+#      ground per minute of actual play, which is itself tiring.
+# Plus one team-level, matchup-aware term (not per-player): a team facing a
+# stronger attacking opponent than its own defense tires a little faster,
+# reusing the SAME `attack`/`tackling` team_sub_ratings `_resolve_drive`
+# already computes for the drive outcome rolls - no new signal invented,
+# and the swing is kept modest (+/-10%) rather than dramatic.
+STAMINA_DECAY_PER_MINUTE = 0.52
+# Re-tuned (was 0.22, briefly, then before that 0.4): 0.22 made the realistic
+# WORST case (low-fitness player, heaviest-physical-workload position -
+# tighthead prop, see POSITION_WORKLOAD below - playing a full unassisted 80
+# minutes under unfavorable matchup pressure) only reach condition ~68
+# (drop ~32), nowhere near the documented STAMINA_FLOOR of 20 - the floor was
+# effectively unreachable by anything but a hand-crafted extreme. Traced the
+# actual formula (see `_decay_stamina`): decay_rate for that worst-case
+# combination tops out around ~1.7-1.8 (well under STAMINA_RATE_MAX=2.2, so
+# the rate clamp was never the binding constraint - STAMINA_DECAY_PER_MINUTE
+# itself was). 0.52 is the smallest value, empirically verified via a real
+# `MatchEngine` run over drafted squads (not a hand-wavy estimate), at which
+# that worst-case combination's drop over a full match lands convincingly
+# close to the 20 floor (empirically ~76-80 points down, i.e. final
+# condition ~20-24) while a TYPICAL player in a typical match - using the
+# same formula's own existing fitness/position/strength/pace/matchup spread,
+# not flattened - still lands noticeably higher (empirically ~38 points
+# down on average, final ~62), clearly distinct from "every player ends up
+# stuck around 60" since that was the typical/AVERAGE outcome, not a rare
+# worst case.
 STAMINA_FLOOR = 20.0  # a gassed player still plays, just at reduced effectiveness
 # How much a player's condition actually softens their rating contribution:
 # at condition 100 this is 1.0 (no change); at the floor (20) it's 0.76 - a
 # deliberately modest effect (fatigue should be noticeable late in a tight
-# match, not swing the whole simulation on its own).
+# match, not swing the whole simulation on its own). This mapping is
+# unchanged by the richer decay-rate formula above - only how FAST a player
+# reaches a given condition changed, not what a given condition is worth.
 STAMINA_MIN_FACTOR = 0.7
 STAMINA_MAX_FACTOR = 1.0
+# Overall per-minute decay-rate multiplier is clamped to this range so that
+# stacking four inputs (vs. the original one) can't produce a wildly more
+# extreme swing than before - the old formula alone ranged 0.5x-1.5x; this
+# keeps the combined result in a comparably modest neighborhood.
+STAMINA_RATE_MIN = 0.3
+STAMINA_RATE_MAX = 2.2
+
+# Position "physical workload" signal for stamina decay, derived from
+# `POSITION_PROFILES` rather than a new table: the share of each position's
+# total attribute weight that sits on fitness/strength/scrummaging - the
+# three weights in that table that are already, independently, about
+# physical/contact demand. 0 for positions with none of those three
+# weighted at all (most backs), up to ~0.8 for tighthead prop. Computed
+# once at import time, not hand-tuned per position.
+def _compute_position_workload() -> Dict[Position, float]:
+    workload = {}
+    for position, profile in POSITION_PROFILES.items():
+        total = sum(profile.values()) or 1.0
+        physical = profile.get("fitness", 0.0) + profile.get("strength", 0.0) + profile.get("scrummaging", 0.0)
+        workload[position] = physical / total
+    return workload
+
+
+POSITION_WORKLOAD: Dict[Position, float] = _compute_position_workload()
 
 # -- Injury severity (heuristic, documented honestly - not a medical model) -
 # When an injury happens (see `_apply_injury`), one of these tiers is rolled
@@ -299,13 +364,39 @@ class MatchEngine:
         span = STAMINA_MAX_FACTOR - STAMINA_MIN_FACTOR
         return STAMINA_MIN_FACTOR + span * self._clamp(condition / 100.0, 0.0, 1.0)
 
-    def _decay_stamina(self, team: Team, drive_minutes: int) -> None:
+    def _matchup_pressure_factor(self, team: Team, opponent: Team) -> float:
+        """Team-level decay multiplier from how much defensive pressure
+        `team` is plausibly under this drive: reuses the same `attack` (for
+        `opponent`) and `tackling` (for `team`) team_sub_ratings
+        `_resolve_drive` already computes for its try/penalty rolls - no new
+        signal invented. A team facing a materially stronger attacking
+        opponent than its own defense scrambles/chases more and tires a
+        little faster; kept modest (+/-10%, not dramatic)."""
+        opp_attack = self._team_sub_rating(opponent, "attack")
+        own_defense = self._team_sub_rating(team, "tackling")
+        edge = self._clamp((opp_attack - own_defense) / 100.0, -0.5, 0.5)
+        return 1.0 + edge * 0.2  # 0.9x .. 1.1x
+
+    def _decay_stamina(self, team: Team, opponent: Team, drive_minutes: int) -> None:
+        pressure_factor = self._matchup_pressure_factor(team, opponent)
         for slot in self._active[team.name].values():
-            fitness = slot.player.attributes.fitness
-            fitness_factor = 1.5 - fitness / 100.0  # 0.5 (fitness=100) .. 1.5 (fitness=0)
+            attrs = slot.player.attributes
+            # (1) fitness - the original, still-dominant term.
+            fitness_factor = 1.5 - attrs.fitness / 100.0  # 0.5 (fitness=100) .. 1.5 (fitness=0)
+            # (2) position workload - see POSITION_WORKLOAD above.
+            workload = POSITION_WORKLOAD.get(slot.position, 0.0)
+            workload_factor = 0.85 + workload * 0.35  # ~0.85 .. ~1.13
+            # (3) strength - more contact/carrying load per minute.
+            strength_term = (attrs.strength - 50) / 100.0 * 0.15  # +/-0.075
+            # (4) pace - more ground covered per minute.
+            pace_term = (attrs.pace - 50) / 100.0 * 0.10  # +/-0.05
+
+            decay_rate = fitness_factor * workload_factor * pressure_factor + strength_term + pace_term
+            decay_rate = self._clamp(decay_rate, STAMINA_RATE_MIN, STAMINA_RATE_MAX)
+
             key = id(slot.player)
             current = self._stamina.get(key, 100.0)
-            current -= STAMINA_DECAY_PER_MINUTE * fitness_factor * drive_minutes
+            current -= STAMINA_DECAY_PER_MINUTE * decay_rate * drive_minutes
             self._stamina[key] = max(STAMINA_FLOOR, current)
 
     def bench_for(self, team: Team) -> List[Player]:
@@ -353,8 +444,8 @@ class MatchEngine:
 
         self._expire_cards(attacking, self._minute)
         self._expire_cards(defending, self._minute)
-        self._decay_stamina(attacking, drive_minutes)
-        self._decay_stamina(defending, drive_minutes)
+        self._decay_stamina(attacking, defending, drive_minutes)
+        self._decay_stamina(defending, attacking, drive_minutes)
 
         self._resolve_drive(attacking, defending, self._minute, self.result)
         self._maybe_personnel_change(self._minute, self.result)

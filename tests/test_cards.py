@@ -139,7 +139,13 @@ def test_card_report_json_shape_and_live_matches_remaining():
     engine.rng = _FakeRng([0.01])  # straight red
     engine._issue_card(home, 33, result)
     import random as _random
-    engine.rng = _random.Random(99)
+    # Seed picked so the REST of the match (played out with a real RNG from
+    # here on) doesn't roll any further cards - this test only wants to
+    # check the ONE card it explicitly issued. Re-picked from 99 after the
+    # stamina decay re-tuning (see `engine/match_engine.py`
+    # STAMINA_DECAY_PER_MINUTE) changed downstream RNG consumption enough to
+    # make seed 99 roll a spurious extra yellow card.
+    engine.rng = _random.Random(0)
     engine.finish()
     availability.record_match(result)
 
@@ -162,7 +168,8 @@ def test_card_report_json_without_availability_has_no_matches_remaining_field():
     engine.rng = _FakeRng([0.5])  # yellow
     engine._issue_card(home, 7, result)
     import random as _random
-    engine.rng = _random.Random(99)
+    # See comment on the same re-seeding above.
+    engine.rng = _random.Random(0)
     engine.finish()
 
     report = _card_report_json([result])

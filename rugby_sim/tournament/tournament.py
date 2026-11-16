@@ -18,12 +18,14 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from ..data.sources.auto_draft import auto_draft_team
+from ..data.sources.nations_championship_2026 import NORTH_POOL, SOUTH_POOL
 from ..engine.match_engine import MatchEngine, MatchResult
 from ..models.player import Player
 from ..models.position import Position
-from ..models.team import Team
+from ..models.team import Lineup, Team
 from .availability import TournamentAvailability
 from .fixtures import Fixture, knockout_bracket, next_knockout_round, pool_stage, round_robin
+from .rankings import TeamRankingTracker
 from .real_fixtures import RealFixture, load_real_fixtures
 from .standings import Standings
 from .tournament_stats import PlayerTournamentStats, TeamTournamentStats, attach_tournament_awards
@@ -119,6 +121,8 @@ class Tournament:
     def __init__(
         self, teams: Optional[Dict[str, Team]] = None, squads: Optional[Dict[str, List[Player]]] = None,
         my_team: Optional[str] = None, pause_hook=None, on_match_played=None,
+        rankings: Optional[TeamRankingTracker] = None, is_world_cup: bool = False,
+        availability: Optional[TournamentAvailability] = None,
     ):
         """`my_team`/`pause_hook` support an interactive tournament: when a
         fixture involves `my_team`, instead of auto-simulating it with
@@ -140,11 +144,24 @@ class Tournament:
         `TournamentReport` at the very end."""
         self.teams = teams or {}
         self.squads = squads or {}
-        self.availability = TournamentAvailability()
+        # Accepts an existing TournamentAvailability so Season mode (see
+        # `season.py`) can share injury/suspension/rest-condition state
+        # across tournament boundaries within a season, defaults to a
+        # fresh one otherwise - same convention as `rankings` below.
+        self.availability = availability if availability is not None else TournamentAvailability()
         self._pending_condition: Dict[str, Dict[int, float]] = {}
         self.my_team = my_team
         self.pause_hook = pause_hook
         self.on_match_played = on_match_played
+        # Team-rankings tracker (12a/12b) - accepts an existing tracker so
+        # Season mode can pass one through across tournament boundaries
+        # (see `season.py`), defaults to a fresh one otherwise, mirroring
+        # `self.availability` above. `is_world_cup` is only ever set True
+        # by `run_world_cup_2027`/`run_historical_world_cup` (see those
+        # methods) - it doubles each match's ranking swing, matching the
+        # real World Rugby rule.
+        self.rankings = rankings if rankings is not None else TeamRankingTracker()
+        self.is_world_cup = is_world_cup
         # Live progress, updated as the tournament runs (not just at the
         # end) - the web layer reads these after every `on_match_played`
         # call to show a current standings table / knockout stage while an
@@ -195,10 +212,53 @@ class Tournament:
         # bookkeeping still applies to whoever's actually in it - a fixed
         # squad's players should still show up more tired as a tournament's
         # fixtures pile up, not just squads-mode's fresh-draft-every-match
-        # players. No auto-draft needed here (the lineup is already fixed);
-        # just mark its existing starters/bench as "selected" and read back
-        # their condition the same way squads mode does.
+        # players.
         team = self._team(name)
+        full_pool = [slot.player for slot in team.lineup.starters.values()] + list(team.lineup.bench)
+        available_ids = {id(p) for p in self.availability.filter_available(name, full_pool)}
+
+        sidelined_starters = {
+            pos: slot for pos, slot in team.lineup.starters.items()
+            if id(slot.player) not in available_ids
+        }
+        if sidelined_starters:
+            # A fixed lineup still has to respect injury/red-card sidelining
+            # (previously only squads= mode did, via auto_draft_lineup's
+            # `filter_available` pool - a genuine gap: a suspended/injured
+            # player in `teams=` mode would otherwise keep starting every
+            # match regardless). There's no fresh pool to re-draft from here
+            # (the lineup is fixed), so instead swap each sidelined starter
+            # for the best-fitting AVAILABLE bench player at that slot - the
+            # same "bring on the best cover" idea `MatchEngine.apply_substitution`
+            # uses mid-match. If no eligible bench player is left (everyone
+            # who could cover is also sidelined), the sidelined player plays
+            # anyway rather than leaving the slot empty - the same last-resort
+            # choice `MatchEngine._apply_injury` makes when a team has no
+            # cover left mid-match. This only affects THIS match's working
+            # lineup; `team.lineup` itself (the original, fixed roster) is
+            # never mutated, so the next match re-evaluates from scratch.
+            new_lineup = Lineup()
+            used_ids: set = set()
+            bench_pool = [p for p in team.lineup.bench if id(p) in available_ids]
+            for pos, slot in team.lineup.starters.items():
+                if id(slot.player) in available_ids:
+                    new_lineup.set_starter(pos, slot.player)
+                    continue
+                candidates = [p for p in bench_pool if id(p) not in used_ids]
+                if candidates:
+                    replacement = max(candidates, key=lambda p: p.rating_at(pos))
+                    used_ids.add(id(replacement))
+                    new_lineup.set_starter(pos, replacement)
+                else:
+                    new_lineup.set_starter(pos, slot.player)  # no cover left - play them anyway
+            new_lineup.bench = [p for p in team.lineup.bench if id(p) not in used_ids]
+            new_lineup.captain = (
+                team.lineup.captain
+                if team.lineup.captain is not None and id(team.lineup.captain) in available_ids
+                else max(new_lineup.starters.values(), key=lambda s: s.player.attributes.leadership).player
+            )
+            team = Team(name=team.name, short_code=team.short_code, lineup=new_lineup)
+
         pool = [slot.player for slot in team.lineup.starters.values()] + list(team.lineup.bench)
         condition = self.availability.starting_condition(name, pool)
         selected_ids = {id(p) for p in pool}
@@ -221,6 +281,9 @@ class Tournament:
         else:
             result = MatchEngine(home_team, away_team, seed=seed, initial_condition=initial_condition or None).run()
         self.availability.record_match(result)
+        self.rankings.record_result(
+            home_name, away_name, result.score_home, result.score_away, is_world_cup=self.is_world_cup,
+        )
         if self.on_match_played is not None:
             self.on_match_played(home_name, away_name, result)
         return result
@@ -321,6 +384,112 @@ class Tournament:
         name = f"{tournament_key.replace('_', ' ').title()} {season} (real fixtures, simulated)"
         return attach_tournament_awards(TournamentReport(name=name, standings=standings, results=results))
 
+    # -- 2026 Nations Championship (real round-robin + generated finals) -
+    def run_nations_championship(self, year: int = 2026, seed: Optional[int] = None) -> TournamentReport:
+        """Replays the real 36-fixture North-pool-vs-South-pool round robin
+        (see `real_fixtures.load_real_fixtures("nations_championship", ...)`
+        and `data/sources/nations_championship_2026.py`), then plays the
+        real competition's actual "Finals weekend" structure: each pool's
+        Nth-ranked team (by our own simulated bonus-point standings, via
+        `standings.py` - the same table-building logic every other
+        tournament format here already reuses) plays the other pool's
+        Nth-ranked team - 1st v 1st is the Grand Final, 2nd v 2nd down to
+        6th v 6th a placement match, six single matches with no further
+        elimination bracket.
+
+        IMPORTANT HONESTY NOTE: as of this writing the real 2026 Finals
+        weekend (27-29 Nov 2026) hasn't been played, and the real pairings
+        aren't published anywhere yet - they're explicitly rank-dependent
+        on the real competition's own real standings, which don't exist
+        yet either. The finals pairings this method generates are entirely
+        OUR OWN construction: computed from OUR engine's simulated results
+        of the real round-robin fixtures, following the real competition's
+        known PAIRING RULE (Nth v Nth) - not a claim or prediction about
+        what the real 2026 Finals weekend will actually produce. This is
+        the same honesty convention `run_world_cup_2027` already uses for
+        its own not-yet-played bracket.
+        """
+        pool_teams = {"North": sorted(NORTH_POOL), "South": sorted(SOUTH_POOL)}
+        real_fixtures: List[RealFixture] = load_real_fixtures("nations_championship", str(year))
+        if not real_fixtures:
+            raise ValueError(
+                f"No fixtures recovered for 'nations_championship' in {year} - "
+                f"the dataset may not cover that season."
+            )
+
+        pool_standings = {name: Standings(teams) for name, teams in pool_teams.items()}
+        self.current_stage = "Nations Championship - round-robin stage"
+        self.current_pools = pool_standings
+        results: List[MatchResult] = []
+        counter = 0
+        for fx in real_fixtures:
+            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+            counter += 1
+            results.append(result)
+            # Every real fixture here is cross-pool (a North union vs. a
+            # South union - see `nations_championship_2026.py`'s pool
+            # docstring), so `Standings.add_result` (generic `Standings`
+            # behaviour, see `standings.py`) auto-adds a row for BOTH teams
+            # involved, regardless of which pool's `Standings` object we
+            # call it on - every fixture satisfies both the North and the
+            # South "home/away in pool" condition below, so without
+            # pruning, each pool's table would accumulate rows for every
+            # team in the whole competition. We prune each pool's table
+            # back to just its own 6 members immediately after every
+            # result (not just once at the end of the loop) so that
+            # `self.current_pools` - which live/in-progress callers such as
+            # `_tournament_progress_json` read directly off this same dict
+            # mid-run - is always correctly pool-separated, not just the
+            # final report.
+            if fx.home in NORTH_POOL or fx.away in NORTH_POOL:
+                pool_standings["North"].add_result(result)
+            if fx.home in SOUTH_POOL or fx.away in SOUTH_POOL:
+                pool_standings["South"].add_result(result)
+            for name, teams in pool_teams.items():
+                standings = pool_standings[name]
+                standings.rows = {t: standings.rows[t] for t in teams if t in standings.rows}
+
+        north_table = pool_standings["North"].table()
+        south_table = pool_standings["South"].table()
+
+        def _ordinal(n: int) -> str:
+            if 10 <= n % 100 <= 20:
+                suffix = "th"
+            else:
+                suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+            return f"{n}{suffix}"
+
+        finals_fixtures: List[Fixture] = []
+        for rank in range(6):
+            stage = "Grand Final" if rank == 0 else f"Placement match ({_ordinal(rank + 1)})"
+            finals_fixtures.append(Fixture(
+                home=north_table[rank].team, away=south_table[rank].team, round_no=1, stage=stage,
+            ))
+
+        self.current_stage = "Nations Championship - finals weekend"
+        finals_round = BracketRound(stage="Finals weekend (our simulation's own rank-based pairings)", fixtures=finals_fixtures)
+        self.current_bracket = [finals_round]
+        finals_results: List[MatchResult] = []
+        for fx in finals_fixtures:
+            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+            counter += 1
+            finals_results.append(result)
+            results.append(result)
+        finals_round.results = finals_results
+
+        champion = (
+            finals_results[0].home.name if finals_results[0].score_home >= finals_results[0].score_away
+            else finals_results[0].away.name
+        )
+        name = (
+            f"Nations Championship {year} (real round-robin fixtures, simulated; "
+            f"finals weekend generated from OUR OWN simulated standings - not a real-world prediction)"
+        )
+        return attach_tournament_awards(TournamentReport(
+            name=name, pools=pool_standings, results=results,
+            bracket=[finals_round], champion=champion,
+        ))
+
     # -- 2027 Rugby World Cup (real draw, no fixtures exist yet) ---------
     def run_world_cup_2027(self, fixture_mode: str = "specific", seed: Optional[int] = None) -> TournamentReport:
         """`fixture_mode`: "specific" plays each pool's round-robin in the
@@ -334,6 +503,7 @@ class Tournament:
 
         if fixture_mode not in ("specific", "random"):
             raise ValueError("fixture_mode must be 'specific' or 'random'")
+        self.is_world_cup = True
         rng = random.Random(seed)
 
         pool_letters = list(POOLS_2027.keys())  # ["A", "B", "C", "D", "E", "F"]
@@ -436,6 +606,7 @@ class Tournament:
         used (no third-place wildcards, unlike `run_world_cup_2027`)."""
         from ..data.sources.historical_rwc import get_rwc_year_data
 
+        self.is_world_cup = True
         pools, _squads = get_rwc_year_data(year)
         known = self.known_names()
         missing = [name for pool in pools.values() for name in pool if name not in known]

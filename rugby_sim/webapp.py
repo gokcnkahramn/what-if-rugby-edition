@@ -42,7 +42,11 @@ from .tournament import (
     TournamentReport,
     list_tournaments,
 )
+from .data.sources.pool_builder import ALL_TEAM_IDS, build_season_pool, build_union_pool
+from .tournament.rankings import TeamRankingTracker
 from .tournament.real_fixtures import TOURNAMENTS, load_real_fixtures
+from .tournament.season import SeasonFixtureBlock, SeasonPlan, SeasonSession, run_season, squad_for_team
+from .data.sources.pool_builder import build_widest_season_pool
 
 app = Flask(__name__, static_folder=None)
 
@@ -603,7 +607,66 @@ def _card_report_json(results: List[MatchResult], availability=None) -> list:
     return out
 
 
-def _report_json(report: TournamentReport, availability=None) -> dict:
+def _team_form_json(rankings, results: List[MatchResult]) -> list:
+    """One row per union this project tracks at all - every code in
+    `pool_builder.ALL_TEAM_IDS`/`NATION_DISPLAY`, unioned with every name
+    already in `rankings.rankings.WR_RANKING_SEED` (covers a few seeded
+    unions, e.g. Hong Kong, that aren't in `ALL_TEAM_IDS`) - not just teams
+    that happen to appear in `results` (Ask 2: a team with zero matches
+    played yet still shows up, at its seed/baseline rating and a 0-0-0
+    record, so the full world rankings are always visible). A World-Rugby-
+    style ranking rating (see `tournament/rankings.py`) plus the W/D/L
+    record `results` gives each team that did play. `rankings`, if given
+    (the `Tournament`/`CustomTournament`/`SeasonSession`'s own
+    `TeamRankingTracker`), supplies each team's live current rating and
+    `baseline` (its `WR_RANKING_SEED`/default starting point) - `change`
+    is the net movement since that baseline, i.e. across every match this
+    tracker has ever recorded for that team (within this tournament, or -
+    for a shared Season-mode tracker - across the whole season so far)."""
+    if rankings is None:
+        return []
+    from .data.sources.pool_builder import NATION_DISPLAY
+    from .tournament.rankings import DEFAULT_RATING, WR_RANKING_SEED
+
+    wins: Dict[str, int] = {}
+    draws: Dict[str, int] = {}
+    losses: Dict[str, int] = {}
+
+    universe = set(NATION_DISPLAY.values()) | set(WR_RANKING_SEED.keys())
+
+    def _touch(name: str) -> None:
+        if name not in wins:
+            wins[name] = draws[name] = losses[name] = 0
+        universe.add(name)
+
+    for result in results:
+        home, away = result.home.name, result.away.name
+        _touch(home)
+        _touch(away)
+        if result.score_home > result.score_away:
+            wins[home] += 1
+            losses[away] += 1
+        elif result.score_away > result.score_home:
+            wins[away] += 1
+            losses[home] += 1
+        else:
+            draws[home] += 1
+            draws[away] += 1
+
+    out = []
+    for name in universe:
+        rating = rankings.rating(name)
+        baseline = WR_RANKING_SEED.get(name, DEFAULT_RATING)
+        out.append({
+            "team": name, "rating": round(rating, 1), "baseline": round(baseline, 1),
+            "change": round(rating - baseline, 1),
+            "wins": wins.get(name, 0), "draws": draws.get(name, 0), "losses": losses.get(name, 0),
+        })
+    out.sort(key=lambda row: row["rating"], reverse=True)
+    return out
+
+
+def _report_json(report: TournamentReport, availability=None, rankings=None) -> dict:
     top_scorers = sorted(
         (s for s in report.player_stats_aggregate.values() if s.points > 0),
         key=lambda s: s.points, reverse=True,
@@ -633,6 +696,7 @@ def _report_json(report: TournamentReport, availability=None) -> dict:
         ),
         "injury_report": _injury_report_json(report.results, availability=availability),
         "card_report": _card_report_json(report.results, availability=availability),
+        "team_form": _team_form_json(rankings, report.results),
     }
 
 
@@ -924,7 +988,10 @@ def api_tournament_run():
     try:
         if kind == "real":
             t = Tournament(teams=teams, squads=squads)
-            report = t.run_real(body["key"], season=body.get("season", "2026"), seed=seed)
+            if body["key"] == "nations_championship":
+                report = t.run_nations_championship(int(body.get("season", "2026")), seed=seed)
+            else:
+                report = t.run_real(body["key"], season=body.get("season", "2026"), seed=seed)
         elif kind == "world_cup_2027":
             t = Tournament(teams=teams, squads=squads)
             report = t.run_world_cup_2027(fixture_mode=body.get("fixture_mode", "specific"), seed=seed)
@@ -944,7 +1011,7 @@ def api_tournament_run():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    return jsonify(_report_json(report, availability=t.availability))
+    return jsonify(_report_json(report, availability=t.availability, rankings=t.rankings))
 
 
 # -- API: interactive ("my team") tournaments ----------------------------
@@ -991,6 +1058,10 @@ class TournamentSession:
     # compute a LIVE "matches remaining" for each injury (see
     # `_tournament_session_state_json`).
     availability: Optional[object] = None
+    # The running instance's own `TeamRankingTracker` (12b), once it
+    # exists - same convention/timing as `availability` above, lets
+    # `_team_form_json` compute a live "Team form / rankings" section.
+    rankings: Optional[object] = None
 
 
 _TOURNAMENT_SESSIONS: Dict[str, TournamentSession] = {}
@@ -1026,6 +1097,7 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
     results_so_far = [_match_summary_json(r) for r in session.completed]
     injury_report = _injury_report_json(session.completed, availability=session.availability)
     card_report = _card_report_json(session.completed, availability=session.availability)
+    team_form = _team_form_json(session.rankings, session.completed)
     progress = session.progress
     if session.status == "paused":
         live = _LIVE_MATCHES[session.live_session_id]
@@ -1034,26 +1106,26 @@ def _tournament_session_state_json(session_id: str, session: TournamentSession) 
             "home": session.home_name, "away": session.away_name,
             "live_match": _live_match_state_json(session.live_session_id, live),
             "results_so_far": results_so_far, "progress": progress,
-            "injury_report": injury_report, "card_report": card_report,
+            "injury_report": injury_report, "card_report": card_report, "team_form": team_form,
         }
     if session.status == "finished":
         return {
             "session_id": session_id, "status": "finished",
-            "report": _report_json(session.report, availability=session.availability),
+            "report": _report_json(session.report, availability=session.availability, rankings=session.rankings),
             "results_so_far": results_so_far,
             "progress": progress, "injury_report": injury_report,
-            "card_report": card_report,
+            "card_report": card_report, "team_form": team_form,
         }
     if session.status == "error":
         return {
             "session_id": session_id, "status": "error", "error": session.error,
             "results_so_far": results_so_far, "progress": progress,
-            "injury_report": injury_report, "card_report": card_report,
+            "injury_report": injury_report, "card_report": card_report, "team_form": team_form,
         }
     return {
         "session_id": session_id, "status": session.status,
         "results_so_far": results_so_far, "progress": progress,
-        "injury_report": injury_report, "card_report": card_report,
+        "injury_report": injury_report, "card_report": card_report, "team_form": team_form,
     }
 
 
@@ -1070,6 +1142,8 @@ def _build_tournament(kind: str, body: dict, teams: Dict[str, Team], squads: Dic
     if kind == "real":
         t = Tournament(teams=teams, squads=squads, my_team=my_team, pause_hook=pause_hook, on_match_played=on_match_played)
         holder["instance"] = t
+        if body["key"] == "nations_championship":
+            return t.run_nations_championship(int(body.get("season", "2026")), seed=seed)
         return t.run_real(body["key"], season=body.get("season", "2026"), seed=seed)
     if kind == "world_cup_2027":
         t = Tournament(teams=teams, squads=squads, my_team=my_team, pause_hook=pause_hook, on_match_played=on_match_played)
@@ -1115,6 +1189,7 @@ def _run_tournament_session(session: TournamentSession, kind: str, body: dict,
         if instance is not None:
             session.progress = _tournament_progress_json(instance)
             session.availability = instance.availability
+            session.rankings = instance.rankings
 
     try:
         report = _build_tournament(kind, body, teams, squads, my_team, pause_hook, on_match_played, holder)
@@ -1208,6 +1283,254 @@ def api_tournament_status(session_id: str):
     if session is None:
         return jsonify({"error": f"unknown tournament session {session_id}"}), 404
     return jsonify(_tournament_session_state_json(session_id, session))
+
+
+# -- API: Season mode (12c, reworked interactive in 13b) ------------------
+# Chains every real tournament a chosen nation actually played in a chosen
+# real calendar year into one continuous run (see `tournament/season.py`),
+# sharing ONE `TournamentAvailability`/`TeamRankingTracker` across the
+# whole season so sidelining/condition/ratings carry over between
+# tournaments - not reset per tournament the way Tournament mode is.
+#
+# 13b: the season now runs exactly like an interactive Tournament-mode
+# session (see `TournamentSession`/`_run_tournament_session` above) but for
+# EVERY block chained together on one background thread: the user picks one
+# nation as `my_team`, drafts it from the widest real pool
+# (`build_widest_season_pool`), and that nation's own fixtures pause on the
+# same pausable live-match flow (`_LIVE_MATCHES`,
+# `/api/match/live/<id>/...`) while every other nation auto-drafts/auto-sims
+# unattended - across every block, with no manual "play next block" call.
+_SEASON_SESSIONS: Dict[str, SeasonSession] = {}
+_next_season_session_id = 1
+
+
+def _season_block_json(block: SeasonFixtureBlock) -> dict:
+    return {"kind": block.kind, "key": block.key, "display_name": block.display_name, "team_names": block.team_names}
+
+
+def _season_progress_json(instance) -> dict:
+    return _tournament_progress_json(instance) if instance is not None else None
+
+
+def _season_state_json(session_id: str, session: SeasonSession) -> dict:
+    results_so_far = [_match_summary_json(r) for r in session.all_results]
+    injury_report = _injury_report_json(session.all_results, availability=session.availability)
+    card_report = _card_report_json(session.all_results, availability=session.availability)
+    team_form = _team_form_json(session.rankings, session.all_results)
+    base = {
+        "session_id": session_id,
+        "nation_code": session.nation_code, "year": session.year,
+        "my_team": session.my_team,
+        "blocks": [_season_block_json(b) for b in session.blocks],
+        "current_block_index": session.current_block_index,
+        "finished": session.finished,
+        "pool": [_player_json(p) for p in session.pool],
+        # 12d/13a: kept clearly separate from "pool" (never merged in) -
+        # real club players carrying this union's Wikipedia flag but never
+        # capped internationally for it - the "extra" part of the widest
+        # draft pool `my_team` got to pick from.
+        "uncapped_pool": [_player_json(p) for p in session.uncapped_pool],
+        "results_so_far": results_so_far,
+        "injury_report": injury_report, "card_report": card_report, "team_form": team_form,
+        "progress": session.progress,
+        "status": session.status,
+    }
+    if session.status == "paused":
+        live = _LIVE_MATCHES[session.live_session_id]
+        base.update({
+            "home": session.home_name, "away": session.away_name,
+            "live_match": _live_match_state_json(session.live_session_id, live),
+        })
+    elif session.status == "finished":
+        base["latest_block_report"] = (
+            _report_json(session.block_reports[-1], availability=session.availability, rankings=session.rankings)
+            if session.block_reports else None
+        )
+    elif session.status == "error":
+        base["error"] = session.error
+    if session.current_block_report is not None:
+        base["latest_block_report"] = _report_json(
+            session.current_block_report, availability=session.availability, rankings=session.rankings,
+        )
+    return base
+
+
+@app.get("/api/season/widest_pool")
+def api_season_widest_pool():
+    """`?nation=<code>&year=<year>` - the widest real draft pool for that
+    union/year (capped internationals + 12d/13a's uncapped club pool,
+    merged - see `build_widest_season_pool`), so the frontend can let the
+    user draft their own matchday-23 BEFORE starting the season (their
+    nation's first live fixture can happen as early as the season's first
+    block)."""
+    nation_code = request.args.get("nation")
+    year = request.args.get("year")
+    if not nation_code or not year:
+        return jsonify({"error": "nation and year query params are required"}), 400
+    if nation_code not in ALL_TEAM_IDS:
+        return jsonify({"error": f"Unknown union short code: {nation_code}"}), 400
+    pool = build_widest_season_pool(nation_code, int(year))
+    _register(pool)
+    return jsonify({"pool": [_player_json(p) for p in pool]})
+
+
+def _run_season_session(session: SeasonSession, squad_player_ids: Dict[str, List[int]], seed: Optional[int]):
+    holder: dict = {}
+
+    def pause_hook(home_name, away_name, home_team, away_team, match_seed, initial_condition=None):
+        live_session_id = _start_live_match(home_team, away_team, match_seed, initial_condition)
+        session.live_session_id = live_session_id
+        session.home_name, session.away_name = home_name, away_name
+        session.status = "paused"
+        session.resume_event.clear()
+        session.state_changed.set()
+        session.resume_event.wait()
+        return session.pending_result
+
+    def on_match_played(home_name, away_name, result):
+        session.all_results.append(result)
+        instance = holder.get("instance")
+        if instance is not None:
+            session.progress = _season_progress_json(instance)
+
+    def progress_hook(instance):
+        holder["instance"] = instance
+        session.progress = _season_progress_json(instance)
+
+    # Builds each block's `squads_by_team` lazily, right before that block
+    # runs (next fixture data/years can differ per block, same as the old
+    # per-block endpoint did) - `my_team`'s own entry always uses the
+    # already-drafted widest-pool roster (`squad_player_ids`), everyone
+    # else resolves via plain `squad_for_team` (capped-only).
+    squads_by_block: Dict[int, Dict[str, List[Player]]] = {}
+    nation = NATION_DISPLAY.get(session.nation_code)
+    my_squad = [_PLAYER_BY_ID[pid] for pid in squad_player_ids.get(session.my_team or nation, []) if pid in _PLAYER_BY_ID]
+    if not my_squad:
+        my_squad = session.pool
+    for i, block in enumerate(session.blocks):
+        squads: Dict[str, List[Player]] = {}
+        for team_name in block.team_names:
+            if team_name == session.my_team:
+                squads[team_name] = my_squad
+            else:
+                squads[team_name] = squad_for_team(team_name, session.year)
+            if not squads[team_name]:
+                session.error = f"No roster available for {team_name} in {session.year}."
+                session.status = "error"
+                session.state_changed.set()
+                return
+            _register(squads[team_name])
+        squads_by_block[i] = squads
+
+    run_season(session, squads_by_block, pause_hook, on_match_played, progress_hook, seed=seed)
+
+
+@app.post("/api/season/start")
+def api_season_start():
+    """body: {nation_code, year, include_uncapped?, my_team?, squad_player_ids?, seed?}.
+    Builds the `SeasonPlan` and this union's season-wide roster, then - if
+    `my_team` is given - spawns the season's background thread (mirroring
+    `/api/tournament/start`) and blocks until it either pauses on
+    `my_team`'s first live fixture or the whole season finishes with no
+    `my_team` fixture ever occurring. If `my_team` is omitted, the response
+    is just the plan + pool so the frontend can let the user draft from it.
+
+    `pool`/`uncapped_pool` in the response stay the original (12d, pre-13b)
+    shape for backward compatibility: `pool` is always the plain capped-only
+    roster, `uncapped_pool` is only populated when `include_uncapped=true`
+    is passed (default false) - NOT automatically the widest pool. 13b's
+    actual widest-pool draft flow (capped + uncapped merged, for `my_team`
+    only) goes through the dedicated `/api/season/widest_pool` endpoint
+    instead, which the frontend calls before drafting; `squad_player_ids`
+    here can be built from either, the background thread doesn't care which
+    endpoint supplied the ids."""
+    global _next_season_session_id
+    body = request.get_json(force=True)
+    nation_code = body["nation_code"]
+    year = int(body["year"])
+    include_uncapped = bool(body.get("include_uncapped", False))
+    my_team: Optional[str] = body.get("my_team") or None
+    squad_player_ids: Dict[str, List[int]] = body.get("squad_player_ids", {})
+    seed = body.get("seed")
+
+    if nation_code not in ALL_TEAM_IDS:
+        return jsonify({"error": f"Unknown union short code: {nation_code}"}), 400
+    try:
+        blocks = SeasonPlan(nation_code, year)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not blocks:
+        return jsonify({"error": f"No real tournaments found for {nation_code} in {year}."}), 400
+
+    nation = ALL_TEAM_IDS[nation_code][2]
+    if my_team is not None and my_team != nation:
+        return jsonify({"error": f"my_team ({my_team}) must match this union's display name ({nation})."}), 400
+
+    pool = build_season_pool(nation_code, year)
+    _register(pool)
+    uncapped_pool: List[Player] = []
+    if include_uncapped:
+        from .data.sources.uncapped_pool import build_uncapped_pool
+        capped_names = {p.name.strip().lower() for p in pool}
+        uncapped_pool = [p for p in build_uncapped_pool(nation_code, nation) if p.name.strip().lower() not in capped_names]
+        _register(uncapped_pool)
+
+    session_id = f"ss{_next_season_session_id}"
+    _next_season_session_id += 1
+    session = SeasonSession(
+        nation_code=nation_code, year=year, blocks=blocks, my_team=my_team,
+        pool=pool, uncapped_pool=uncapped_pool,
+        state_changed=threading.Event(), resume_event=threading.Event(),
+    )
+    _SEASON_SESSIONS[session_id] = session
+
+    if my_team is None:
+        session.status = "not_started"
+        return jsonify(_season_state_json(session_id, session))
+
+    thread = threading.Thread(
+        target=_run_season_session, args=(session, squad_player_ids, seed), daemon=True,
+    )
+    session.thread = thread
+    thread.start()
+    session.state_changed.wait()
+    session.state_changed.clear()
+    return jsonify(_season_state_json(session_id, session))
+
+
+@app.post("/api/season/<session_id>/resume")
+def api_season_resume(session_id: str):
+    """Call once `my_team`'s own live match (started by the pause above,
+    under `live_match.session_id`) is finished - mirrors
+    `/api/tournament/<id>/resume` exactly: hands the finished result back
+    into the season's ongoing block, which auto-advances again (possibly
+    straight into the NEXT block with no pause at all) until either the
+    next `my_team` fixture pauses it or the whole season ends."""
+    session = _SEASON_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown season session {session_id}"}), 404
+    if session.status != "paused":
+        return jsonify({"error": f"season session {session_id} is not paused (status: {session.status})"}), 400
+
+    live = _LIVE_MATCHES.get(session.live_session_id)
+    if live is None or not live.is_finished():
+        return jsonify({"error": "the live match for this pause point hasn't finished yet - "
+                                  "use /api/match/live/.../continue (and .../substitute) to finish it first"}), 400
+
+    session.pending_result = live.result
+    session.state_changed.clear()
+    session.resume_event.set()
+    session.state_changed.wait()
+    session.state_changed.clear()
+    return jsonify(_season_state_json(session_id, session))
+
+
+@app.get("/api/season/<session_id>/state")
+def api_season_state(session_id: str):
+    session = _SEASON_SESSIONS.get(session_id)
+    if session is None:
+        return jsonify({"error": f"unknown season session {session_id}"}), 404
+    return jsonify(_season_state_json(session_id, session))
 
 
 # -- API: draft mode ------------------------------------------------------

@@ -45,6 +45,12 @@ UNION_STRENGTH: Dict[str, float] = {
     "GEO": 0.7, "ROU": 0.4, "ESP": 0.3, "POR": 0.4, "SAM": 0.75, "TGA": 0.65,
     "USA": 0.4, "CAN": 0.35, "URU": 0.3, "CHI": 0.2, "NAM": 0.25,
     "HKG": 0.12, "ZIM": 0.15, "BAR": 1.0,
+    # Rugby Europe Championship's second (lower) pool tier, real-world Rugby
+    # Europe Trophy/Pool B level - below ROU/ESP/POR (who've recently sat in
+    # the Championship's top pool) but clearly organised, regularly-fielded
+    # unions, not a bottom-of-the-world minnow like HKG/ZIM.
+    "SUI": 0.3, "GER": 0.3, "POL": 0.25,
+    "NED": 0.3, "BEL": 0.3, "RUS": 0.3,
 }
 DEFAULT_UNION_STRENGTH = 0.4
 
