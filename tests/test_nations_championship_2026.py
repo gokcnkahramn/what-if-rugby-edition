@@ -170,8 +170,8 @@ def test_run_nations_championship_live_progress_pools_are_never_merged():
     snapshots = []
     orig_play = tournament._play
 
-    def spying_play(home_name, away_name, seed=None):
-        result = orig_play(home_name, away_name, seed)
+    def spying_play(home_name, away_name, seed=None, home_advantage_for=None):
+        result = orig_play(home_name, away_name, seed, home_advantage_for)
         pools = tournament.current_pools
         if pools and set(pools.keys()) == {"North", "South"}:
             snapshots.append({

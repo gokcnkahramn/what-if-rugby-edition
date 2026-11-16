@@ -32,6 +32,24 @@ part still uses a standard bracket-order pairing.
 
 from __future__ import annotations
 
+# Real Rugby World Cup host nations, professional era (1995 onward) plus the
+# upcoming 2027 edition - standard, well-known rugby history facts, not a
+# guess. Used (see `Tournament.run_world_cup_2027`/`run_historical_world_cup`
+# in `tournament.py`) to give the host nation's own matches a real, scoped
+# home_advantage, while every other World Cup match (the vast majority -
+# genuinely neutral/rotating venues) stays neutral.
+HOST_NATION: dict = {
+    1995: "South Africa",
+    1999: "Wales",
+    2003: "Australia",
+    2007: "France",
+    2011: "New Zealand",
+    2015: "England",
+    2019: "Japan",
+    2023: "France",
+    2027: "Australia",
+}
+
 # The official "if these four groups' third-placed teams qualify, here's
 # who plays the winners of Pools A/B/C/D" permutation table (there are
 # exactly C(6,4)=15 ways to pick 4 of the 6 groups' thirds, covered below).

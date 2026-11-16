@@ -7,6 +7,7 @@
   --text: #e8f1ec;
   --muted: #9fb8ad;
   --border: #2a3d36;
+  --danger: #d4584a;
 }
 
 * { box-sizing: border-box; }
@@ -230,3 +231,131 @@ table.stats th, table.stats td { border: 1px solid var(--border); padding: 6px 8
 /* Team form / rankings (12b) - rating change colour cues */
 .positive { color: #3fae5a; }
 .negative { color: #d4584a; }
+
+/* Status/error messaging: failed API calls, validation errors, etc. should
+   be immediately, visually distinct from normal status/info text. Reuses
+   the same red already used for .negative. */
+.status-error { color: var(--danger); font-weight: 600; }
+
+/* ===== Responsive / mobile (phone browsers via Cloudflare Tunnel) =====
+   Strategy:
+   - Tables (table.stats, .pitch, .depth-chart) that can genuinely overflow on a
+     narrow screen get a horizontal-scroll container (not a reflow), with a
+     styled/visible scrollbar as the scroll affordance.
+   - Side-by-side panels (.teams, breadcrumb, match-controls, rows of controls)
+     stack vertically below the tablet breakpoint.
+   - Tap targets (buttons, selects, inputs, slots, candidates, crumbs,
+     collapsible headers) grow to a comfortable minimum height on touch-sized
+     screens.
+   - Desktop (anything above ~900px) is untouched - these rules only apply
+     inside max-width media queries. */
+
+/* Let any table that doesn't fit scroll horizontally instead of squeezing
+   text unreadably small, on every screen size (harmless on desktop - a table
+   that already fits never triggers the scrollbar). */
+table.stats {
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+/* thead/tbody/tr/td keep their default table-* display values, so the
+   browser auto-generates an anonymous table box around them for correct
+   row/column layout - the outer <table> (now display:block) is just the
+   scroll container. This is the standard wrapper-free responsive-table
+   technique and needs no JS/markup change. */
+
+/* Visible scroll affordance for any horizontally-scrollable area. */
+.candidates::-webkit-scrollbar,
+#events::-webkit-scrollbar,
+.events::-webkit-scrollbar,
+table.stats::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.candidates::-webkit-scrollbar-thumb,
+#events::-webkit-scrollbar-thumb,
+.events::-webkit-scrollbar-thumb,
+table.stats::-webkit-scrollbar-thumb {
+  background: var(--accent2);
+  border-radius: 4px;
+}
+
+/* ---------- Tablet / small laptop (~768-900px and under) ---------- */
+@media (max-width: 900px) {
+  header { padding: 14px 16px; }
+  .screen { padding: 0 16px 32px; }
+  .breadcrumb { padding: 8px 16px; }
+  .match-controls { padding: 0 16px 20px; flex-wrap: wrap; }
+  #report { padding: 0 16px 32px; }
+  .teams { padding: 12px 16px; gap: 12px; }
+  .card-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+}
+
+/* ---------- Narrow phones (~480px and under) ---------- */
+@media (max-width: 480px) {
+  header { padding: 12px 12px; }
+  header h1 { font-size: 1.1rem; }
+  header p { font-size: 0.82rem; }
+
+  .screen { padding: 0 10px 28px; }
+  #report { padding: 0 10px 28px; }
+  .match-controls { padding: 0 10px 16px; gap: 8px; }
+
+  /* Mode-select cards: single column, full-width tap targets. */
+  .card-grid { grid-template-columns: 1fr; gap: 10px; margin: 12px 0; }
+  .card { padding: 14px; }
+
+  /* Breadcrumb bar: allow wrapping, bigger crumb tap targets. */
+  .breadcrumb { flex-wrap: wrap; padding: 8px 10px; row-gap: 4px; }
+  .breadcrumb .crumb { padding: 6px 2px; min-height: 32px; }
+
+  /* Team builder / other panels. */
+  .teams { padding: 10px 10px; gap: 10px; }
+  .panel { padding: 12px; }
+  .row { gap: 6px; }
+
+  /* Position grid: 3 tiny columns reads poorly on a ~360-430px phone -
+     drop to 2 columns and grow the tap target. */
+  .pitch { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .slot { min-height: 46px; padding: 8px 10px; font-size: 0.82rem; }
+  .depth-slot { min-width: 100%; }
+
+  .candidates { max-height: 45vh; }
+  .candidate { padding: 10px 6px; min-height: 44px; align-items: center; }
+
+  /* Buttons, selects, inputs: comfortable touch size. */
+  button {
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    min-height: 44px;
+  }
+  select, input[type=text], input[type=number] {
+    padding: 10px 10px;
+    font-size: 0.9rem;
+    min-height: 44px;
+  }
+  /* Small fixed-width numeric inputs (seed/year/etc, set inline via style="width:...")
+     stay compact but still tall enough to tap comfortably. */
+  input[type=number] { min-width: 70px; }
+
+  .collapsible-header { padding: 12px 14px; min-height: 44px; }
+  .chevron { font-size: 0.95rem; }
+
+  table.stats th, table.stats td { padding: 8px 10px; font-size: 0.8rem; }
+
+  /* Background attribution corner: keep it out of the way of controls and
+     readable without covering content on a short mobile viewport. */
+  .bg-attribution { font-size: 0.62rem; padding: 2px 6px; right: 6px; bottom: 4px; }
+
+  #scoreline { font-size: 1.2rem; }
+  #events, .events { max-height: 50vh; }
+}
+
+/* ---------- Landscape phones: match-controls/row items can get very
+   cramped in a short viewport even above 480px width; keep wrapping. ---------- */
+@media (max-height: 420px) and (max-width: 900px) {
+  .match-controls { flex-wrap: wrap; }
+  .candidates { max-height: 160px; }
+  #events, .events { max-height: 220px; }
+}

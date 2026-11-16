@@ -86,6 +86,17 @@ from .commentary import CommentaryEvent
 MATCH_MINUTES = 80
 MAX_SUBSTITUTIONS = 8
 
+# -- Home advantage (real, small, scoped - see `home_advantage` below) -----
+# Deliberately mirrors `rankings.HOME_ADVANTAGE` (3.0) for consistency: the
+# same project already has one small, documented "home advantage" magnitude
+# for the separate post-match ELO-style rating update, so a second,
+# independently-invented number for this in-match effect would be an
+# unjustified inconsistency. Not imported directly (this module shouldn't
+# depend on `tournament/rankings.py`, the dependency runs the other way -
+# `rankings.py` is tournament-layer, `match_engine.py` is engine-layer), so
+# the value is mirrored here with a comment pointing at the source of truth.
+HOME_ADVANTAGE_BONUS = 3.0
+
 # Per-drive probabilities for the two kinds of in-match personnel change.
 P_INJURY_PER_DRIVE = 0.012
 P_TACTICAL_SUB_PER_DRIVE = 0.02
@@ -306,16 +317,31 @@ class MatchResult:
 
 class MatchEngine:
     def __init__(self, home: Team, away: Team, seed: Optional[int] = None,
-                 weather: str = "dry", initial_condition: Optional[Dict[int, float]] = None):
+                 weather: str = "dry", initial_condition: Optional[Dict[int, float]] = None,
+                 home_advantage: bool = False):
         """`initial_condition`, if given, maps `id(player)` -> starting
         stamina (0-100) for any player who should NOT start this match at a
         fresh 100 - the hook tournament squads mode uses to carry a
         short-rest penalty into a player's next match (see
         `tournament/availability.py`). Omit it (the default) for a single
         friendly or draft-mode match: every player starts at 100, no
-        exceptions, exactly as before stamina existed."""
+        exceptions, exactly as before stamina existed.
+
+        `home_advantage`, if True, gives `home` (not `away` - this engine
+        has no opinion on which side that actually is; the caller decides,
+        based on real fixture data) a small, documented territory-roll
+        bonus (see `HOME_ADVANTAGE_BONUS`/`_pick_attacking_team`) - a real,
+        honestly-scoped home-field effect, not a blanket one. Defaults to
+        False: every existing caller that doesn't explicitly opt in (a
+        single friendly, draft mode, a fully custom/synthetic tournament)
+        is completely unaffected. This is keyed ONLY to which side is the
+        genuine real-world home side for a specific fixture - never to
+        which side is human- vs AI-controlled (`Tournament.my_team`), so it
+        can't introduce any human/AI asymmetry; see `tournament.py` for how
+        each real competition decides this per fixture."""
         self.home = home
         self.away = away
+        self.home_advantage = home_advantage
         self.weather = weather  # "dry" | "wet" | "windy" - mild modifiers
         self.rng = random.Random(seed)
         self._carded: Dict[str, List[int]] = {home.name: [], away.name: []}  # expiry minutes
@@ -726,6 +752,13 @@ class MatchEngine:
 
     def _pick_attacking_team(self, territory_ticks: Dict[str, int]):
         home_terr = self._territory_strength(self.home) * self._active_card_penalty(self.home)
+        if self.home_advantage:
+            # Small, real, scoped home-field nudge (see `HOME_ADVANTAGE_BONUS`
+            # above) - added here, not blended into `_territory_strength`
+            # itself, so it only ever affects the single territory roll this
+            # method already makes, and never the kicking/aerial/handling
+            # sub-ratings other code paths (e.g. tournament reports) read.
+            home_terr += HOME_ADVANTAGE_BONUS
         away_terr = self._territory_strength(self.away) * self._active_card_penalty(self.away)
         weather_adj = 1.0
         if self.weather == "windy":

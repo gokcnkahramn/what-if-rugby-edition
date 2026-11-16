@@ -266,7 +266,18 @@ class Tournament:
         self._pending_condition[name] = condition
         return team
 
-    def _play(self, home_name: str, away_name: str, seed: Optional[int]) -> MatchResult:
+    def _play(
+        self, home_name: str, away_name: str, seed: Optional[int],
+        home_advantage_for: Optional[str] = None,
+    ) -> MatchResult:
+        """`home_advantage_for`, if given, must equal `home_name` or
+        `away_name` - whichever side genuinely has real home advantage for
+        THIS fixture (see each `run_*` method's call site for how that's
+        decided per competition). `None` (the default) means neutral - no
+        real venue data exists/applies, so no side gets it. Only ever keyed
+        to real fixture data, never to `self.my_team` - see `MatchEngine.
+        __init__`'s `home_advantage` docstring for why that can't introduce
+        a human/AI asymmetry."""
         home_team = self._resolve_team_for_match(home_name)
         away_team = self._resolve_team_for_match(away_name)
         # Combined starting-condition map (id(player) -> condition) for
@@ -277,9 +288,34 @@ class Tournament:
         initial_condition.update(self._pending_condition.pop(home_name, {}))
         initial_condition.update(self._pending_condition.pop(away_name, {}))
         if self.pause_hook is not None and self.my_team is not None and self.my_team in (home_name, away_name):
+            # Interactive (human-played) fixtures go through the web layer's
+            # own pausable `MatchEngine` flow (see class docstring) rather
+            # than a plain `.run()` call here, so `home_advantage` isn't
+            # threaded through this particular path - out of scope for this
+            # change, and in practice `my_team` fixtures are a small subset
+            # of any tournament's matches.
             result = self.pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition)
+        elif home_advantage_for == away_name:
+            # The advantaged side is in the AWAY slot of this fixture (e.g.
+            # a World Cup host nation drawn into the "away" position of an
+            # otherwise-neutral, synthetic pool fixture) - `MatchEngine.
+            # home_advantage` only ever nudges its own `self.home`, so swap
+            # which Team object is passed in which slot, then swap the
+            # result's home/away/score fields back so every downstream
+            # consumer (Standings, rankings, on_match_played) still sees
+            # `result.home.name == home_name` exactly as it always has.
+            swapped = MatchEngine(
+                away_team, home_team, seed=seed, initial_condition=initial_condition or None,
+                home_advantage=True,
+            ).run()
+            swapped.home, swapped.away = home_team, away_team
+            swapped.score_home, swapped.score_away = swapped.score_away, swapped.score_home
+            result = swapped
         else:
-            result = MatchEngine(home_team, away_team, seed=seed, initial_condition=initial_condition or None).run()
+            result = MatchEngine(
+                home_team, away_team, seed=seed, initial_condition=initial_condition or None,
+                home_advantage=(home_advantage_for == home_name),
+            ).run()
         self.availability.record_match(result)
         self.rankings.record_result(
             home_name, away_name, result.score_home, result.score_away, is_world_cup=self.is_world_cup,
@@ -313,13 +349,21 @@ class Tournament:
     def _run_named_pools_and_knockout(
         self, named_pools: Dict[str, List[str]], name: str,
         qualifiers_per_pool: int = 2, seed: Optional[int] = None,
+        host_nation: Optional[str] = None,
     ) -> TournamentReport:
         """Shared by `run_pool_and_knockout` (auto-split pools) and
         `run_historical_world_cup` (real historical pool groupings) - plain
         top-N-per-pool-advance, standard bracket order. The 2027 World Cup's
         third-place-wildcard permutation table is a different, more
         complex rule (see `run_world_cup_2027`) that doesn't apply to any
-        pre-2027 tournament, so it isn't reused here."""
+        pre-2027 tournament, so it isn't reused here.
+
+        `host_nation`, if given, is that World Cup edition's real host (see
+        `world_cup_2027.HOST_NATION`) - every fixture (pool or knockout)
+        involving them gets `home_advantage` for their side only; every
+        other match stays neutral. `None` (the default, used by
+        `run_pool_and_knockout`'s fully-custom/synthetic tournaments, which
+        have no real host) means every match here stays neutral."""
         pool_standings = {pool_name: Standings(teams) for pool_name, teams in named_pools.items()}
         self.current_stage = "Pool stage"
         self.current_pools = pool_standings
@@ -327,7 +371,11 @@ class Tournament:
         counter = 0
         for pool_name, teams in named_pools.items():
             for fx in round_robin(teams):
-                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                adv = host_nation if host_nation in (fx.home, fx.away) else None
+                result = self._play(
+                    fx.home, fx.away, seed=None if seed is None else seed + counter,
+                    home_advantage_for=adv,
+                )
                 counter += 1
                 pool_standings[pool_name].add_result(result)
                 all_results.append(result)
@@ -345,7 +393,11 @@ class Tournament:
             self.current_stage = fxs[0].stage
             round_results = []
             for fx in fxs:
-                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                adv = host_nation if host_nation in (fx.home, fx.away) else None
+                result = self._play(
+                    fx.home, fx.away, seed=None if seed is None else seed + counter,
+                    home_advantage_for=adv,
+                )
                 counter += 1
                 round_results.append(result)
                 all_results.append(result)
@@ -378,7 +430,13 @@ class Tournament:
         self.current_standings = standings
         results = []
         for i, fx in enumerate(real_fixtures):
-            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
+            # Real fixture - `fx.home` is a genuine real-world home side
+            # (see `real_fixtures.py`), so it gets the real, scoped
+            # home_advantage (see `MatchEngine.__init__`).
+            result = self._play(
+                fx.home, fx.away, seed=None if seed is None else seed + i,
+                home_advantage_for=fx.home,
+            )
             standings.add_result(result)
             results.append(result)
         name = f"{tournament_key.replace('_', ' ').title()} {season} (real fixtures, simulated)"
@@ -423,7 +481,14 @@ class Tournament:
         results: List[MatchResult] = []
         counter = 0
         for fx in real_fixtures:
-            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+            # Real round-robin fixture - genuine `fx.home` gets the real,
+            # scoped home_advantage (see `MatchEngine.__init__`). The 6
+            # generated finals-weekend matches below are deliberately
+            # NEUTRAL - see that loop's own comment.
+            result = self._play(
+                fx.home, fx.away, seed=None if seed is None else seed + counter,
+                home_advantage_for=fx.home,
+            )
             counter += 1
             results.append(result)
             # Every real fixture here is cross-pool (a North union vs. a
@@ -471,6 +536,11 @@ class Tournament:
         self.current_bracket = [finals_round]
         finals_results: List[MatchResult] = []
         for fx in finals_fixtures:
+            # Rank-paired, constructed fixtures (real-world equivalent: a
+            # neutral Twickenham/London finals weekend, not either team's
+            # home ground - see the method docstring) - deliberately NO
+            # home_advantage for either side, `home_advantage_for` left at
+            # its default `None`.
             result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
             counter += 1
             finals_results.append(result)
@@ -499,12 +569,16 @@ class Tournament:
         been played, only a real draw (see `world_cup_2027.py`)."""
         import random
 
-        from .world_cup_2027 import POOLS_2027, THIRD_PLACE_PAIRINGS
+        from .world_cup_2027 import HOST_NATION, POOLS_2027, THIRD_PLACE_PAIRINGS
 
         if fixture_mode not in ("specific", "random"):
             raise ValueError("fixture_mode must be 'specific' or 'random'")
         self.is_world_cup = True
         rng = random.Random(seed)
+        # Real host nation (Australia, 2027) - only their own matches get
+        # home_advantage; every other match (the vast majority) stays
+        # neutral - see `world_cup_2027.HOST_NATION`.
+        host_nation = HOST_NATION[2027]
 
         pool_letters = list(POOLS_2027.keys())  # ["A", "B", "C", "D", "E", "F"]
         pools = {name: list(teams) for name, teams in POOLS_2027.items()}
@@ -521,7 +595,11 @@ class Tournament:
             standings = Standings(teams)
             pool_standings[f"Pool {pool_name}"] = standings
             for fx in round_robin(teams):
-                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                adv = host_nation if host_nation in (fx.home, fx.away) else None
+                result = self._play(
+                    fx.home, fx.away, seed=None if seed is None else seed + counter,
+                    home_advantage_for=adv,
+                )
                 counter += 1
                 standings.add_result(result)
                 all_results.append(result)
@@ -574,7 +652,11 @@ class Tournament:
             self.current_stage = fxs[0].stage
             round_results = []
             for fx in fxs:
-                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                adv = host_nation if host_nation in (fx.home, fx.away) else None
+                result = self._play(
+                    fx.home, fx.away, seed=None if seed is None else seed + counter,
+                    home_advantage_for=adv,
+                )
                 counter += 1
                 round_results.append(result)
                 all_results.append(result)
@@ -605,6 +687,7 @@ class Tournament:
         simple top-2-per-pool-advance format every edition before 2027
         used (no third-place wildcards, unlike `run_world_cup_2027`)."""
         from ..data.sources.historical_rwc import get_rwc_year_data
+        from .world_cup_2027 import HOST_NATION
 
         self.is_world_cup = True
         pools, _squads = get_rwc_year_data(year)
@@ -615,15 +698,23 @@ class Tournament:
                 f"Missing a Team for: {', '.join(sorted(set(missing)))} - "
                 f"draft every {year} World Cup participant before running it."
             )
+        # Real host nation for this edition (see `world_cup_2027.HOST_NATION`
+        # - only their own matches get home_advantage; every other match
+        # stays neutral. `.get` rather than `[...]` since a year this
+        # dataset doesn't otherwise cover would raise elsewhere first.
+        host_nation = HOST_NATION.get(year)
         if year == 1999:
-            return self._run_1999_world_cup(pools, seed=seed)
+            return self._run_1999_world_cup(pools, seed=seed, host_nation=host_nation)
 
         return self._run_named_pools_and_knockout(
             pools, name=f"{year} Rugby World Cup (real draw, historical squads)",
-            qualifiers_per_pool=2, seed=seed,
+            qualifiers_per_pool=2, seed=seed, host_nation=host_nation,
         )
 
-    def _run_1999_world_cup(self, named_pools: Dict[str, List[str]], seed: Optional[int] = None) -> TournamentReport:
+    def _run_1999_world_cup(
+        self, named_pools: Dict[str, List[str]], seed: Optional[int] = None,
+        host_nation: Optional[str] = None,
+    ) -> TournamentReport:
         """1999 is the one professional-era edition with a genuinely
         different format: 5 pools of 4, pool **winners** go straight to the
         quarter-finals (5 slots); the 5 pool **runners-up** plus the single
@@ -647,7 +738,11 @@ class Tournament:
         counter = 0
         for pool_name, teams in named_pools.items():
             for fx in round_robin(teams):
-                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                adv = host_nation if host_nation in (fx.home, fx.away) else None
+                result = self._play(
+                    fx.home, fx.away, seed=None if seed is None else seed + counter,
+                    home_advantage_for=adv,
+                )
                 counter += 1
                 pool_standings[pool_name].add_result(result)
                 all_results.append(result)
@@ -686,7 +781,11 @@ class Tournament:
         self.current_stage = "quarter-final play-off"
         playoff_results = []
         for fx in playoff_fixtures:
-            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+            adv = host_nation if host_nation in (fx.home, fx.away) else None
+            result = self._play(
+                fx.home, fx.away, seed=None if seed is None else seed + counter,
+                home_advantage_for=adv,
+            )
             counter += 1
             playoff_results.append(result)
             all_results.append(result)
@@ -709,7 +808,11 @@ class Tournament:
             self.current_stage = fxs[0].stage
             round_results = []
             for fx in fxs:
-                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+                adv = host_nation if host_nation in (fx.home, fx.away) else None
+                result = self._play(
+                    fx.home, fx.away, seed=None if seed is None else seed + counter,
+                    home_advantage_for=adv,
+                )
                 counter += 1
                 round_results.append(result)
                 all_results.append(result)

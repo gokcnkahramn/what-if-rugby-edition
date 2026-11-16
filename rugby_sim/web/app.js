@@ -8,6 +8,21 @@ let UNIONS = [];
 let LOGOS = {};         // code -> "/logos/CODE.png"
 let NAME_TO_CODE = {};  // real nation name (incl. historical aliases) -> code
 
+// Shared status-message helpers: every mode (Friendly, Tournament, Draft,
+// Season, live match substitution/swap, etc.) writes progress/result text
+// into its own "status" element. setStatus() centralizes that so error text
+// always gets the .status-error (red) class, and any normal/success text
+// always clears it - otherwise a stale red error class could linger after a
+// later successful action overwrote the same element's text.
+function setStatus(el, message, isError) {
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle("status-error", !!isError);
+}
+function showError(el, message) {
+  setStatus(el, message, true);
+}
+
 function logoCodeFor(codeOrName) {
   if (LOGOS[codeOrName]) return codeOrName;
   return NAME_TO_CODE[codeOrName] || null;
@@ -180,12 +195,12 @@ class TeamBuilder {
       document.getElementById(`${this.side}-load`).onclick = async () => {
         const code = sel.value, season = document.getElementById(`${this.side}-season`).value || "2026";
         const status = document.getElementById(`${this.side}-load-status`);
-        status.textContent = "loading (first time may hit the network)...";
+        setStatus(status, "loading (first time may hit the network)...");
         const players = await api(`/api/pool/${code}?season=${encodeURIComponent(season)}`);
         this.pool = players;
         this.name = this.name || sel.options[sel.selectedIndex].text.split(" - ")[1];
         document.getElementById(`${this.side}-name`).value = this.name;
-        status.textContent = `${players.length} players loaded.`;
+        setStatus(status, `${players.length} players loaded.`);
       };
     } else if (this.mode === "free") {
       area.innerHTML = `
@@ -201,11 +216,11 @@ class TeamBuilder {
         btn.onclick = async () => {
           const season = document.getElementById(`${this.side}-season`).value || "2026";
           const status = document.getElementById(`${this.side}-load-status`);
-          status.textContent = "loading...";
+          setStatus(status, "loading...");
           const players = await api(`/api/pool/${btn.dataset.code}?season=${encodeURIComponent(season)}`);
           this.pool = mergeUniquePlayers(this.pool, players);
           btn.classList.add("active");
-          status.textContent = `${this.pool.length} players in the mix.`;
+          setStatus(status, `${this.pool.length} players in the mix.`);
         };
       });
     } else if (this.mode === "legends") {
@@ -213,10 +228,10 @@ class TeamBuilder {
         <span class="muted" id="${this.side}-load-status"></span></div>`;
       document.getElementById(`${this.side}-load-legends`).onclick = async () => {
         const status = document.getElementById(`${this.side}-load-status`);
-        status.textContent = "loading (first time is network-heavy, ~190 pages - cached after)...";
+        setStatus(status, "loading (first time is network-heavy, ~190 pages - cached after)...");
         const players = await api("/api/legends");
         this.pool = players;
-        status.textContent = `${players.length} legends loaded.`;
+        setStatus(status, `${players.length} legends loaded.`);
       };
     } else if (this.mode === "historical") {
       area.innerHTML = `
@@ -251,13 +266,13 @@ class TeamBuilder {
       };
       const loadYearData = async () => {
         const year = yearSel.value;
-        status.textContent = "loading real squads (first time is network-heavy - cached after)...";
+        setStatus(status, "loading real squads (first time is network-heavy - cached after)...");
         const path = compSel.value === "rwc" ? `/api/historical_rwc/${year}` : `/api/historical_six_nations/${year}`;
         const res = await api(path);
         yearData = res;
         const teamNames = Object.keys(res.squads).sort();
         teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
-        status.textContent = `${teamNames.length} teams loaded for ${year}.`;
+        setStatus(status, `${teamNames.length} teams loaded for ${year}.`);
         updateHistLogo();
       };
       compSel.onchange = loadYears;
@@ -267,7 +282,7 @@ class TeamBuilder {
         if (!yearData) return;
         const squad = yearData.squads[teamSel.value] || [];
         this.pool = mergeUniquePlayers(this.pool, squad);
-        status.textContent = `${this.pool.length} players in the mix.`;
+        setStatus(status, `${this.pool.length} players in the mix.`);
       };
       loadYears();
     } else {
@@ -407,7 +422,7 @@ class TeamBuilder {
       this.name = document.getElementById(`${this.side}-name`).value || (this.side === "home" ? "Home" : "Away");
       const captain = parseInt(document.getElementById(`${this.side}-captain`).value, 10);
       const status = document.getElementById(`${this.side}-save-status`);
-      status.textContent = "saving...";
+      setStatus(status, "saving...");
       try {
         const res = await api("/api/team", {
           method: "POST", headers: {"Content-Type": "application/json"},
@@ -417,10 +432,10 @@ class TeamBuilder {
           }),
         });
         this.teamId = res.team_id;
-        status.textContent = res.problems.length ? `Saved with issues: ${res.problems.join("; ")}` : "Saved - ready to play.";
+        setStatus(status, res.problems.length ? `Saved with issues: ${res.problems.join("; ")}` : "Saved - ready to play.");
         updateRunButton();
       } catch (e) {
-        status.textContent = "Error: " + e.message;
+        showError(status, "Error: " + e.message);
       }
     };
   }
@@ -432,12 +447,12 @@ function updateRunButton() {
   btn.disabled = !ready;
   const hint = document.getElementById("run-hint");
   if (ready) {
-    hint.textContent = "";
+    setStatus(hint, "");
   } else {
     const missing = [];
     if (!homeBuilder.teamId) missing.push("Team A");
     if (!awayBuilder.teamId) missing.push("Team B");
-    hint.textContent = `Click "Save team" on ${missing.join(" and ")} first.`;
+    showError(hint, `Click "Save team" on ${missing.join(" and ")} first.`);
   }
   updateTournamentRunHint();
 }
@@ -570,12 +585,12 @@ async function boot() {
     const status = document.getElementById("run-status");
     const seed = seedRaw ? parseInt(seedRaw, 10) : null;
     const isLive = document.getElementById("live-match-toggle").checked;
-    status.textContent = "simulating...";
+    setStatus(status, "simulating...");
     try {
       if (isLive) {
         document.getElementById("report").innerHTML = "";
         await startLiveMatch(homeBuilder.teamId, awayBuilder.teamId, seed, "live-match-area", null);
-        status.textContent = "";
+        setStatus(status, "");
       } else {
         document.getElementById("live-match-area").innerHTML = "";
         const data = await api("/api/match", {
@@ -583,10 +598,10 @@ async function boot() {
           body: JSON.stringify({home_team_id: homeBuilder.teamId, away_team_id: awayBuilder.teamId, seed}),
         });
         renderReport(data);
-        status.textContent = "";
+        setStatus(status, "");
       }
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
 }
@@ -708,14 +723,14 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   const continueBtn = document.getElementById("live-continue");
   continueBtn.onclick = async () => {
     const status = document.getElementById("live-status");
-    status.textContent = "resuming...";
+    setStatus(status, "resuming...");
     try {
       const next = await api(`/api/match/live/${state.session_id}/continue`, {
         method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
       });
       renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
   // "Skip to next substitution" in the live/pausable context: the pause
@@ -729,14 +744,14 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   // interesting" to happen first.
   document.getElementById("live-auto-to-sub").onclick = async () => {
     const status = document.getElementById("live-status");
-    status.textContent = "advancing to the next substitution point...";
+    setStatus(status, "advancing to the next substitution point...");
     try {
       const next = await api(`/api/match/live/${state.session_id}/continue`, {
         method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
       });
       renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
   // "Skip to end of match" - repeatedly calls the exact same `.../continue`
@@ -751,14 +766,14 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
     let current = state;
     try {
       while (!current.finished) {
-        status.textContent = "skipping to the end of the match...";
+        setStatus(status, "skipping to the end of the match...");
         current = await api(`/api/match/live/${current.session_id}/continue`, {
           method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
         });
       }
       renderLiveMatchState(current, onFinished, boxId, allowSubsFor, reportTargetId);
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
 }
@@ -1016,7 +1031,7 @@ function wirePlaybackControls(idPrefix, reveal) {
       const found = reveal.skipToNextEvent();
       const status = document.getElementById(`${idPrefix}-skip-status`);
       if (status) {
-        status.textContent = found ? "" : "No more injuries/substitutions in this match - showing full time.";
+        setStatus(status, found ? "" : "No more injuries/substitutions in this match - showing full time.");
       }
     };
   }
@@ -1226,15 +1241,15 @@ function renderTournamentConfig(ttype) {
         const key = btn.dataset.key;
         const season = document.getElementById("t-real-season").value || tournamentOptions.default_season;
         const status = document.getElementById("t-real-status");
-        status.textContent = "loading fixture list...";
+        setStatus(status, "loading fixture list...");
         try {
           const res = await api(`/api/tournament/real/teams?key=${encodeURIComponent(key)}&season=${encodeURIComponent(season)}`);
-          status.textContent = `${res.teams.length} teams in this competition.`;
+          setStatus(status, `${res.teams.length} teams in this competition.`);
           const entries = res.teams.map(name => ({name, code: res.code_by_nation[name], season}));
           buildTournamentTeamPanels(entries);
           renderTournamentRunArea({type: "real", key, season});
         } catch (e) {
-          status.textContent = "Error: " + e.message;
+          showError(status, "Error: " + e.message);
         }
       };
     });
@@ -1269,17 +1284,17 @@ function renderTournamentConfig(ttype) {
     document.getElementById("t-hist-load").onclick = async () => {
       const year = document.getElementById("t-hist-year").value;
       const status = document.getElementById("t-hist-status");
-      status.textContent = "loading real squads from Wikipedia (first time is network-heavy, ~20 teams - cached after)...";
+      setStatus(status, "loading real squads from Wikipedia (first time is network-heavy, ~20 teams - cached after)...");
       try {
         const res = await api(`/api/historical_rwc/${year}`);
         const teamNames = Object.keys(res.squads);
-        status.textContent = `${teamNames.length} teams - pools: ` +
-          Object.entries(res.pools).map(([p, ts]) => `${p}: ${ts.join(", ")}`).join(" | ");
+        setStatus(status, `${teamNames.length} teams - pools: ` +
+          Object.entries(res.pools).map(([p, ts]) => `${p}: ${ts.join(", ")}`).join(" | "));
         const entries = teamNames.map(name => ({name, fixedPool: res.squads[name]}));
         buildTournamentTeamPanels(entries);
         renderTournamentRunArea({type: "historical_world_cup", year: parseInt(year, 10)});
       } catch (e) {
-        status.textContent = "Error: " + e.message;
+        showError(status, "Error: " + e.message);
       }
     };
   } else if (ttype === "historical_sn") {
@@ -1301,16 +1316,16 @@ function renderTournamentConfig(ttype) {
     document.getElementById("t-hsn-load").onclick = async () => {
       const year = document.getElementById("t-hsn-year").value;
       const status = document.getElementById("t-hsn-status");
-      status.textContent = "loading real squads from Wikipedia (first time is network-heavy - cached after)...";
+      setStatus(status, "loading real squads from Wikipedia (first time is network-heavy - cached after)...");
       try {
         const res = await api(`/api/historical_six_nations/${year}`);
         const teamNames = Object.keys(res.squads);
-        status.textContent = `${teamNames.length} teams loaded.`;
+        setStatus(status, `${teamNames.length} teams loaded.`);
         const entries = teamNames.map(name => ({name, fixedPool: res.squads[name]}));
         buildTournamentTeamPanels(entries);
         renderTournamentRunArea({type: "historical_six_nations", year: parseInt(year, 10)});
       } catch (e) {
-        status.textContent = "Error: " + e.message;
+        showError(status, "Error: " + e.message);
       }
     };
   } else if (ttype === "custom") {
@@ -1412,16 +1427,16 @@ function renderSquadPicker(row, entry) {
   legendsCb.onchange = () => { unionRow.style.display = legendsCb.checked ? "none" : ""; };
   updateTournamentRunHint();
   row.querySelector(".sp-go").onclick = async () => {
-    status.textContent = "loading...";
+    setStatus(status, "loading...");
     try {
       const players = legendsCb.checked
         ? await api("/api/legends")
         : await api(`/api/pool/${spUnion.value}?season=${encodeURIComponent(row.querySelector(".sp-season").value)}`);
       tournamentBuilders[name] = {squadPlayerIds: players.map(p => p.id), name};
-      status.textContent = `${players.length} players in the pool - ready.`;
+      setStatus(status, `${players.length} players in the pool - ready.`);
       updateTournamentRunHint();
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
 }
@@ -1566,7 +1581,7 @@ function updateTournamentRunHint() {
   const missing = Object.entries(tournamentBuilders)
     .filter(([, b]) => !b.teamId && !b.squadPlayerIds)
     .map(([name]) => name);
-  hint.textContent = missing.length ? `Still need: ${missing.join(", ")}` : "All teams ready.";
+  setStatus(hint, missing.length ? `Still need: ${missing.join(", ")}` : "All teams ready.", missing.length > 0);
   updateMyTeamSelect();
 }
 
@@ -1635,18 +1650,18 @@ function renderTournamentRunArea(params) {
     try {
       body = tournamentRunBody(params);
     } catch (e) {
-      status.textContent = e.message;
+      showError(status, e.message);
       return;
     }
-    status.textContent = "running...";
+    setStatus(status, "running...");
     try {
       const report = await api("/api/tournament/run", {
         method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
       });
       renderTournamentReport(report);
-      status.textContent = "";
+      setStatus(status, "");
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
 
@@ -1657,19 +1672,19 @@ function renderTournamentRunArea(params) {
     try {
       body = tournamentRunBody(params);
     } catch (e) {
-      status.textContent = e.message;
+      showError(status, e.message);
       return;
     }
     const myTeam = document.getElementById("t-my-team").value || null;
     body.my_team = myTeam;
-    status.textContent = "starting tournament...";
+    setStatus(status, "starting tournament...");
     try {
       const state = await api("/api/tournament/start", {
         method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
       });
       handleTournamentSessionState(state, status, myTeam);
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
 }
@@ -1847,12 +1862,12 @@ function handleTournamentSessionState(state, status, myTeam) {
   renderTournamentProgress(state.results_so_far, state.progress, state.injury_report, state.card_report, state.team_form);
   if (state.status === "error") {
     if (banner) banner.innerHTML = "";
-    status.textContent = "Error: " + state.error;
+    showError(status, "Error: " + state.error);
     return;
   }
   if (state.status === "finished") {
     if (banner) banner.innerHTML = "";
-    status.textContent = "";
+    setStatus(status, "");
     liveArea.innerHTML = "";
     renderTournamentReport(state.report);
     return;
@@ -1866,7 +1881,7 @@ function handleTournamentSessionState(state, status, myTeam) {
   if (banner) {
     banner.innerHTML = `<h3>Now playing: ${stageLabel} - ${state.home} v ${state.away}</h3>`;
   }
-  status.textContent = `Your match (${stageLabel}): ${state.home} v ${state.away} - play it out below.`;
+  setStatus(status, `Your match (${stageLabel}): ${state.home} v ${state.away} - play it out below.`);
   renderLiveMatchState(state.live_match, (finishedState) => {
     // Match just finished - renderLiveMatchState rendered its full-time
     // scoreline/events/stats into #tournament-live-area itself (the explicit
@@ -1879,12 +1894,12 @@ function handleTournamentSessionState(state, status, myTeam) {
     row.innerHTML = `<button id="t-continue-after-my-match">Continue tournament</button>`;
     liveArea.appendChild(row);
     document.getElementById("t-continue-after-my-match").onclick = async () => {
-      status.textContent = "continuing tournament...";
+      setStatus(status, "continuing tournament...");
       try {
         const next = await api(`/api/tournament/${state.session_id}/resume`, {method: "POST"});
         handleTournamentSessionState(next, status, myTeam);
       } catch (e) {
-        status.textContent = "Error: " + e.message;
+        showError(status, "Error: " + e.message);
       }
     };
   }, "tournament-live-area", mySide, "tournament-live-area");
@@ -2079,7 +2094,7 @@ function renderDraftPoolScreen() {
   const chosenHistorical = []; // [{competition, year, team}]
   const status = document.getElementById("draft-pool-status");
   const updateStatus = () => {
-    status.textContent = `${chosenUnionSquads.length} union+season pick(s) + ${chosenHistorical.length} historical squad(s) selected so far.`;
+    setStatus(status, `${chosenUnionSquads.length} union+season pick(s) + ${chosenHistorical.length} historical squad(s) selected so far.`);
   };
   const renderUnionList = () => {
     unionListBox.textContent = chosenUnionSquads.length
@@ -2124,13 +2139,13 @@ function renderDraftPoolScreen() {
   };
   const loadYearData = async () => {
     const year = yearSel.value;
-    histStatus.textContent = "loading real squads...";
+    setStatus(histStatus, "loading real squads...");
     const path = compSel.value === "rwc" ? `/api/historical_rwc/${year}` : `/api/historical_six_nations/${year}`;
     const res = await api(path);
     yearData = res;
     const teamNames = Object.keys(res.squads).sort();
     teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
-    histStatus.textContent = `${teamNames.length} teams loaded for ${year}.`;
+    setStatus(histStatus, `${teamNames.length} teams loaded for ${year}.`);
   };
   compSel.onchange = loadYears;
   yearSel.onchange = loadYearData;
@@ -2147,10 +2162,10 @@ function renderDraftPoolScreen() {
     const seedRaw = document.getElementById("draft-seed").value;
     const legends = document.getElementById("draft-include-legends").checked;
     if (chosenUnionSquads.length === 0 && !legends && chosenHistorical.length === 0) {
-      startStatus.textContent = "Add at least one union+season, a historical squad, or Legends first.";
+      showError(startStatus, "Add at least one union+season, a historical squad, or Legends first.");
       return;
     }
-    startStatus.textContent = "building shared pool and flipping a coin...";
+    setStatus(startStatus, "building shared pool and flipping a coin...");
     try {
       const data = await api("/api/draft/start", {
         method: "POST", headers: {"Content-Type": "application/json"},
@@ -2163,7 +2178,7 @@ function renderDraftPoolScreen() {
       navTo("screen-draft-coinflip", "Coin flip", () => showScreen("screen-draft-coinflip"));
       renderDraftCoinflip(data);
     } catch (e) {
-      startStatus.textContent = "Error: " + e.message;
+      showError(startStatus, "Error: " + e.message);
     }
   };
 }
@@ -2327,7 +2342,7 @@ async function finishDraftIntoBuild(state) {
     const seed = seedRaw ? parseInt(seedRaw, 10) : null;
     const status = document.getElementById("draft-run-status");
     const isLive = document.getElementById("draft-live-match-toggle").checked;
-    status.textContent = "simulating...";
+    setStatus(status, "simulating...");
     try {
       if (isLive) {
         document.getElementById("draft-report").innerHTML = "";
@@ -2343,9 +2358,9 @@ async function finishDraftIntoBuild(state) {
         });
         renderReport(data, "draft-report");
       }
-      status.textContent = "";
+      setStatus(status, "");
     } catch (e) {
-      status.textContent = "Error: " + e.message;
+      showError(status, "Error: " + e.message);
     }
   };
 }
@@ -2354,7 +2369,7 @@ function updateDraftRunButton() {
   const btn = document.getElementById("draft-run-match");
   const ready = !!(draftHumanBuilder && draftHumanBuilder.teamId && draftAiTeamId);
   btn.disabled = !ready;
-  document.getElementById("draft-run-hint").textContent = ready ? "" : "Click \"Save team\" on your drafted XV first.";
+  setStatus(document.getElementById("draft-run-hint"), ready ? "" : "Click \"Save team\" on your drafted XV first.", !ready);
 }
 
 // `TeamBuilder.renderFinish`'s "Save team" handler calls the global
@@ -2403,7 +2418,7 @@ async function enterSeasonMode() {
     const status = document.getElementById("season-start-status");
     const nationCode = nationSel.value;
     const year = parseInt(document.getElementById("season-year-input").value, 10);
-    status.textContent = "Finding this union's real blocks + widest draft pool...";
+    setStatus(status, "Finding this union's real blocks + widest draft pool...");
     document.getElementById("season-blocks-area").innerHTML = "";
     document.getElementById("season-progress").innerHTML = "";
     document.getElementById("season-report").innerHTML = "";
@@ -2421,12 +2436,12 @@ async function enterSeasonMode() {
       // merged) - a separate lookup from the plain plan/pool above, which
       // stays capped-only for backward compatibility (see webapp.py).
       const widest = await api(`/api/season/widest_pool?nation=${nationCode}&year=${year}`);
-      status.textContent = `${data.blocks.length} real tournament block(s) found for ${nationCode} ${year} - draft your squad below, then start the season.`;
+      setStatus(status, `${data.blocks.length} real tournament block(s) found for ${nationCode} ${year} - draft your squad below, then start the season.`);
       renderSeasonBlocksList(data);
       renderSeasonUncappedPool(data, widest);
       renderSeasonDraftArea(widest, nationCode, year);
     } catch (e) {
-      status.textContent = `Could not plan season: ${e.message || e}`;
+      showError(status, `Could not plan season: ${e.message || e}`);
     }
   };
 }
@@ -2488,11 +2503,11 @@ function renderSeasonDraftArea(planData, nationCode, year) {
     const status = document.getElementById("season-draft-status");
     const filled = Object.keys(seasonBuilder.slots).length;
     if (filled < POSITIONS.length) {
-      status.textContent = `Fill all ${POSITIONS.length} starting positions first (${filled}/${POSITIONS.length} so far).`;
+      showError(status, `Fill all ${POSITIONS.length} starting positions first (${filled}/${POSITIONS.length} so far).`);
       return;
     }
     const squadIds = Array.from(new Set([...Object.values(seasonBuilder.slots), ...Array.from(seasonBuilder.bench)]));
-    status.textContent = "Starting season...";
+    setStatus(status, "Starting season...");
     try {
       const body = {
         nation_code: nationCode, year, my_team: seasonNation,
@@ -2503,11 +2518,11 @@ function renderSeasonDraftArea(planData, nationCode, year) {
         body: JSON.stringify(body),
       });
       seasonSessionId = state.session_id;
-      status.textContent = "";
+      setStatus(status, "");
       area.innerHTML = `<p class="muted">Squad locked in (${squadIds.length} players) - season running below.</p>`;
       handleSeasonSessionState(state);
     } catch (e) {
-      status.textContent = `Could not start season: ${e.message || e}`;
+      showError(status, `Could not start season: ${e.message || e}`);
     }
   };
 }
@@ -2558,11 +2573,11 @@ function handleSeasonSessionState(state) {
   });
 
   if (state.status === "error") {
-    status.textContent = "Error: " + state.error;
+    showError(status, "Error: " + state.error);
     return;
   }
   if (state.status === "finished") {
-    status.textContent = "Season complete.";
+    setStatus(status, "Season complete.");
     liveArea.innerHTML = "";
     if (state.latest_block_report) {
       reportBox.innerHTML = `<h3>Final block: ${state.latest_block_report.name}</h3><div id="tournament-report"></div>`;
@@ -2573,19 +2588,19 @@ function handleSeasonSessionState(state) {
   // paused: it's my_team's own fixture - play it out live, exactly like
   // Tournament mode's my_team fixtures.
   const mySide = seasonNation === state.home ? "home" : seasonNation === state.away ? "away" : null;
-  status.textContent = `Your match: ${state.home} v ${state.away} - play it out below.`;
+  setStatus(status, `Your match: ${state.home} v ${state.away} - play it out below.`);
   renderLiveMatchState(state.live_match, (finishedState) => {
     const row = document.createElement("div");
     row.className = "row";
     row.innerHTML = `<button id="season-continue-btn">Continue season</button>`;
     liveArea.appendChild(row);
     document.getElementById("season-continue-btn").onclick = async () => {
-      status.textContent = "continuing season...";
+      setStatus(status, "continuing season...");
       try {
         const next = await api(`/api/season/${state.session_id}/resume`, {method: "POST"});
         handleSeasonSessionState(next);
       } catch (e) {
-        status.textContent = "Error: " + e.message;
+        showError(status, "Error: " + e.message);
       }
     };
   }, "season-live-area", mySide, "season-live-area");

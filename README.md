@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](<https://img.shields.io/badge/tests-170%20passing-brightgreen.svg>)](tests/)
+[![Tests](<https://img.shields.io/badge/tests-182%20passing-brightgreen.svg>)](tests/)
 
 **What if you played Antoine Dupont at fullback? What if Jonah Lomu started
 at tighthead?** Build real squads from real players, drop anyone into any
@@ -33,6 +33,44 @@ python -m rugby_sim.webapp
 
 Open `http://127.0.0.1:5000` - that's it. Pick a pool, click a position,
 click a player, run the match.
+
+## Playing from your phone
+
+The app only runs locally (`python -m rugby_sim.webapp`), so your phone
+can't reach it directly unless you expose that local server to the
+internet. The simplest free way is a
+[Cloudflare Tunnel](https://github.com/cloudflare/cloudflared) - it opens a
+temporary public HTTPS URL that forwards straight to your own PC, nothing
+else:
+
+```bash
+# one-time install (Windows): winget install --id Cloudflare.cloudflared
+# or download a binary for your OS from the cloudflared releases page
+
+# terminal 1 - run the app as usual
+python -m rugby_sim.webapp
+
+# terminal 2 - open a tunnel to it
+cloudflared tunnel --url http://localhost:5000
+```
+
+`cloudflared` prints a `https://random-words.trycloudflare.com` link -
+open that on your phone (same link works from any network, not just your
+home WiFi). The link only exists while both terminals stay running; close
+either one and it stops working, and starting a new tunnel later gives you
+a brand new random link (the free/quick tunnel mode doesn't support a
+fixed address).
+
+**What this does and doesn't expose**: Cloudflare's tunnel only forwards
+requests to the one local port you pointed it at (`localhost:5000`) - nothing
+else on your PC (files, other apps, other ports, your network) is reachable
+through it. It's still a public link while it's running, though - anyone
+who gets that exact URL can open your app and use it (it doesn't ask for a
+password), so treat the link itself as something to only share with people
+you actually want using it, and stop the tunnel (`Ctrl+C`) when you're
+done. Mobile layout note: the UI is responsive down to phone widths
+(~360px+), but it was built and most tested on desktop - if anything looks
+cramped or a button's too small to tap, that's worth reporting back.
 
 ## What you can do
 
@@ -191,8 +229,7 @@ click a player, run the match.
   for a union" and "every real player *eligible* for a union" are genuinely
   different, and the uncapped half can't be built from rugbydata alone. As
   a scoped follow-up, `rugby_sim/data/sources/uncapped_pool.py` instead
-  reads domestic CLUB squad pages on Wikipedia (`{{RU squad player|NAT|
-  Name|cap=y}}` - confirmed live, same template, across every club checked)
+  reads domestic CLUB squad pages on Wikipedia (`{{RU squad player|NAT| Name|cap=y}}` - confirmed live, same template, across every club checked)
   and takes "carries this union's nationality flag on a covered club's
   current squad listing, with no `cap=y` (bolded = capped international)
   marker" as an honest proxy for "eligible, never capped" - not a verified
@@ -208,8 +245,7 @@ click a player, run the match.
   rating). Toggle it on `/api/season/start` with `include_uncapped: true`,
   or the "Include uncapped/eligible players (ENG, FRA only)" checkbox in
   Season mode's web UI - it's returned as a clearly separate `uncapped_pool`
-  list (own `data_source` of `uncapped_wikipedia`/`uncapped_wikipedia_
-  archetype`), never silently merged into the main capped roster.
+  list (own `data_source` of `uncapped_wikipedia`/`uncapped_wikipedia_ archetype`), never silently merged into the main capped roster.
 
 Every rating comes from real player data (not invented stats), every
 tournament/draw is the real thing where one exists, and every heuristic or
@@ -231,7 +267,7 @@ anything about, a player's age.
 | `rugby_sim/tournament/`                    | Real & synthetic tournament formats, standings, awards                  |
 | `rugby_sim/webapp.py` + `rugby_sim/web/` | The Flask API + clickable web UI (no rugby logic in JS)                 |
 | `rugby_sim/interactive_cli.py`             | A terminal-only alternative to the web UI                               |
-| `tests/`                                   | 170 tests across data, tournaments, the engine, and the web API          |
+| `tests/`                                   | 182 tests across data, tournaments, the engine, and the web API         |
 
 Run the tests with `pip install pytest && pytest -q`.
 
