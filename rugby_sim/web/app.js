@@ -647,6 +647,28 @@ function liveLineupTable(side, lineup, bench, allowSubs) {
     <p class="muted">Bench (by natural-position rating): ${benchText}</p>`;
 }
 
+// `renderLiveMatchState`/`renderReport` re-render the same box (same
+// `playbackId`/`targetId`) repeatedly as a live match progresses (every
+// "Resume play"/"Skip to next substitution point" click rebuilds the whole
+// box from scratch, including a brand-new `pacedEventReveal`). Without
+// this, the PREVIOUS render's `setInterval` timer kept running in the
+// background against its own stale `cursor`/`events` closure even after
+// its DOM elements were wiped out by `box.innerHTML = ...` - harmless to
+// look at (nothing visible to paint into), but it kept firing
+// `playCheerSound()` for events the user had already moved past, which is
+// exactly the "cheer plays again after I've already clicked past those
+// scores" bug. Every `pacedEventReveal(...)` call site must go through
+// this wrapper, keyed by the same stable id the caller already uses for
+// its container (`playbackId`/`targetId`), so the old timer is always
+// stopped before the new one starts.
+const activePacedReveals = {};
+function startPacedReveal(key, ...args) {
+  if (activePacedReveals[key]) activePacedReveals[key].stop();
+  const reveal = pacedEventReveal(...args);
+  activePacedReveals[key] = reveal;
+  return reveal;
+}
+
 // `liveRevealProgress`: boxId -> {sessionId, shown} - how many of this
 // session's events were already fully shown as of the LAST render, so a
 // fresh render (after a continue/substitute) only paces the reveal of
@@ -706,7 +728,10 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
     <div id="live-sub-picker"></div>`;
 
   const eventsEl = document.getElementById(`${playbackId}-events`);
-  const reveal = pacedEventReveal(eventsEl, state.events, startAt);
+  const scorelineEl = document.getElementById("scoreline");
+  const reveal = startPacedReveal(playbackId, eventsEl, state.events, startAt, undefined, undefined, (h, a) => {
+    if (scorelineEl) scorelineEl.textContent = `${state.home.name} ${h} - ${a} ${state.away.name}`;
+  }, state.home_advantage_for);
   wirePlaybackControls(playbackId, reveal);
   liveRevealProgress[boxKey].shown = state.events.length;
 
@@ -914,8 +939,66 @@ function snapshotButtonHtml(id) {
 // (reveal everything immediately - the fast path, not the only path).
 const SUB_EVENT_RE = /substitution|injury/i;
 
+// Matches a successful scoring event's commentary text ONLY - a converted
+// try, a slotted conversion, or a kicked penalty (see match_engine.py's
+// exact wording: "TRY! ... crosses the whitewash...", "... slots the
+// conversion.", "... kicks the penalty.") - deliberately NOT a missed
+// conversion/penalty ("... drifts wide."/"... is off target."), which
+// should stay silent.
+const SCORE_EVENT_RE = /^TRY!|slots the conversion\.|kicks the penalty\./;
+
+// A short (~2.5s) stadium crowd-cheer burst for a qualifying score - never
+// the full ~37s recording (real matches don't have 35-second gaps between
+// scores). `.play()` is wrapped so a browser blocking autoplay (no prior
+// user gesture) is a silent no-op, not an error.
+function playCheerSound() {
+  try {
+    const audio = new Audio("/sfx/crowd_cheer.ogg");
+    audio.play().catch(() => {});
+    setTimeout(() => { try { audio.pause(); } catch (e) {} }, 2500);
+  } catch (e) {}
+}
+
+// Whether a just-revealed scoring event should trigger the crowd-cheer sfx:
+// - At a neutral venue (`homeAdvantageFor` falsy - no real home side,
+//   e.g. Nations Championship finals, most World Cup matches, Friendly/
+//   Draft/custom matches), either team's score cheers.
+// - In a match with a genuine real-world home side, ONLY that home team's
+//   score cheers - the away/visiting side stays silent, matching real
+//   stadium atmosphere rather than a blanket "any score cheers" rule.
+function shouldPlayCheer(event, homeAdvantageFor) {
+  if (!event || !SCORE_EVENT_RE.test(event.text)) return false;
+  if (!homeAdvantageFor) return true;
+  return event.team === homeAdvantageFor;
+}
+
 function formatEventLine(e) {
   return `<div>[${e.minute}'] ${e.text} (${e.score_home}-${e.score_away})</div>`;
+}
+
+// The score AS OF the reveal cursor - i.e. the score after the last event
+// actually revealed so far, not the match's true/final score. Each
+// `CommentaryEvent` already carries a running score snapshot
+// (`score_home`/`score_away`, see `match_engine.py`), so this is just
+// "whatever the most recently revealed event says the score was", or 0-0
+// if nothing has been revealed yet (cursor 0, kickoff).
+function scoreAtCursor(events, cursor) {
+  if (cursor <= 0 || !events.length) return {home: 0, away: 0};
+  const e = events[Math.min(cursor, events.length) - 1];
+  return {home: e.score_home, away: e.score_away};
+}
+
+// Rebuilds a "Home X - Y Away" scoreline string (the exact format
+// `MatchResult.scoreline()` produces server-side) with a different score
+// substituted in, by locating the FINAL score's "X - Y" substring and
+// swapping it for the in-progress one - avoids needing the home/away team
+// names as separate fields when only the finished scoreline string is on
+// hand (e.g. `renderReport`'s `data.scoreline`).
+function scorelineWithScore(fullScoreline, finalHome, finalAway, curHome, curAway) {
+  const finalPattern = `${finalHome} - ${finalAway}`;
+  const idx = fullScoreline.indexOf(finalPattern);
+  if (idx === -1) return fullScoreline;
+  return fullScoreline.slice(0, idx) + `${curHome} - ${curAway}` + fullScoreline.slice(idx + finalPattern.length);
 }
 
 /**
@@ -931,7 +1014,13 @@ function formatEventLine(e) {
 // Match/box score until the viewer has actually watched (or explicitly
 // skipped) their way to full time, instead of spoiling the result the
 // instant the report loads.
-function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete) {
+// `homeAdvantageFor`: the match's `home_advantage_for` (the genuine home
+// team's name, or null/undefined at a neutral venue - see
+// `shouldPlayCheer`) - only consulted during natural tick-by-tick
+// playback, never on "skip to next substitution"/"skip to end" (which can
+// jump over, or instantly reveal, many events at once - playing a cheer
+// per skipped-over score would spam N sounds simultaneously).
+function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete, onScoreUpdate, homeAdvantageFor) {
   let cursor = startAt || 0;
   let delay = delayMs || 650;
   let timer = null;
@@ -940,6 +1029,10 @@ function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete) {
   function paint() {
     eventsEl.innerHTML = events.slice(0, cursor).map(formatEventLine).join("");
     eventsEl.scrollTop = eventsEl.scrollHeight;
+    if (onScoreUpdate) {
+      const s = scoreAtCursor(events, cursor);
+      onScoreUpdate(s.home, s.away);
+    }
   }
   function stop() {
     if (timer) { clearInterval(timer); timer = null; }
@@ -953,6 +1046,7 @@ function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete) {
   function tick() {
     if (cursor >= events.length) { stop(); return; }
     cursor++;
+    if (shouldPlayCheer(events[cursor - 1], homeAdvantageFor)) playCheerSound();
     paint();
     if (cursor >= events.length) stop();
     checkComplete();
@@ -1139,10 +1233,18 @@ function renderReport(data, targetId, startRevealed) {
     downloadHtmlSnapshot(data.scoreline, reportHtml, data.scoreline);
   };
   const eventsEl = document.getElementById(`${playbackId}-events`);
-  const reveal = pacedEventReveal(eventsEl, data.events, startRevealed ? data.events.length : 0, undefined, () => {
+  const reveal = startPacedReveal(playbackId, eventsEl, data.events, startRevealed ? data.events.length : 0, undefined, () => {
     const spoilers = document.getElementById(spoilersId);
     if (spoilers) spoilers.classList.remove("hidden");
-  });
+  }, (h, a) => {
+    // The spoilers scoreline stays hidden until the reveal completes (see
+    // above), but keep its text in sync with the reveal cursor the whole
+    // time anyway, same as the always-visible live-match scoreboard - so
+    // the instant it's unhidden (naturally or via a skip) it already shows
+    // the right (by then final) score, never a stale one.
+    const spoilersScoreline = document.querySelector(`#${spoilersId} #scoreline`);
+    if (spoilersScoreline) spoilersScoreline.textContent = scorelineWithScore(data.scoreline, data.score_home, data.score_away, h, a);
+  }, data.home_advantage_for);
   wirePlaybackControls(playbackId, reveal);
 }
 

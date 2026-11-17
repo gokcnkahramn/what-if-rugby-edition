@@ -459,6 +459,7 @@ def _match_json(result: MatchResult) -> dict:
         "scoreline": result.scoreline(),
         "score_home": result.score_home,
         "score_away": result.score_away,
+        "home_advantage_for": result.home_advantage_for,
         "player_of_the_match": pom_json,
         "top_scorers": [
             {"name": ps.player.name, "team": ps.team, "points": ps.points,
@@ -802,6 +803,7 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
         "score_home": result.score_home if result else 0,
         "score_away": result.score_away if result else 0,
         "scoreline": result.scoreline() if result else "",
+        "home_advantage_for": result.home_advantage_for if result else None,
         "events": [
             {"minute": e.minute, "team": e.team, "text": e.text,
              "score_home": e.score_home, "score_away": e.score_away}

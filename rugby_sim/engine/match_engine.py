@@ -274,6 +274,12 @@ class MatchResult:
     # not just a raw first-time red. For the web UI's "Cards this match" /
     # tournament-wide card report (see README).
     card_details: List[dict] = field(default_factory=list)
+    # The genuine real-world home side's name, if this match had one, or
+    # None at a neutral venue - mirrors `MatchEngine.home_advantage`
+    # (always scoped to `home`, never `away`; see that flag's docstring).
+    # Lets a frontend decide, e.g., which side's scoring sound effects
+    # match real stadium atmosphere, without re-deriving it itself.
+    home_advantage_for: Optional[str] = None
 
     @property
     def winner(self) -> Optional[Team]:
@@ -454,7 +460,10 @@ class MatchEngine:
             for p in team.lineup.bench:
                 self._stamina[id(p)] = self._initial_condition.get(id(p), 100.0)
 
-        self.result = MatchResult(home=self.home, away=self.away)
+        self.result = MatchResult(
+            home=self.home, away=self.away,
+            home_advantage_for=self.home.name if self.home_advantage else None,
+        )
         self.result.stats[self.home.name] = TeamMatchStats()
         self.result.stats[self.away.name] = TeamMatchStats()
         self._minute = 0
