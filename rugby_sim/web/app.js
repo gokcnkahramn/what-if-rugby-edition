@@ -573,12 +573,14 @@ async function boot() {
     LOGOS = {}; NAME_TO_CODE = {}; // logos are a visual nicety, never block the app
   }
   setupBackgroundPhoto(); // fire-and-forget, a visual nicety, never blocks boot
+  updateClassicMatchCount(); // fire-and-forget, a label nicety, never blocks boot
 
   navReset();
   document.getElementById("mode-friendly").onclick = enterFriendlyMode;
   document.getElementById("mode-tournament").onclick = enterTournamentMode;
   document.getElementById("mode-draft").onclick = enterDraftMode;
   document.getElementById("mode-season").onclick = enterSeasonMode;
+  document.getElementById("mode-classic-matches").onclick = enterClassicMatchesMode;
 
   document.getElementById("run-match").onclick = async () => {
     const seedRaw = document.getElementById("seed").value;
@@ -2706,6 +2708,200 @@ function handleSeasonSessionState(state) {
       }
     };
   }, "season-live-area", mySide, "season-live-area");
+}
+
+// ===================== Classic Matches mode =====================
+// Replay one of 25 real, sourced, Tier-A matches (Rugby World Cup 1995-2023,
+// Six Nations/Rugby Championship 2018+). No new drafting UI, no new
+// live-match mechanism: two normal `TeamBuilder`s in `fixedPool` mode (same
+// pattern Season/Draft/Tournament modes already use) draft from that
+// match's exact real player pools, then the existing live-match flow
+// (`startLiveMatch`/`renderLiveMatchState`) runs unchanged. Only
+// `/api/classic_matches/...` is new.
+
+let classicInitialized = false;
+let classicFocusBuilder = null;
+let classicCurrentMatchId = null;
+
+const TOURNAMENT_LABEL = {
+  rwc: "Rugby World Cup",
+  six_nations: "Six Nations",
+  rugby_championship: "Rugby Championship",
+};
+
+function starsHtml(earned, cap) {
+  let out = "";
+  for (let i = 0; i < cap; i++) out += i < earned ? "★" : "☆";
+  return out;
+}
+
+async function updateClassicMatchCount() {
+  // The home-screen card text used to hardcode "25 real, famous/surprising
+  // matches", which went stale the moment the catalog grew via Tier B - now
+  // computed from the actual `/api/classic_matches` response so it never
+  // needs a manual fix again.
+  try {
+    const data = await api("/api/classic_matches");
+    const count = Object.values(data.tournaments).reduce((sum, matches) => sum + matches.length, 0);
+    const el = document.getElementById("classic-match-count");
+    if (el) el.textContent = `${count} real, famous/surprising`;
+  } catch (e) {
+    // leave the fallback text in place - this is a label nicety only
+  }
+}
+
+async function enterClassicMatchesMode() {
+  navTo("screen-classic-matches", "Classic Matches", () => showScreen("screen-classic-matches"));
+  randomizeBackground();
+  if (classicInitialized) return;
+  classicInitialized = true;
+
+  const modeSelect = document.getElementById("classic-mode-select");
+  modeSelect.onchange = async () => {
+    const status = document.getElementById("classic-settings-status");
+    setStatus(status, "saving...");
+    try {
+      await api("/api/classic_matches/settings", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({mode: modeSelect.value}),
+      });
+      setStatus(status, "");
+      await loadClassicMatchesList();
+    } catch (e) {
+      showError(status, "Error: " + e.message);
+    }
+  };
+
+  await loadClassicMatchesList();
+}
+
+function classicMatchRowHtml(match, starCap) {
+  return `
+    <div class="row">
+      <button class="classic-match-btn" data-id="${match.id}">${match.display_name}
+        (${match.home_name} v ${match.away_name})</button>
+      <span class="muted">${starsHtml(match.best_stars, starCap)}</span>
+    </div>
+    <p class="muted">${match.blurb} Real score: ${match.real_score}.</p>`;
+}
+
+async function loadClassicMatchesList() {
+  const listBox = document.getElementById("classic-matches-list");
+  listBox.innerHTML = `<p class="muted">Loading...</p>`;
+  const data = await api("/api/classic_matches");
+  document.getElementById("classic-mode-select").value = data.mode;
+  const starCap = data.mode === "5" ? 5 : 3;
+
+  const order = ["rwc", "six_nations", "rugby_championship"];
+  listBox.innerHTML = order.filter(t => data.tournaments[t]).map(tournament => {
+    const matches = data.tournaments[tournament];
+    const body = matches.map(m => classicMatchRowHtml(m, starCap)).join("<hr>");
+    return collapsibleHtml(`classic-${tournament}`, TOURNAMENT_LABEL[tournament] || tournament, body, false);
+  }).join("");
+  wireCollapsibles(listBox);
+  listBox.querySelectorAll(".classic-match-btn").forEach(btn => {
+    btn.onclick = () => startClassicMatch(btn.dataset.id);
+  });
+}
+
+async function startClassicMatch(matchId) {
+  classicCurrentMatchId = matchId;
+  const detailBox = document.getElementById("classic-match-detail");
+  detailBox.innerHTML = `<p class="muted">Resolving real player pools (first time for a given
+    match/season may hit the network)...</p>`;
+  try {
+    const res = await api(`/api/classic_matches/${matchId}/start`, {method: "POST"});
+    renderClassicMatchDraft(res);
+  } catch (e) {
+    showError(detailBox, `Could not start this match: ${e.message || e}`);
+  }
+}
+
+function classicAutoLineupHtml(auto) {
+  const rows = auto.lineup.map(s => `<tr><td>${s.position}</td><td>${s.name}</td></tr>`).join("");
+  const bench = auto.bench.length ? `<p class="muted">Bench: ${auto.bench.join(", ")}</p>` : "";
+  return `
+    <h4>${auto.name} (auto-drafted from their real pool)</h4>
+    <table class="classic-auto-lineup"><tbody>${rows}</tbody></table>
+    ${bench}`;
+}
+
+function renderClassicMatchDraft(startRes) {
+  const match = startRes.match;
+  const focus = startRes.focus;
+  const auto = startRes.auto;
+  const focusIsHome = match.focus_team === "home";
+  const detailBox = document.getElementById("classic-match-detail");
+  detailBox.innerHTML = `
+    <h3>${match.display_name}</h3>
+    <p class="muted">${match.blurb} Real score: ${match.real_score}.</p>
+    <p class="muted">Base objectives: ${match.base_objectives.join(" / ")}</p>
+    <p class="muted">Bonus objectives: ${match.bonus_objectives.join(" / ")}</p>
+    <div class="row">
+      <div style="flex:1" id="panel-classic_focus"></div>
+      <div style="flex:1" id="panel-classic_auto">${classicAutoLineupHtml(auto)}</div>
+    </div>
+    <div class="row">
+      <button id="classic-kickoff-btn">Kick off</button>
+      <span class="muted" id="classic-kickoff-status"></span>
+    </div>
+    <div id="classic-live-area"></div>
+    <div id="classic-results-area"></div>`;
+
+  classicFocusBuilder = new TeamBuilder("classic_focus", {
+    title: `Draft ${focus.name}'s XV (${focusIsHome ? "home" : "away"})`,
+    fixedName: focus.name, fixedPool: focus.pool,
+  });
+
+  document.getElementById("classic-kickoff-btn").onclick = async () => {
+    const status = document.getElementById("classic-kickoff-status");
+    if (!classicFocusBuilder.teamId) {
+      showError(status, `Click "Save team" first.`);
+      return;
+    }
+    document.getElementById("classic-results-area").innerHTML = "";
+    setStatus(status, "kicking off...");
+    try {
+      const homeTeamId = focusIsHome ? classicFocusBuilder.teamId : auto.team_id;
+      const awayTeamId = focusIsHome ? auto.team_id : classicFocusBuilder.teamId;
+      const state = await api("/api/match/live/start", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({home_team_id: homeTeamId, away_team_id: awayTeamId}),
+      });
+      setStatus(status, "");
+      renderLiveMatchState(state, (finishedState) => {
+        completeClassicMatch(match.id, finishedState.session_id);
+      }, "classic-live-area", null, "classic-live-area");
+    } catch (e) {
+      showError(status, "Error: " + e.message);
+    }
+  };
+}
+
+function classicObjectiveListHtml(items, passed) {
+  if (!items.length) return "<p class=\"muted\">(none in this mode)</p>";
+  return `<ul>${items.map(o => `<li>${passed ? "✓" : "✗"} ${o.description}</li>`).join("")}</ul>`;
+}
+
+async function completeClassicMatch(matchId, sessionId) {
+  const resultsBox = document.getElementById("classic-results-area");
+  resultsBox.innerHTML = `<p class="muted">Grading against the real match's story...</p>`;
+  try {
+    const res = await api(`/api/classic_matches/${matchId}/complete`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session_id: sessionId}),
+    });
+    resultsBox.innerHTML = `
+      <h3>Result: ${starsHtml(res.stars, res.star_cap)} (real score: ${res.real_score})</h3>
+      <p class="muted">Best ever for this match: ${starsHtml(res.best_stars, res.star_cap)}</p>
+      <h4>Objectives met</h4>
+      ${classicObjectiveListHtml(res.objectives_passed, true)}
+      <h4>Objectives not met</h4>
+      ${classicObjectiveListHtml(res.objectives_failed, false)}`;
+    await loadClassicMatchesList();
+  } catch (e) {
+    showError(resultsBox, `Could not grade this match: ${e.message || e}`);
+  }
 }
 
 boot();

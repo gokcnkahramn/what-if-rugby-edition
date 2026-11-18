@@ -24,6 +24,15 @@ from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
+import json
+from pathlib import Path
+
+from .data.classic_matches import (
+    CLASSIC_MATCHES,
+    get_classic_match,
+    group_by_tournament,
+    resolve_pools,
+)
 from .data.legends import get_all_legends
 from .data.national_teams import POOLS
 from .data.sources.auto_draft import auto_draft_team
@@ -744,6 +753,198 @@ def api_team_import():
         "bench": [_ID_BY_PLAYER[id(p)] for p in team.lineup.bench],
         "captain": _ID_BY_PLAYER[id(team.lineup.captain)] if team.lineup.captain else None,
         "pool": pool_json,
+    })
+
+
+# -- API: Classic Matches mode -------------------------------------------
+# Small persistence helper mirroring `rugby_data_client.py`'s `_cache_path`
+# idiom (NOT the general rugbydata cache itself) - writes to
+# rugby_sim/data/cache/classic_match_progress.json, already gitignored
+# (per-machine, local, never committed). Shape:
+# {"mode": "3"|"5", "completed": {match_id: {"stars": int, "objectives_passed": [...]}}}
+_CLASSIC_PROGRESS_PATH = Path(__file__).resolve().parent / "data" / "cache" / "classic_match_progress.json"
+_CLASSIC_PROGRESS_DEFAULT = {"mode": "3", "completed": {}}
+
+
+def _load_classic_progress() -> dict:
+    if not _CLASSIC_PROGRESS_PATH.exists():
+        return dict(_CLASSIC_PROGRESS_DEFAULT, completed={})
+    try:
+        with open(_CLASSIC_PROGRESS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return dict(_CLASSIC_PROGRESS_DEFAULT, completed={})
+    data.setdefault("mode", "3")
+    data.setdefault("completed", {})
+    return data
+
+
+def _save_classic_progress(progress: dict) -> None:
+    _CLASSIC_PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_CLASSIC_PROGRESS_PATH, "w", encoding="utf-8") as f:
+        json.dump(progress, f, indent=2)
+
+
+def _classic_match_json(match, progress: dict) -> dict:
+    entry = progress["completed"].get(match.id)
+    return {
+        "id": match.id, "tournament": match.tournament, "year": match.year,
+        "display_name": match.display_name, "date": match.date,
+        "home_code": match.home_code, "home_name": match.home_name,
+        "away_code": match.away_code, "away_name": match.away_name,
+        "blurb": match.blurb, "real_score": match.real_score,
+        "focus_team": match.focus_team,
+        "base_objectives": [o.description for o in match.objectives if o.tier == "base"],
+        "bonus_objectives": [o.description for o in match.objectives if o.tier == "bonus"],
+        "best_stars": entry["stars"] if entry else 0,
+        "best_objectives_passed": entry["objectives_passed"] if entry else [],
+    }
+
+
+@app.get("/api/classic_matches")
+def api_classic_matches():
+    progress = _load_classic_progress()
+    groups = group_by_tournament()
+    return jsonify({
+        "mode": progress["mode"],
+        "tournaments": {
+            tournament: [_classic_match_json(m, progress) for m in matches]
+            for tournament, matches in groups.items()
+        },
+    })
+
+
+@app.post("/api/classic_matches/settings")
+def api_classic_matches_settings():
+    body = request.get_json(force=True)
+    mode = str(body.get("mode", "3"))
+    if mode not in ("3", "5"):
+        return jsonify({"error": "mode must be '3' or '5'"}), 400
+    progress = _load_classic_progress()
+    progress["mode"] = mode
+    _save_classic_progress(progress)
+    return jsonify({"mode": mode})
+
+
+@app.post("/api/classic_matches/<match_id>/start")
+def api_classic_matches_start(match_id: str):
+    """Resolves both real pools for this classic match. Like Rugby 08's
+    "Classic Rugby" mode, the user only drafts the lineup for the FOCUS
+    team (`match.focus_team`) - the objectives are all about what that side
+    achieves. That pool is returned for the frontend's existing
+    `TeamBuilder` (`fixedPool`) flow, same as before. The OTHER side is
+    auto-drafted here, server-side, via the EXISTING greedy
+    `auto_draft_team`/`_register_team` flow (same helper
+    `/api/draft/<id>/finalize_ai` and `/api/team/auto_from_ids` already use
+    for AI-controlled sides everywhere else in this codebase) and
+    registered as a normal team, ready for `_start_live_match` - the
+    frontend shows it read-only (not another `TeamBuilder`)."""
+    match = get_classic_match(match_id)
+    if match is None:
+        return jsonify({"error": f"unknown classic match {match_id}"}), 404
+
+    try:
+        home_pool, away_pool = resolve_pools(match)
+    except Exception as e:  # network/data issues resolving a real pool
+        return jsonify({"error": f"could not resolve real player pools: {e}"}), 502
+    if not home_pool or not away_pool:
+        return jsonify({"error": "one of this match's real pools came back empty"}), 502
+
+    _register(home_pool)
+    _register(away_pool)
+
+    if match.focus_team == "home":
+        focus_name, focus_code, focus_pool = match.home_name, match.home_code, home_pool
+        auto_name, auto_code, auto_pool = match.away_name, match.away_code, away_pool
+    else:
+        focus_name, focus_code, focus_pool = match.away_name, match.away_code, away_pool
+        auto_name, auto_code, auto_pool = match.home_name, match.home_code, home_pool
+
+    auto_team = auto_draft_team(auto_name, auto_pool, short_code=auto_code)
+    auto_team_id = _register_team(auto_team)
+    auto_lineup = [
+        {"position": pos.value, "name": slot.player.name}
+        for pos, slot in auto_team.lineup.starters.items()
+    ]
+    auto_bench = [p.name for p in auto_team.lineup.bench]
+
+    return jsonify({
+        "match": _classic_match_json(match, _load_classic_progress()),
+        "focus_team": match.focus_team,
+        "focus": {
+            "name": focus_name, "code": focus_code,
+            "pool": [_player_json(p) for p in focus_pool],
+        },
+        "auto": {
+            "name": auto_name, "code": auto_code, "team_id": auto_team_id,
+            "problems": auto_team.lineup.validate(),
+            "lineup": auto_lineup, "bench": auto_bench,
+        },
+        # Kept for backwards compatibility with anything still reading the
+        # old shape (both full pools) - the frontend now uses "focus"/"auto".
+        "home": {
+            "name": match.home_name, "code": match.home_code,
+            "pool": [_player_json(p) for p in home_pool],
+        },
+        "away": {
+            "name": match.away_name, "code": match.away_code,
+            "pool": [_player_json(p) for p in away_pool],
+        },
+    })
+
+
+@app.post("/api/classic_matches/<match_id>/complete")
+def api_classic_matches_complete(match_id: str):
+    """Evaluates this match's objectives against an already-finished live
+    match's real `MatchResult` (same `_LIVE_MATCHES` session the existing
+    `/api/match/live/...` endpoints already ran to completion - nothing new
+    simulated here), returns which base/bonus objectives passed and the
+    resulting star count (capped at 3 or 5 per the current mode setting),
+    and persists the best-ever star count for this match id."""
+    match = get_classic_match(match_id)
+    if match is None:
+        return jsonify({"error": f"unknown classic match {match_id}"}), 404
+
+    body = request.get_json(force=True)
+    session_id = body.get("session_id")
+    engine = _LIVE_MATCHES.get(session_id)
+    if engine is None:
+        return jsonify({"error": f"unknown live match session {session_id}"}), 404
+    if not engine.is_finished():
+        return jsonify({"error": "this live match hasn't finished yet"}), 400
+
+    result = engine.result
+    progress = _load_classic_progress()
+    mode = progress["mode"]
+    star_cap = 3 if mode == "3" else 5
+
+    objectives_to_check = [o for o in match.objectives if mode == "5" or o.tier == "base"]
+    passed = []
+    failed = []
+    for o in objectives_to_check:
+        (passed if o.check(result) else failed).append({"key": o.key, "tier": o.tier, "description": o.description})
+
+    stars = sum(1 for o in passed if True)
+    stars = min(stars, star_cap)
+
+    existing = progress["completed"].get(match.id)
+    best_stars = max(stars, existing["stars"]) if existing else stars
+    progress["completed"][match.id] = {
+        "stars": best_stars,
+        "objectives_passed": [p["key"] for p in passed],
+    }
+    _save_classic_progress(progress)
+
+    return jsonify({
+        "match_id": match.id,
+        "real_score": match.real_score,
+        "result": _match_json(result),
+        "objectives_passed": passed,
+        "objectives_failed": failed,
+        "stars": stars,
+        "best_stars": best_stars,
+        "star_cap": star_cap,
+        "mode": mode,
     })
 
 

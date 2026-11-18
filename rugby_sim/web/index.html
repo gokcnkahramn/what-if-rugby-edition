@@ -40,7 +40,31 @@
         real tournament that union actually played that year back to back - injuries,
         suspensions, condition, and team rankings all carry over between tournaments.</span>
     </button>
+    <button class="card" id="mode-classic-matches">
+      <span class="card-title">Classic Matches</span>
+      <span class="card-desc">Replay <span id="classic-match-count">real, famous/surprising</span> matches (Rugby World Cup,
+        Six Nations, Rugby Championship) - draft one side's lineup from that match's real pool, play
+        it live against the auto-drafted real opposition, and get graded against the real match's story.</span>
+    </button>
   </div>
+</div>
+
+<div class="screen hidden" id="screen-classic-matches">
+  <h2>Classic Matches</h2>
+  <p class="muted">Pick a real, famous (or surprising) match below. You draft freely from the
+    exact real player pool each side actually had that day - never locked to the real historical
+    XV - then play it live and see how you measure up against the real story.</p>
+  <div class="row">
+    <label class="muted">Mode:
+      <select id="classic-mode-select">
+        <option value="3">3-star (3 base objectives only)</option>
+        <option value="5">5-star (3 base + 2 bonus objectives)</option>
+      </select>
+    </label>
+    <span class="muted" id="classic-settings-status"></span>
+  </div>
+  <div id="classic-matches-list"></div>
+  <div id="classic-match-detail"></div>
 </div>
 
 <div class="screen hidden" id="screen-season">
