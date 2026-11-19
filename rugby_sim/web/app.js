@@ -1153,6 +1153,17 @@ function renderReport(data, targetId, startRevealed) {
   const pomLine = data.player_of_the_match
     ? `<p><strong>Player of the Match:</strong> ${data.player_of_the_match.name} (${data.player_of_the_match.nation}, ${data.player_of_the_match.natural_position})</p>`
     : "";
+  // A knockout fixture (`decide_winner`/Classic Match `must_have_winner`)
+  // that was still level after extra time + sudden death - decided by a
+  // kicking competition. The scoreline itself stays tied (never changed by
+  // a shootout - see `MatchResult.shootout_winner`), so this note is the
+  // only place the frontend shows who actually went through.
+  const shootoutLine = data.shootout_winner
+    ? `<p><strong>Decided by a kicking competition:</strong> ${data.shootout_winner} win it` +
+      (data.shootout_detail
+        ? ` ${data.shootout_detail.home.made}-${data.shootout_detail.away.made}.</p>`
+        : `.</p>`)
+    : "";
   const scorerRows = (data.top_scorers || []).slice(0, 6).map(s =>
     `<tr><td>${s.name}</td><td>${s.team}</td><td>${s.points}</td><td>${s.tries}</td><td>${s.conversions}</td><td>${s.penalty_goals}</td></tr>`
   ).join("");
@@ -1192,6 +1203,7 @@ function renderReport(data, targetId, startRevealed) {
   // reason to ship an incomplete snapshot.
   const reportHtml = `
     <div id="scoreline">${data.scoreline}</div>
+    ${shootoutLine}
     ${pomLine}
     <div id="events">${fullEventsHtml}</div>
     <table class="stats">
@@ -1217,6 +1229,7 @@ function renderReport(data, targetId, startRevealed) {
     <div id="${playbackId}-events" class="events"></div>
     <div id="${spoilersId}" class="${startRevealed ? "" : "hidden"}">
       <div id="scoreline">${data.scoreline}</div>
+      ${shootoutLine}
       ${pomLine}
       <table class="stats">
         <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
@@ -2866,12 +2879,15 @@ function renderClassicMatchDraft(startRes) {
       const awayTeamId = focusIsHome ? auto.team_id : classicFocusBuilder.teamId;
       const state = await api("/api/match/live/start", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({home_team_id: homeTeamId, away_team_id: awayTeamId}),
+        body: JSON.stringify({
+          home_team_id: homeTeamId, away_team_id: awayTeamId,
+          decide_winner: !!match.must_have_winner,
+        }),
       });
       setStatus(status, "");
       renderLiveMatchState(state, (finishedState) => {
         completeClassicMatch(match.id, finishedState.session_id);
-      }, "classic-live-area", null, "classic-live-area");
+      }, "classic-live-area", focusIsHome ? "home" : "away", "classic-live-area");
     } catch (e) {
       showError(status, "Error: " + e.message);
     }

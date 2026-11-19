@@ -52,6 +52,10 @@ class TournamentReport:
     player_stats_aggregate: Dict[tuple, PlayerTournamentStats] = field(default_factory=dict)
     team_of_tournament: Dict[Position, PlayerTournamentStats] = field(default_factory=dict)
     player_of_tournament: Optional[PlayerTournamentStats] = None
+    # Only set by `run_nations_championship`: every finals-weekend match's
+    # real decisive winner (Grand Final + the 5 placement matches), keyed
+    # by stage name - see that method for why all 6 get `decide_winner=True`.
+    finals_placements: Dict[str, str] = field(default_factory=dict)
 
     def print_report(self) -> None:
         print(f"\n=== {self.name} ===")
@@ -268,7 +272,7 @@ class Tournament:
 
     def _play(
         self, home_name: str, away_name: str, seed: Optional[int],
-        home_advantage_for: Optional[str] = None,
+        home_advantage_for: Optional[str] = None, decide_winner: bool = False,
     ) -> MatchResult:
         """`home_advantage_for`, if given, must equal `home_name` or
         `away_name` - whichever side genuinely has real home advantage for
@@ -277,7 +281,16 @@ class Tournament:
         real venue data exists/applies, so no side gets it. Only ever keyed
         to real fixture data, never to `self.my_team` - see `MatchEngine.
         __init__`'s `home_advantage` docstring for why that can't introduce
-        a human/AI asymmetry."""
+        a human/AI asymmetry.
+
+        `decide_winner`, if True, means this specific fixture is a real
+        single-elimination/must-have-a-winner knockout match (see
+        `MatchEngine.__init__`'s `decide_winner` docstring for the real
+        extra-time/sudden-death/kicking-competition procedure this
+        triggers on a tie) - every `run_*` call site below passes this only
+        for its own knockout-stage fixtures, never for a pool/round-robin
+        fixture in the SAME competition (those stay draw-eligible, exactly
+        like real rugby)."""
         home_team = self._resolve_team_for_match(home_name)
         away_team = self._resolve_team_for_match(away_name)
         # Combined starting-condition map (id(player) -> condition) for
@@ -290,11 +303,19 @@ class Tournament:
         if self.pause_hook is not None and self.my_team is not None and self.my_team in (home_name, away_name):
             # Interactive (human-played) fixtures go through the web layer's
             # own pausable `MatchEngine` flow (see class docstring) rather
-            # than a plain `.run()` call here, so `home_advantage` isn't
-            # threaded through this particular path - out of scope for this
-            # change, and in practice `my_team` fixtures are a small subset
-            # of any tournament's matches.
-            result = self.pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition)
+            # than a plain `.run()` call here. `decide_winner` IS threaded
+            # through to that live engine (via the `pause_hook` closures in
+            # webapp.py, which forward it into `_start_live_match`) so a
+            # human-played knockout fixture gets the exact same real extra-
+            # time/sudden-death/kicking-competition treatment as an auto-
+            # simmed one - otherwise the bracket-progression code below,
+            # which now assumes `result.winner` is never `None` for a
+            # `decide_winner=True` fixture, would crash on a human-played
+            # knockout tie instead of silently mis-resolving it.
+            result = self.pause_hook(
+                home_name, away_name, home_team, away_team, seed, initial_condition,
+                decide_winner=decide_winner,
+            )
         elif home_advantage_for == away_name:
             # The advantaged side is in the AWAY slot of this fixture (e.g.
             # a World Cup host nation drawn into the "away" position of an
@@ -306,15 +327,26 @@ class Tournament:
             # `result.home.name == home_name` exactly as it always has.
             swapped = MatchEngine(
                 away_team, home_team, seed=seed, initial_condition=initial_condition or None,
-                home_advantage=True,
+                home_advantage=True, decide_winner=decide_winner,
             ).run()
             swapped.home, swapped.away = home_team, away_team
             swapped.score_home, swapped.score_away = swapped.score_away, swapped.score_home
+            if swapped.shootout_detail is not None:
+                # `shootout_detail`'s "home"/"away" sub-dicts and
+                # "first_kicker" were built relative to the swapped
+                # engine's OWN home/away (away_team as its home, home_team
+                # as its away) - flip them too, same reasoning as the
+                # score swap just above. `shootout_winner` itself needs no
+                # change - it's already a plain team NAME, not a home/away
+                # label.
+                detail = swapped.shootout_detail
+                detail["home"], detail["away"] = detail["away"], detail["home"]
+                detail["first_kicker"] = "away" if detail["first_kicker"] == "home" else "home"
             result = swapped
         else:
             result = MatchEngine(
                 home_team, away_team, seed=seed, initial_condition=initial_condition or None,
-                home_advantage=(home_advantage_for == home_name),
+                home_advantage=(home_advantage_for == home_name), decide_winner=decide_winner,
             ).run()
         self.availability.record_match(result)
         self.rankings.record_result(
@@ -394,17 +426,17 @@ class Tournament:
             round_results = []
             for fx in fxs:
                 adv = host_nation if host_nation in (fx.home, fx.away) else None
+                # Knockout fixture - a genuine tie must never silently
+                # default to the home side (see `MatchEngine.decide_winner`);
+                # `result.winner` is now guaranteed non-None.
                 result = self._play(
                     fx.home, fx.away, seed=None if seed is None else seed + counter,
-                    home_advantage_for=adv,
+                    home_advantage_for=adv, decide_winner=True,
                 )
                 counter += 1
                 round_results.append(result)
                 all_results.append(result)
-            winners = [
-                r.home.name if r.score_home >= r.score_away else r.away.name
-                for r in round_results
-            ]
+            winners = [r.winner.name for r in round_results]
             bracket.append(BracketRound(stage=fxs[0].stage, fixtures=fxs, results=round_results))
             if len(winners) == 1:
                 champion = winners[0]
@@ -540,17 +572,29 @@ class Tournament:
             # neutral Twickenham/London finals weekend, not either team's
             # home ground - see the method docstring) - deliberately NO
             # home_advantage for either side, `home_advantage_for` left at
-            # its default `None`.
-            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + counter)
+            # its default `None`. Every one of these 6 matches (the Grand
+            # Final AND the 5 placement matches) is still a single,
+            # decisive, no-rematch occasion, so all 6 get `decide_winner=True`
+            # (see `MatchEngine.decide_winner`) - a genuine tie must never
+            # silently default to the home side.
+            result = self._play(
+                fx.home, fx.away, seed=None if seed is None else seed + counter,
+                decide_winner=True,
+            )
             counter += 1
             finals_results.append(result)
             results.append(result)
         finals_round.results = finals_results
 
-        champion = (
-            finals_results[0].home.name if finals_results[0].score_home >= finals_results[0].score_away
-            else finals_results[0].away.name
-        )
+        # Every finals-weekend match's real decisive winner (`result.winner`
+        # is now guaranteed non-None - see above), keyed by stage name, not
+        # just the Grand Final's - future-proofs any later UI that wants to
+        # show the full finals-weekend placements, even though nothing else
+        # consumes a "placement" ranking today.
+        finals_placements: Dict[str, str] = {
+            fx.stage: result.winner.name for fx, result in zip(finals_fixtures, finals_results)
+        }
+        champion = finals_placements[finals_fixtures[0].stage]
         name = (
             f"Nations Championship {year} (real round-robin fixtures, simulated; "
             f"finals weekend generated from OUR OWN simulated standings - not a real-world prediction)"
@@ -558,6 +602,7 @@ class Tournament:
         return attach_tournament_awards(TournamentReport(
             name=name, pools=pool_standings, results=results,
             bracket=[finals_round], champion=champion,
+            finals_placements=finals_placements,
         ))
 
     # -- 2027 Rugby World Cup (real draw, no fixtures exist yet) ---------
@@ -653,17 +698,16 @@ class Tournament:
             round_results = []
             for fx in fxs:
                 adv = host_nation if host_nation in (fx.home, fx.away) else None
+                # Knockout fixture - a genuine tie must never silently
+                # default to the home side (see `MatchEngine.decide_winner`).
                 result = self._play(
                     fx.home, fx.away, seed=None if seed is None else seed + counter,
-                    home_advantage_for=adv,
+                    home_advantage_for=adv, decide_winner=True,
                 )
                 counter += 1
                 round_results.append(result)
                 all_results.append(result)
-            round_winners = [
-                r.home.name if r.score_home >= r.score_away else r.away.name
-                for r in round_results
-            ]
+            round_winners = [r.winner.name for r in round_results]
             bracket.append(BracketRound(stage=fxs[0].stage, fixtures=fxs, results=round_results))
             if len(round_winners) == 1:
                 champion = round_winners[0]
@@ -782,17 +826,16 @@ class Tournament:
         playoff_results = []
         for fx in playoff_fixtures:
             adv = host_nation if host_nation in (fx.home, fx.away) else None
+            # Knockout fixture - a genuine tie must never silently default
+            # to the home side (see `MatchEngine.decide_winner`).
             result = self._play(
                 fx.home, fx.away, seed=None if seed is None else seed + counter,
-                home_advantage_for=adv,
+                home_advantage_for=adv, decide_winner=True,
             )
             counter += 1
             playoff_results.append(result)
             all_results.append(result)
-        playoff_winners = [
-            r.home.name if r.score_home >= r.score_away else r.away.name
-            for r in playoff_results
-        ]
+        playoff_winners = [r.winner.name for r in playoff_results]
 
         bracket: List[BracketRound] = [
             BracketRound(stage="quarter-final play-off", fixtures=playoff_fixtures, results=playoff_results),
@@ -809,17 +852,16 @@ class Tournament:
             round_results = []
             for fx in fxs:
                 adv = host_nation if host_nation in (fx.home, fx.away) else None
+                # Knockout fixture - a genuine tie must never silently
+                # default to the home side (see `MatchEngine.decide_winner`).
                 result = self._play(
                     fx.home, fx.away, seed=None if seed is None else seed + counter,
-                    home_advantage_for=adv,
+                    home_advantage_for=adv, decide_winner=True,
                 )
                 counter += 1
                 round_results.append(result)
                 all_results.append(result)
-            round_winners = [
-                r.home.name if r.score_home >= r.score_away else r.away.name
-                for r in round_results
-            ]
+            round_winners = [r.winner.name for r in round_results]
             bracket.append(BracketRound(stage=fxs[0].stage, fixtures=fxs, results=round_results))
             if len(round_winners) == 1:
                 champion = round_winners[0]

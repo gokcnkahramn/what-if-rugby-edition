@@ -86,6 +86,24 @@ from .commentary import CommentaryEvent
 MATCH_MINUTES = 80
 MAX_SUBSTITUTIONS = 8
 
+# -- Knockout tiebreak (decide_winner=True only - see MatchEngine.__init__) -
+# Real World Rugby knockout procedure when a tie, draws aren't allowed:
+# extra time (2x10 = 20 min, played in FULL regardless of scoring during it
+# - no sudden-death behavior inside normal extra time, that's real law) ->
+# sudden death (first score wins, no fixed real-world time limit, but this
+# engine's drive loop needs a termination bound - see SUDDEN_DEATH_CAP_MINUTES,
+# a simulation safety valve, not a real rugby rule) -> a place-kick
+# competition (`_run_kicking_competition`) if STILL level after the cap.
+EXTRA_TIME_MINUTES = 20
+SUDDEN_DEATH_CAP_MINUTES = 20
+# Kicking-competition shape (5 kicks per side from the 22m line, alternating,
+# then sudden-death kicks if still level after 5 - confirmed against current
+# World Rugby knockout tournament rules).
+KICK_COMPETITION_ROUNDS = 5
+# Safety valve for the sudden-death-kicks loop (see _run_kicking_competition) -
+# not a real rule, just a termination guarantee for a degenerate RNG run.
+KICK_COMPETITION_SAFETY_CAP = 50
+
 # -- Home advantage (real, small, scoped - see `home_advantage` below) -----
 # Deliberately mirrors `rankings.HOME_ADVANTAGE` (3.0) for consistency: the
 # same project already has one small, documented "home advantage" magnitude
@@ -280,9 +298,31 @@ class MatchResult:
     # Lets a frontend decide, e.g., which side's scoring sound effects
     # match real stadium atmosphere, without re-deriving it itself.
     home_advantage_for: Optional[str] = None
+    # Set only when `decide_winner=True` (see `MatchEngine.__init__`) and the
+    # match was still level after extra time + the sudden-death cap, so a
+    # place-kick competition (`_run_kicking_competition`) decided it - the
+    # team name that won the kicking competition. NEVER implies the
+    # scoreline itself changed: `score_home`/`score_away` stay exactly as
+    # tied as the real match law records them (a shootout-decided knockout
+    # match is still officially a draw on the scoreboard). `winner` below is
+    # the one place that should be read to find out who actually goes
+    # through.
+    shootout_winner: Optional[str] = None
+    # Display-ready detail for the frontend ("decided by a kicking
+    # competition") - kicks taken/made per side plus who kicked first (the
+    # one coin-flip randomness the real rule specifies).
+    shootout_detail: Optional[dict] = None
 
     @property
     def winner(self) -> Optional[Team]:
+        # `shootout_winner` (if set) is checked first and is the single
+        # source of truth every caller should use - see its field comment
+        # above. Falls back to the plain score comparison otherwise, same
+        # as before shootouts existed (so a legitimate pool-stage/friendly
+        # draw, where `decide_winner` was never set, still correctly
+        # returns None here).
+        if self.shootout_winner is not None:
+            return self.home if self.shootout_winner == self.home.name else self.away
         if self.score_home == self.score_away:
             return None
         return self.home if self.score_home > self.score_away else self.away
@@ -324,7 +364,7 @@ class MatchResult:
 class MatchEngine:
     def __init__(self, home: Team, away: Team, seed: Optional[int] = None,
                  weather: str = "dry", initial_condition: Optional[Dict[int, float]] = None,
-                 home_advantage: bool = False):
+                 home_advantage: bool = False, decide_winner: bool = False):
         """`initial_condition`, if given, maps `id(player)` -> starting
         stamina (0-100) for any player who should NOT start this match at a
         fresh 100 - the hook tournament squads mode uses to carry a
@@ -344,10 +384,28 @@ class MatchEngine:
         genuine real-world home side for a specific fixture - never to
         which side is human- vs AI-controlled (`Tournament.my_team`), so it
         can't introduce any human/AI asymmetry; see `tournament.py` for how
-        each real competition decides this per fixture."""
+        each real competition decides this per fixture.
+
+        `decide_winner`, if True, means this fixture is a real single-
+        elimination/must-have-a-winner knockout match: a tie at full time
+        triggers extra time -> sudden death -> a kicking competition (see
+        the EXTRA_TIME_MINUTES/SUDDEN_DEATH_CAP_MINUTES constants and
+        `_run_kicking_competition`) instead of just ending level. Defaults
+        to False: every existing caller that doesn't explicitly opt in (a
+        single friendly, draft mode, a round-robin/pool-stage fixture) is
+        completely unaffected and can still end in a genuine draw exactly
+        as before this flag existed."""
         self.home = home
         self.away = away
         self.home_advantage = home_advantage
+        self.decide_winner = decide_winner
+        # Knockout-tiebreak state machine (only ever used when
+        # `decide_winner` is True) - see `is_finished`/`_update_knockout_stage`/
+        # `_current_period_cap`. `None` means "still in normal time, or the
+        # tiebreak already resolved via a score difference" - it only ever
+        # holds "extra_time"/"sudden_death"/"shootout_done" while actually
+        # inside that stage.
+        self._knockout_stage: Optional[str] = None
         self.weather = weather  # "dry" | "wet" | "windy" - mild modifiers
         self.rng = random.Random(seed)
         self._carded: Dict[str, List[int]] = {home.name: [], away.name: []}  # expiry minutes
@@ -435,7 +493,37 @@ class MatchEngine:
         return list(self._bench.get(team.name, []))
 
     def is_finished(self) -> bool:
-        return self._started and self._minute >= MATCH_MINUTES and not self._has_live_advantage(self.result, self._minute)
+        if not self._started:
+            return False
+        if self._minute < MATCH_MINUTES:
+            return False
+        if self._has_live_advantage(self.result, self._minute):
+            return False
+        if not self.decide_winner or self.result is None:
+            return True
+        # `decide_winner=True`: a knockout fixture never just ends level -
+        # see the module docstring/`_update_knockout_stage` for the real
+        # extra-time -> sudden-death -> kicking-competition procedure this
+        # implements.
+        tied = self.result.score_home == self.result.score_away
+        if self._knockout_stage is None:
+            # Normal time just ended (or the tiebreak already resolved via
+            # a real score difference, and the stage was reset to None by
+            # `_update_knockout_stage`) - finished unless still tied, in
+            # which case the NEXT drive's `_update_knockout_stage` call
+            # moves us into extra time.
+            return not tied
+        if self._knockout_stage == "extra_time":
+            # Plays to its FULL fixed length regardless of any scoring
+            # during it - real law, no sudden-death behavior in normal
+            # extra time.
+            return False
+        if self._knockout_stage == "sudden_death":
+            # Stops the INSTANT the score changes - checked every drive.
+            return not tied
+        # "shootout_done" - `_run_kicking_competition` already ran and set
+        # `result.shootout_winner`; the scoreline itself stays tied.
+        return True
 
     def start(self) -> None:
         """Validates both lineups and sets up the per-match working state
@@ -474,8 +562,9 @@ class MatchEngine:
         attacking, defending = self._pick_attacking_team(self._territory_ticks)
         self._territory_ticks[attacking.name] += 1
 
+        period_cap = self._current_period_cap()
         drive_minutes = self.rng.randint(1, 4)
-        self._minute = min(MATCH_MINUTES, self._minute + drive_minutes)
+        self._minute = min(period_cap, self._minute + drive_minutes)
 
         self._expire_cards(attacking, self._minute)
         self._expire_cards(defending, self._minute)
@@ -484,6 +573,73 @@ class MatchEngine:
 
         self._resolve_drive(attacking, defending, self._minute, self.result)
         self._maybe_personnel_change(self._minute, self.result)
+        self._update_knockout_stage()
+
+    def _current_period_cap(self) -> int:
+        """How far (in match minutes) the current drive is allowed to push
+        `_minute` to, before `is_finished`/`_update_knockout_stage` need to
+        look at the clock again - MATCH_MINUTES in normal time (unchanged
+        behavior for every `decide_winner=False` caller), extended while a
+        knockout tiebreak is in progress."""
+        if self._knockout_stage == "extra_time":
+            return MATCH_MINUTES + EXTRA_TIME_MINUTES
+        if self._knockout_stage == "sudden_death":
+            return MATCH_MINUTES + EXTRA_TIME_MINUTES + SUDDEN_DEATH_CAP_MINUTES
+        return MATCH_MINUTES
+
+    def _update_knockout_stage(self) -> None:
+        """Drives the small `_knockout_stage` state machine one step,
+        called once per drive (right after that drive's score is resolved) -
+        see `is_finished` for how each stage affects when the match is
+        considered over. No-op whenever `decide_winner` is False (every
+        existing round-robin/pool/friendly match is completely unaffected)
+        or before normal time has actually finished."""
+        if not self.decide_winner or self.result is None:
+            return
+        if self._minute < MATCH_MINUTES:
+            return
+        tied = self.result.score_home == self.result.score_away
+
+        if self._knockout_stage is None:
+            if tied:
+                self._knockout_stage = "extra_time"
+                self.result.events.append(CommentaryEvent(
+                    minute=self._minute, team="",
+                    text=(
+                        f"Full time: scores level at {self.result.score_home}-"
+                        f"{self.result.score_away} - the match goes to extra time."
+                    ),
+                    score_home=self.result.score_home, score_away=self.result.score_away,
+                ))
+            return
+
+        if self._knockout_stage == "extra_time":
+            if self._minute >= MATCH_MINUTES + EXTRA_TIME_MINUTES:
+                if tied:
+                    self._knockout_stage = "sudden_death"
+                    self.result.events.append(CommentaryEvent(
+                        minute=self._minute, team="",
+                        text=(
+                            f"Extra time ends level at {self.result.score_home}-"
+                            f"{self.result.score_away} - sudden death: next score wins."
+                        ),
+                        score_home=self.result.score_home, score_away=self.result.score_away,
+                    ))
+                else:
+                    # Extra time itself produced a real decisive winner -
+                    # reset to None so `is_finished`'s None-branch (`not
+                    # tied` -> True) ends the match here, no further stage
+                    # transitions needed.
+                    self._knockout_stage = None
+            return
+
+        if self._knockout_stage == "sudden_death":
+            if tied and self._minute >= MATCH_MINUTES + EXTRA_TIME_MINUTES + SUDDEN_DEATH_CAP_MINUTES:
+                self._run_kicking_competition()
+                self._knockout_stage = "shootout_done"
+            # If no longer tied, `is_finished` already ends the match on
+            # its own (`not tied` -> True) - no stage change needed here.
+            return
 
     def advance_to(self, minute: int) -> MatchResult:
         """Plays drives until at least `minute` has elapsed, or the match
@@ -942,6 +1098,83 @@ class MatchEngine:
             key=lambda slot: slot.player.attributes.goal_kicking,
         )
         return best_slot.player
+
+    def _kick_success_probability(self, goal_kicking: float) -> float:
+        """Converts a goal-kicking attribute (1-100) into a single
+        place-kick's success probability, for the kicking competition -
+        same house style/convention as this module's other
+        attribute-to-probability conversions (e.g. `_score_try`'s
+        conversion/penalty-goal formulas just below: a baseline around an
+        even-money kick, shifted by the rating's distance from the 50
+        midpoint, clamped to a sane range)."""
+        return self._clamp(0.5 + (goal_kicking - 50) / 150, 0.15, 0.95)
+
+    def _run_kicking_competition(self) -> None:
+        """Resolves a still-tied knockout match instantly (not drive-by-
+        drive - there's no attack/defense contest left, just goal-kicking):
+        5 kicks per side from the 22m line, alternating, then sudden-death
+        kicks if still level after 5 (real World Rugby knockout-tournament
+        tiebreak shape). A coin flip decides only who kicks first - the one
+        real randomness the rule actually specifies; which two kickers take
+        the kicks is each side's own best current goal-kicker, not random.
+        Sets `result.shootout_winner`/`result.shootout_detail` - NEVER
+        touches `score_home`/`score_away` (see `MatchResult.shootout_winner`'s
+        field comment: a shootout-decided knockout match is still officially
+        recorded with its tied scoreline)."""
+        result = self.result
+        assert result is not None
+
+        home_kicker = self._best_kicker(self.home)
+        away_kicker = self._best_kicker(self.away)
+        probs = {
+            self.home.name: self._kick_success_probability(home_kicker.attributes.goal_kicking),
+            self.away.name: self._kick_success_probability(away_kicker.attributes.goal_kicking),
+        }
+
+        home_first = self.rng.random() < 0.5
+        order = [self.home, self.away] if home_first else [self.away, self.home]
+
+        taken = {self.home.name: 0, self.away.name: 0}
+        made = {self.home.name: 0, self.away.name: 0}
+
+        def _take_kick(team: Team) -> None:
+            taken[team.name] += 1
+            if self.rng.random() < probs[team.name]:
+                made[team.name] += 1
+
+        for _ in range(KICK_COMPETITION_ROUNDS):
+            for team in order:
+                _take_kick(team)
+
+        extra_rounds = 0
+        while made[self.home.name] == made[self.away.name] and extra_rounds < KICK_COMPETITION_SAFETY_CAP:
+            for team in order:
+                _take_kick(team)
+            extra_rounds += 1
+
+        if made[self.home.name] == made[self.away.name]:
+            # Termination-guarantee fallback only - astronomically unlikely
+            # in practice (both kickers landing in exact lockstep for
+            # KICK_COMPETITION_SAFETY_CAP extra rounds running); one more
+            # coin flip rather than looping forever.
+            winner_team = self.home if self.rng.random() < 0.5 else self.away
+        else:
+            winner_team = self.home if made[self.home.name] > made[self.away.name] else self.away
+
+        result.shootout_winner = winner_team.name
+        result.shootout_detail = {
+            "home": {"taken": taken[self.home.name], "made": made[self.home.name]},
+            "away": {"taken": taken[self.away.name], "made": made[self.away.name]},
+            "first_kicker": "home" if home_first else "away",
+        }
+        result.events.append(CommentaryEvent(
+            minute=self._minute, team=winner_team.name,
+            text=(
+                f"Kicking competition: {winner_team.name} win it "
+                f"{made[self.home.name]}-{made[self.away.name]}."
+            ),
+            score_home=result.score_home, score_away=result.score_away,
+        ))
 
     def _score_try(self, team: Team, minute: int, result: MatchResult):
         stats = result.stats[team.name]

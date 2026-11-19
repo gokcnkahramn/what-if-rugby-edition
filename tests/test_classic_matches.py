@@ -320,6 +320,120 @@ def test_full_classic_match_flow_start_draft_live_complete():
 # Persistence file round-trip
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# must_have_winner (knockout-tiebreak fix) - a real knockout Classic Match
+# must thread `decide_winner` into its live engine; a genuinely draw-eligible
+# one must not.
+# ---------------------------------------------------------------------------
+
+def test_must_have_winner_flag_matches_the_13_real_knockout_entries():
+    flagged = {m.id for m in CLASSIC_MATCHES if m.must_have_winner}
+    assert flagged == {
+        "rwc_1995_final", "rwc_1995_sf", "rwc_1999_sf", "rwc_1999_sf_fra_nz",
+        "rwc_2003_final", "rwc_2003_sf", "rwc_2007_qf", "rwc_2007_sf",
+        "rwc_2011_qf", "rwc_2015_qf", "rwc_2019_sf", "rwc_2023_final",
+        "rwc_2023_qf",
+    }
+    # Every pool-stage/regular-season entry (Six Nations, Rugby
+    # Championship, and RWC pool matches) stays draw-eligible.
+    for m in CLASSIC_MATCHES:
+        if m.id not in flagged:
+            assert m.must_have_winner is False
+
+
+def _play_classic_match_to_finish(client, match_id, match, forced_tie_active):
+    """Drives a Classic Match's real `/start` -> auto-draft-focus-side ->
+    `/api/match/live/start` -> repeated `/continue` flow to completion,
+    returning the finished live-match state's JSON. `forced_tie_active`
+    just documents, at the call site, that the caller has already
+    monkeypatched `MatchEngine._resolve_drive` to a no-op (every match
+    stays 0-0) for this test."""
+    assert forced_tie_active
+    start_res = client.post(f"/api/classic_matches/{match_id}/start")
+    assert start_res.status_code == 200
+    start_data = start_res.get_json()
+    assert start_data["match"]["must_have_winner"] == match.must_have_winner
+
+    focus_ids = [p["id"] for p in start_data["focus"]["pool"]]
+    focus_team_res = client.post("/api/team/auto_from_ids", json={
+        "name": "FocusSide", "player_ids": focus_ids, "code": "FOC",
+    })
+    assert focus_team_res.status_code == 200
+    focus_team_id = focus_team_res.get_json()["team_id"]
+    auto_team_id = start_data["auto"]["team_id"]
+
+    focus_is_home = match.focus_team == "home"
+    home_team_id = focus_team_id if focus_is_home else auto_team_id
+    away_team_id = auto_team_id if focus_is_home else focus_team_id
+
+    live_res = client.post("/api/match/live/start", json={
+        "home_team_id": home_team_id, "away_team_id": away_team_id, "seed": 1,
+        "decide_winner": match.must_have_winner,
+    })
+    assert live_res.status_code == 200
+    state = live_res.get_json()
+    session_id = state["session_id"]
+    while not state["finished"]:
+        cont = client.post(f"/api/match/live/{session_id}/continue")
+        assert cont.status_code == 200
+        state = cont.get_json()
+
+    return state["result"], start_data["auto"]["name"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("match_id", [
+    "rwc_1995_final",      # must_have_winner=True, focus_team="home"
+    "rwc_2003_final",      # must_have_winner=True, focus_team="away"
+    "rwc_1999_sf_fra_nz",  # must_have_winner=True, semi-final
+    "rwc_2023_qf",         # must_have_winner=True, quarter-final
+])
+def test_must_have_winner_true_classic_match_resolves_to_a_real_winner_under_a_forced_tie(monkeypatch, match_id):
+    """Every `must_have_winner=True` Classic Match's `/start` -> live-match
+    flow, run under a scenario engineered to tie all the way through
+    normal/extra time/sudden death (scoring is stubbed off entirely), must
+    resolve to a real winner via the kicking competition - never a
+    lingering draw. Spot-checked across a representative sample (both
+    `focus_team` sides, a final, a semi-final, a quarter-final) rather than
+    literally all 13 - a full pool resolution + full live match for every
+    single one is too slow to run on every test pass."""
+    from rugby_sim.engine.match_engine import MatchEngine
+    monkeypatch.setattr(MatchEngine, "_resolve_drive", lambda self, a, d, m, r: None)
+
+    client = _client()
+    match = next(m for m in CLASSIC_MATCHES if m.id == match_id)
+    assert match.must_have_winner is True
+
+    result_json, auto_name = _play_classic_match_to_finish(client, match_id, match, forced_tie_active=True)
+
+    assert result_json["score_home"] == result_json["score_away"] == 0, (
+        "the scoreline must stay tied - a shootout never changes it"
+    )
+    assert result_json["shootout_winner"] in ("FocusSide", auto_name), (
+        "expected a real shootout winner, not a lingering draw"
+    )
+    assert result_json["shootout_detail"] is not None
+
+
+@pytest.mark.slow
+def test_must_have_winner_false_classic_match_can_still_end_level(monkeypatch):
+    """A sample genuinely draw-eligible (pool-stage) Classic Match, under
+    the exact same forced-tie scenario, must be allowed to actually end
+    level - `decide_winner` is never passed for it."""
+    from rugby_sim.engine.match_engine import MatchEngine
+    monkeypatch.setattr(MatchEngine, "_resolve_drive", lambda self, a, d, m, r: None)
+
+    client = _client()
+    match_id = "rwc_2011_pool"
+    match = next(m for m in CLASSIC_MATCHES if m.id == match_id)
+    assert match.must_have_winner is False
+
+    result_json, _auto_name = _play_classic_match_to_finish(client, match_id, match, forced_tie_active=True)
+
+    assert result_json["score_home"] == result_json["score_away"] == 0
+    assert result_json["shootout_winner"] is None
+
+
 def test_progress_file_round_trips_and_defaults_sanely(tmp_path, monkeypatch):
     fake_path = tmp_path / "classic_match_progress.json"
     monkeypatch.setattr(webapp, "_CLASSIC_PROGRESS_PATH", fake_path)

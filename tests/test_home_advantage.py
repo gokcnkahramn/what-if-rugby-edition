@@ -105,9 +105,9 @@ def test_real_round_robin_fixture_gets_home_advantage_matching_fx_home():
     captured = {}
     original_play = Tournament._play
 
-    def spy_play(self, home_name, away_name, seed, home_advantage_for=None):
+    def spy_play(self, home_name, away_name, seed, home_advantage_for=None, decide_winner=False):
         captured.setdefault(home_name, []).append((home_name, away_name, home_advantage_for))
-        return original_play(self, home_name, away_name, seed, home_advantage_for)
+        return original_play(self, home_name, away_name, seed, home_advantage_for, decide_winner)
 
     Tournament._play = spy_play
     try:
@@ -129,9 +129,9 @@ def test_nations_championship_finals_never_get_home_advantage_for_either_side():
     captured = []
     original_play = Tournament._play
 
-    def spy_play(self, home_name, away_name, seed, home_advantage_for=None):
+    def spy_play(self, home_name, away_name, seed, home_advantage_for=None, decide_winner=False):
         captured.append((home_name, away_name, home_advantage_for))
-        return original_play(self, home_name, away_name, seed, home_advantage_for)
+        return original_play(self, home_name, away_name, seed, home_advantage_for, decide_winner)
 
     Tournament._play = spy_play
     try:
@@ -166,9 +166,9 @@ def test_world_cup_host_nation_match_gets_home_advantage_non_host_does_not():
     captured = []
     original_play = Tournament._play
 
-    def spy_play(self, home_name, away_name, seed, home_advantage_for=None):
+    def spy_play(self, home_name, away_name, seed, home_advantage_for=None, decide_winner=False):
         captured.append((home_name, away_name, home_advantage_for))
-        return original_play(self, home_name, away_name, seed, home_advantage_for)
+        return original_play(self, home_name, away_name, seed, home_advantage_for, decide_winner)
 
     Tournament._play = spy_play
     try:
@@ -200,7 +200,7 @@ def test_home_advantage_is_never_keyed_to_my_team_human_control():
     home, away = _team("Home"), _team("Away")
     pause_calls = []
 
-    def pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition):
+    def pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition, decide_winner=False):
         pause_calls.append((home_name, away_name))
         return MatchEngine(home_team, away_team, seed=seed, home_advantage=False).run()
 

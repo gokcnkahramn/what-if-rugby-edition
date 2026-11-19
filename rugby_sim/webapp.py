@@ -469,6 +469,14 @@ def _match_json(result: MatchResult) -> dict:
         "score_home": result.score_home,
         "score_away": result.score_away,
         "home_advantage_for": result.home_advantage_for,
+        # Set only when a knockout fixture (`decide_winner=True`) was still
+        # level after extra time + the sudden-death cap - see
+        # `MatchResult.shootout_winner`'s field comment. `score_home`/
+        # `score_away` above are NEVER changed by a shootout - a shootout-
+        # decided match is still officially recorded as tied on the
+        # scoreboard, same as the real law.
+        "shootout_winner": result.shootout_winner,
+        "shootout_detail": result.shootout_detail,
         "player_of_the_match": pom_json,
         "top_scorers": [
             {"name": ps.player.name, "team": ps.team, "points": ps.points,
@@ -794,6 +802,7 @@ def _classic_match_json(match, progress: dict) -> dict:
         "away_code": match.away_code, "away_name": match.away_name,
         "blurb": match.blurb, "real_score": match.real_score,
         "focus_team": match.focus_team,
+        "must_have_winner": match.must_have_winner,
         "base_objectives": [o.description for o in match.objectives if o.tier == "base"],
         "bonus_objectives": [o.description for o in match.objectives if o.tier == "bonus"],
         "best_stars": entry["stars"] if entry else 0,
@@ -1005,6 +1014,8 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
         "score_away": result.score_away if result else 0,
         "scoreline": result.scoreline() if result else "",
         "home_advantage_for": result.home_advantage_for if result else None,
+        "shootout_winner": result.shootout_winner if result else None,
+        "shootout_detail": result.shootout_detail if result else None,
         "events": [
             {"minute": e.minute, "team": e.team, "text": e.text,
              "score_home": e.score_home, "score_away": e.score_away}
@@ -1021,7 +1032,8 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
     }
 
 
-def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condition: Optional[Dict[int, float]] = None) -> str:
+def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condition: Optional[Dict[int, float]] = None,
+                       decide_winner: bool = False) -> str:
     """Starts a pausable match (engine advanced to its first checkpoint) and
     registers it in `_LIVE_MATCHES`, returning its session id. Shared by the
     single-friendly `/api/match/live/start` endpoint and the interactive
@@ -1029,9 +1041,15 @@ def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condi
     whichever fixture involves the user's own team. `initial_condition`:
     see `MatchEngine.__init__` - carries a squads-mode team's short-rest
     stamina penalty (if any) into their own interactively-played match too,
-    same as an auto-simmed one (`Tournament._play`)."""
+    same as an auto-simmed one (`Tournament._play`). `decide_winner`: see
+    `MatchEngine.__init__` - set True for a Classic Match whose catalog
+    entry is `must_have_winner` (a real knockout fixture), so a tie at full
+    time goes to extra time/sudden death/a kicking competition here too,
+    through this SAME pausable checkpoint loop (the engine's own
+    `is_finished`/`_advance_one_drive` primitives already handle it - no
+    separate wiring needed for the live flow)."""
     global _next_live_match_id
-    engine = MatchEngine(home, away, seed=seed, initial_condition=initial_condition)
+    engine = MatchEngine(home, away, seed=seed, initial_condition=initial_condition, decide_winner=decide_winner)
     engine.start()
     if LIVE_MATCH_CHECKPOINTS:
         engine.advance_to(LIVE_MATCH_CHECKPOINTS[0])
@@ -1048,16 +1066,22 @@ def api_match_live_start():
     """Starts a pausable match - advances straight to the first checkpoint
     (not minute 0) so the very first response already has something to
     react to. The frontend keeps calling .../continue to reach each
-    further checkpoint, optionally calling .../substitute in between."""
+    further checkpoint, optionally calling .../substitute in between.
+    `decide_winner` (optional, default False): the frontend's Classic
+    Matches flow passes `match.must_have_winner` here for a real knockout
+    classic match, so a tie goes to extra time/sudden death/a kicking
+    competition instead of just ending level - see
+    `MatchEngine.__init__`."""
     body = request.get_json(force=True)
     home = _TEAMS.get(body["home_team_id"])
     away = _TEAMS.get(body["away_team_id"])
     if home is None or away is None:
         return jsonify({"error": "unknown team_id - build both teams first"}), 400
     seed = body.get("seed")
+    decide_winner = bool(body.get("decide_winner", False))
 
     try:
-        session_id = _start_live_match(home, away, seed)
+        session_id = _start_live_match(home, away, seed, decide_winner=decide_winner)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1374,8 +1398,8 @@ def _build_tournament(kind: str, body: dict, teams: Dict[str, Team], squads: Dic
 
 def _run_tournament_session(session: TournamentSession, kind: str, body: dict,
                              teams: Dict[str, Team], squads: Dict[str, List[Player]], my_team: Optional[str]):
-    def pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition=None):
-        live_session_id = _start_live_match(home_team, away_team, seed, initial_condition)
+    def pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition=None, decide_winner=False):
+        live_session_id = _start_live_match(home_team, away_team, seed, initial_condition, decide_winner=decide_winner)
         session.live_session_id = live_session_id
         session.home_name, session.away_name = home_name, away_name
         session.status = "paused"
@@ -1580,8 +1604,8 @@ def api_season_widest_pool():
 def _run_season_session(session: SeasonSession, squad_player_ids: Dict[str, List[int]], seed: Optional[int]):
     holder: dict = {}
 
-    def pause_hook(home_name, away_name, home_team, away_team, match_seed, initial_condition=None):
-        live_session_id = _start_live_match(home_team, away_team, match_seed, initial_condition)
+    def pause_hook(home_name, away_name, home_team, away_team, match_seed, initial_condition=None, decide_winner=False):
+        live_session_id = _start_live_match(home_team, away_team, match_seed, initial_condition, decide_winner=decide_winner)
         session.live_session_id = live_session_id
         session.home_name, session.away_name = home_name, away_name
         session.status = "paused"

@@ -61,6 +61,16 @@ class ClassicMatch:
     # elsewhere in this project) - always "home" or "away", never both/none.
     focus_team: Literal["home", "away"] = "home"
     objectives: List[Objective] = field(default_factory=list)
+    # True for a real single-elimination/final/semi-final/quarter-final/
+    # historical-knockout match (a genuine tie there, in real rugby, always
+    # goes to extra time -> sudden death -> a kicking competition - see
+    # `MatchEngine.decide_winner` - never just ends level). Threaded into
+    # the live `MatchEngine` for this match's `/start` -> live-match flow
+    # (see `webapp.py`). Defaults to False - every pool-stage/regular-
+    # season entry (round-robin Six Nations/Rugby Championship rounds,
+    # Rugby World Cup pool matches) stays genuinely draw-eligible, exactly
+    # as real rugby allows there.
+    must_have_winner: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +218,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="South Africa 15-12 New Zealand (after extra time)",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("South Africa"),
             win_margin_at_least("South Africa", 3),
@@ -228,6 +239,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="Australia 27-21 South Africa (after extra time)",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("Australia"),
             win_margin_at_least("Australia", 1),
@@ -247,6 +259,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="Australia 17-20 England (after extra time)",
         focus_team="away",
+        must_have_winner=True,
         objectives=[
             win("England"),
             win_margin_at_least("England", 1),
@@ -266,6 +279,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="France 20-18 New Zealand",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("France"),
             win_margin_at_least("France", 1),
@@ -344,6 +358,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="South Africa 12-11 New Zealand",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("South Africa"),
             win_margin_at_least("South Africa", 1),
@@ -372,6 +387,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="New Zealand 45-29 England",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("New Zealand"),
             win_margin_at_least("New Zealand", 10),  # real margin: 16
@@ -393,6 +409,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="France 43-31 New Zealand",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("France"),
             win_margin_at_least("France", 8),  # real margin: 12
@@ -413,6 +430,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="Australia 22-10 New Zealand",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("Australia"),
             win_margin_at_least("Australia", 5),  # real margin: 12
@@ -433,6 +451,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="England 14-9 France",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("England"),
             win_margin_at_least("England", 1),
@@ -453,6 +472,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="Wales 22-10 Ireland",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("Wales"),
             win_margin_at_least("Wales", 5),  # real margin: 12
@@ -472,6 +492,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="South Africa 23-19 Wales",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("South Africa"),
             win_margin_at_least("South Africa", 1),
@@ -492,6 +513,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="England 19-7 New Zealand",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("England"),
             win_margin_at_least("England", 5),  # real margin: 12
@@ -513,6 +535,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
         ),
         real_score="South Africa 29-28 France",
         focus_team="home",
+        must_have_winner=True,
         objectives=[
             win("South Africa"),
             win_margin_at_least("South Africa", 1),

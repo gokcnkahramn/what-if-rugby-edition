@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](<https://img.shields.io/badge/tests-240%20passing-brightgreen.svg>)](tests/)
+[![Tests](<https://img.shields.io/badge/tests-255%20passing-brightgreen.svg>)](tests/)
 
 **What if you played Antoine Dupont at fullback? What if Jonah Lomu started
 at tighthead?** Build real squads from real players, drop anyone into any
@@ -267,7 +267,7 @@ anything about, a player's age.
 | `rugby_sim/tournament/`                    | Real & synthetic tournament formats, standings, awards                  |
 | `rugby_sim/webapp.py` + `rugby_sim/web/` | The Flask API + clickable web UI (no rugby logic in JS)                 |
 | `rugby_sim/interactive_cli.py`             | A terminal-only alternative to the web UI                               |
-| `tests/`                                   | 240 tests across data, tournaments, the engine, and the web API         |
+| `tests/`                                   | 255 tests across data, tournaments, the engine, and the web API         |
 
 Run the tests with `pip install pytest && pytest -q`.
 
