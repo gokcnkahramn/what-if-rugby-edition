@@ -43,10 +43,18 @@ def test_each_union_resolves_a_non_empty_pool():
         pool = build_union_pool(code, season="2024")
         assert len(pool) >= 15
         # Never a fabricated real name - every player here traces to a
-        # cross-referenced-or-archetype Wikipedia entry, never plain
-        # "rugbydata" (which would imply a rugbydata box score that these
-        # three unions don't have).
-        assert all(p.data_source in ("wikipedia", "wikipedia_archetype") for p in pool)
+        # cross-referenced/EA-rated/proxy-nudged/archetype Wikipedia entry,
+        # never plain "rugbydata" (which would imply a rugbydata box score
+        # that these three unions don't have). "historical_proxy" shows up
+        # when a scraped player has real parsed `caps` but no rugbydata
+        # history (see plan section 17) - still not a fabricated rating.
+        assert all(
+            p.data_source in (
+                "wikipedia", "wikipedia_archetype", "historical_proxy",
+                "historical_archetype", "ea_rugby08_rating",
+            )
+            for p in pool
+        )
 
     # Georgia/Portugal already had full rugbydata rosters; Romania/Spain
     # needed the new thin-pool top-up to actually field a team.

@@ -942,12 +942,13 @@ function snapshotButtonHtml(id) {
 const SUB_EVENT_RE = /substitution|injury/i;
 
 // Matches a successful scoring event's commentary text ONLY - a converted
-// try, a slotted conversion, or a kicked penalty (see match_engine.py's
-// exact wording: "TRY! ... crosses the whitewash...", "... slots the
-// conversion.", "... kicks the penalty.") - deliberately NOT a missed
+// try, a slotted conversion, a kicked penalty, or a successful drop goal
+// (see match_engine.py's exact wording: "TRY! ... crosses the
+// whitewash...", "... slots the conversion.", "... kicks the penalty.",
+// "DROP GOAL! ... drops a goal.") - deliberately NOT a missed
 // conversion/penalty ("... drifts wide."/"... is off target."), which
 // should stay silent.
-const SCORE_EVENT_RE = /^TRY!|slots the conversion\.|kicks the penalty\./;
+const SCORE_EVENT_RE = /^TRY!|slots the conversion\.|kicks the penalty\.|^DROP GOAL!/;
 
 // A short (~2.5s) stadium crowd-cheer burst for a qualifying score - never
 // the full ~37s recording (real matches don't have 35-second gaps between

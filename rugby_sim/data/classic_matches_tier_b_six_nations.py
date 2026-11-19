@@ -61,7 +61,7 @@ from typing import Dict, List, Tuple
 
 from ..models.player import Player
 from ..models.position import Position
-from .classic_matches import (
+from .classic_match_objectives import (
     ClassicMatch,
     no_cards,
     player_points_at_least,
@@ -313,8 +313,12 @@ def _build_pool(entries: List[Tuple[str, str, bool]] | List[Tuple[str, str]], na
         )
         if attrs is None:
             attrs = _archetype_attributes(position)
-        attrs = scale_to_union_strength(attrs, strength)
-        data_source = "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
+        if source != "legends_curated":
+            attrs = scale_to_union_strength(attrs, strength)
+        data_source = (
+            "legends_curated" if source == "legends_curated" else
+            "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
+        )
         pool.append(Player(
             name=name,
             nation=nation,
@@ -323,7 +327,10 @@ def _build_pool(entries: List[Tuple[str, str, bool]] | List[Tuple[str, str]], na
             era=era,
             notes=(
                 f"Six Nations Tier-B classic match pool ({era}). "
-                + ("Attributes from real rugbydata career stats (cross-referenced by "
+                + ("World Rugby Hall of Fame - hand-tuned curated rating from "
+                   "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
+                   if source == "legends_curated" else
+                   "Attributes from real rugbydata career stats (cross-referenced by "
                    "name) - likely a career that extended into rugbydata's 2018+ "
                    "coverage." if source == "wikipedia" else
                    "No rugbydata history found for this era/name, so attributes are "

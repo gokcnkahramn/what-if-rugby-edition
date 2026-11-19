@@ -192,6 +192,110 @@ CURATED_LEGENDS: List[Player] = [
                       leadership=90, fitness=76, versatility=35), era="'74",
            notes="World Rugby Hall of Fame. Led the unbeaten 1974 Lions to South Africa.",
            data_source="manual"),
+    Player("Os du Randt", "South Africa", Position.LOOSEHEAD_PROP,
+           Attributes(scrummaging=92, strength=92, fitness=78, tackling=70, discipline=78,
+                      versatility=30), era="'95",
+           notes="World Rugby Hall of Fame. Won the World Cup in 1995 and again in 2007, "
+           "a 12-year span bridging two eras - regarded as one of South Africa's greatest "
+           "-ever scrummaging props.", data_source="manual"),
+    Player("Sean Fitzpatrick", "New Zealand", Position.HOOKER,
+           Attributes(scrummaging=86, lineout_throwing=82, strength=84, tackling=80,
+                      leadership=90, game_intelligence=86, fitness=82, versatility=40),
+           era="'95", notes="World Rugby Hall of Fame. Captained the All Blacks at the "
+           "1995 World Cup; one of the most capped and decorated hookers in rugby history.",
+           data_source="manual"),
+    Player("Francois Pienaar", "South Africa", Position.BLINDSIDE_FLANKER,
+           Attributes(tackling=82, fitness=84, tackle_technique=80, leadership=94,
+                      game_intelligence=82, strength=78, versatility=40), era="'95",
+           notes="World Rugby Hall of Fame. Captained South Africa to the 1995 World "
+           "Cup - the iconic Mandela-jersey final remains rugby's defining image.",
+           data_source="manual"),
+    Player("Gavin Hastings", "Scotland", Position.FULLBACK,
+           Attributes(kicking_game=88, goal_kicking=92, aerial=80, composure=86,
+                      tackling=76, game_intelligence=82, versatility=30), era="'95",
+           notes="World Rugby Hall of Fame. Captained Scotland at the 1995 World Cup; "
+           "one of the era's most prolific goal-kicking fullbacks.", data_source="manual"),
+]
+
+# `EA_RATED_PLAYERS` - a small, SEPARATE list from `CURATED_LEGENDS`, sourced
+# from a real, live-fetched ruck.co.uk article: "Rugby 08 top 10 player
+# ratings included some major surprises"
+# (https://www.ruck.co.uk/rugby-08-top-10-player-ratings-included-some-major-surprises/,
+# confirmed live 2026-11-19, a single page - no further pagination/sibling
+# pages with additional named ratings were found). The full top 10 as
+# published: Jonny Wilkinson 99, Shane Williams 99, Brian O'Driscoll 99,
+# Richie McCaw 98, Schalk Burger 98, Gavin Henson 98, Dan Carter 98, Percy
+# Montgomery 97, Bryan Habana 97, Lawrence Dallaglio 96.
+#
+# EA's "overall" is one coarse 0-100 number, not a sub-attribute breakdown,
+# so each entry's `Attributes` is derived mechanically from that position's
+# `wikipedia_squad._ARCHETYPES` baseline, scaled by
+# `scale = 1 + (ea_overall - 77) / 100` (clamped to [0.9, 1.3]) - "77 =
+# average pro" is a modder/community-sourced reference point for this
+# specific game (TheRugbyForum), not an EA-published constant; this is a
+# documented heuristic conversion, not a precise recreation of EA's own
+# (never published) attribute breakdown.
+#
+# Several of these names (Wilkinson, O'Driscoll, Williams, Carter, Habana,
+# Dallaglio, McCaw) already have independent, hand-tuned entries in
+# `CURATED_LEGENDS` - those win on a name collision (`_cross_reference_attributes`
+# checks `CURATED_LEGENDS` before `EA_RATED_PLAYERS`), so this list is kept
+# complete/documentary even though only Schalk Burger, Gavin Henson and
+# Percy Montgomery would ever actually resolve through this tier in practice.
+def _ea_scale(ea_overall: int) -> float:
+    return max(0.9, min(1.3, 1 + (ea_overall - 77) / 100))
+
+
+def _ea_scaled_attributes(position: Position, ea_overall: int) -> Attributes:
+    from .sources.wikipedia_squad import _ARCHETYPES
+
+    scale = _ea_scale(ea_overall)
+    base = _ARCHETYPES.get(position, {})
+    scaled = {k: round(v * scale) for k, v in base.items()}
+    return Attributes(**scaled).clamp()
+
+
+EA_RATED_PLAYERS: List[Player] = [
+    Player("Jonny Wilkinson", "England", Position.FLY_HALF,
+           _ea_scaled_attributes(Position.FLY_HALF, 99), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 99 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Shane Williams", "Wales", Position.LEFT_WING,
+           _ea_scaled_attributes(Position.LEFT_WING, 99), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 99 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Brian O'Driscoll", "Ireland", Position.OUTSIDE_CENTRE,
+           _ea_scaled_attributes(Position.OUTSIDE_CENTRE, 99), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 99 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Richie McCaw", "New Zealand", Position.OPENSIDE_FLANKER,
+           _ea_scaled_attributes(Position.OPENSIDE_FLANKER, 98), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 98 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Schalk Burger", "South Africa", Position.BLINDSIDE_FLANKER,
+           _ea_scaled_attributes(Position.BLINDSIDE_FLANKER, 98), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 98 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Gavin Henson", "Wales", Position.INSIDE_CENTRE,
+           _ea_scaled_attributes(Position.INSIDE_CENTRE, 98), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 98 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Dan Carter", "New Zealand", Position.FLY_HALF,
+           _ea_scaled_attributes(Position.FLY_HALF, 98), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 98 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Percy Montgomery", "South Africa", Position.FULLBACK,
+           _ea_scaled_attributes(Position.FULLBACK, 97), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 97 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Bryan Habana", "South Africa", Position.RIGHT_WING,
+           _ea_scaled_attributes(Position.RIGHT_WING, 97), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 97 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
+    Player("Lawrence Dallaglio", "England", Position.NUMBER_8,
+           _ea_scaled_attributes(Position.NUMBER_8, 96), era="'08",
+           notes="Rugby 08 (EA Sports) in-game rating: 96 overall - ruck.co.uk "
+           "'Rugby 08 top 10 player ratings'.", data_source="ea_rugby08_rating"),
 ]
 
 # Backwards-compatible name (this used to be the whole list).

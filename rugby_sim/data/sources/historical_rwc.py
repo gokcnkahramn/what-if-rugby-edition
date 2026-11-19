@@ -31,6 +31,7 @@ from .wikipedia_squad import (
     POS_CODE_MAP,
     _archetype_attributes,
     _cross_reference_attributes,
+    _proxy_attributes,
     fetch_wikitext,
 )
 
@@ -124,12 +125,182 @@ def parse_rwc_squads(wikitext: str) -> Dict[str, Dict[str, List[dict]]]:
     return pools
 
 
+def rwc_statistics_page_title(year: int) -> str:
+    return f"{year} Rugby World Cup statistics"
+
+
+def fetch_rwc_statistics_wikitext(year: int):
+    return fetch_wikitext(rwc_statistics_page_title(year))
+
+
+def _clean_wiki_cell(text: str) -> str:
+    """Strips the common real wikitext markup found inside a table cell
+    (refs, `{{template|params}}`, `[[wikilink|display]]`, bold/italic) down
+    to plain display text - e.g. `{{Ru|FRA}}` -> `FRA`, `[[Thierry
+    Lacroix]]` -> `Thierry Lacroix`, `'''112'''` -> `112`."""
+    text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.S)
+    text = re.sub(r"<ref[^>]*/?>", "", text)
+    # {{tooltip|Conv|Conversions}} / {{Ru|FRA}} -> last "|"-separated param;
+    # {{shy}} (soft hyphen, no params) -> drop entirely.
+    text = re.sub(r"\{\{[^{}]*\|([^{}]*)\}\}", r"\1", text)
+    text = re.sub(r"\{\{[^{}]*\}\}", "", text)
+    text = re.sub(r"\[\[[^\]|]*\|([^\]]*)\]\]", r"\1", text)
+    text = re.sub(r"\[\[([^\]]*)\]\]", r"\1", text)
+    text = text.replace("'''", "").replace("''", "")
+    return text.strip()
+
+
+def _strip_wiki_cell_attrs(cell: str) -> str:
+    """A real wikitext cell is often `align="left"|<content>` or
+    `width=40|<content>` (style attributes before the actual value,
+    separated by the first real `|`) - strips that prefix when present,
+    leaving the raw `<content>`."""
+    cell = cell.strip()
+    if "|" in cell and "[[" not in cell.split("|", 1)[0]:
+        prefix, rest = cell.split("|", 1)
+        if re.match(r'^[A-Za-z0-9"=:;#\-\s]*$', prefix):
+            return rest.strip()
+    return cell
+
+
+def _split_wiki_row_cells(row_lines: List[str]) -> List[str]:
+    """A real wikitext table row can span several raw lines (one cell per
+    line) AND/OR pack several cells onto one line with `||` (data cells)
+    or `!!` (header cells) separators - confirmed live on both the 1995
+    and 2003 RWC statistics pages, which even mix a `|`-prefixed cell and
+    a `!`-prefixed cell on the SAME line (e.g. `|5||! scope=row
+    style="background:#ccc"|'''7'''||0||0||0||35`, marking the sorted
+    column). This normalizes all of those real separator forms to one
+    delimiter before splitting, so the drift doesn't need a special case."""
+    joined = "\n".join(row_lines)
+    joined = re.sub(r"\n\s*[|!]", "\x01", joined)
+    joined = re.sub(r"\|\s*!|\|\||!!", "\x01", joined)
+    joined = joined.lstrip("|!").strip()
+    raw_cells = [c for c in joined.split("\x01")]
+    return [_clean_wiki_cell(_strip_wiki_cell_attrs(c)) for c in raw_cells if c.strip() != ""]
+
+
+def parse_rwc_tournament_stats(wikitext: str) -> Dict[str, dict]:
+    """Parses the real `{|class="wikitable sortable"|}` "Top point scorers"/
+    "Top try scorers" tables on a "`<year>` Rugby World Cup statistics"
+    Wikipedia page - a genuinely different wikitext structure from the
+    `{{nat rs player}}` template used elsewhere in this module (plain
+    MediaWiki table syntax: `|-` row separators, cells spread across
+    lines and/or packed with `||`/`!!`).
+
+    Confirmed live for 1995 and 2003: both have "Player/Team/Position/
+    Played/Tries/Conversions(or Conv/a `{{tooltip}}`-wrapped header)/
+    Penalties/Drop goals/Total points" columns in that order, but the
+    exact column set DOES drift between editions (2003 adds trailing
+    Yellow/Red cards columns 1995 doesn't have, and the sorted column in
+    each table gets a `! scope=row` wiki-markup quirk instead of a plain
+    `|`) - so this reads each table's own header row to map column names
+    to cell positions, rather than assuming a fixed layout or markup.
+
+    Returns `{player_name_lower: {played, tries, conversions, penalties,
+    drop_goals, points}}` (any field that didn't have a column in that
+    table's header, or didn't parse as a number, is simply absent, not
+    guessed)."""
+    results: Dict[str, dict] = {}
+    lines = wikitext.splitlines()
+    in_relevant_section = False
+    i = 0
+    n = len(lines)
+    field_map = {
+        "played": ("Played",),
+        "tries": ("Tries",),
+        "conversions": ("Conversions", "Conv"),
+        "penalties": ("Penalties",),
+        "drop_goals": ("Drop goals",),
+        "points": ("Total points",),
+    }
+
+    while i < n:
+        stripped = lines[i].strip()
+        low = stripped.lower()
+        if "point scorers" in low or "try scorers" in low:
+            in_relevant_section = True
+        elif stripped.startswith("==") and "scorers" not in low:
+            in_relevant_section = False
+
+        if in_relevant_section and stripped.startswith("{|"):
+            i += 1
+            headers: List[str] = []
+            headers_done = False
+            row_lines: List[str] = []
+
+            def _flush_row():
+                if not row_lines or not headers_done:
+                    return
+                cells = _split_wiki_row_cells(row_lines)
+                if not cells:
+                    return
+                row = dict(zip(headers, cells))
+                name_raw = row.get("Player", cells[0])
+                name = name_raw.strip()
+                if not name:
+                    return
+                entry = results.setdefault(name.lower(), {})
+                for field_name, keys in field_map.items():
+                    for key in keys:
+                        val = row.get(key)
+                        if val is None:
+                            continue
+                        digits = re.sub(r"[^\d]", "", val)
+                        if digits:
+                            entry[field_name] = int(digits)
+                        break
+
+            while i < n and not lines[i].strip().startswith("|}"):
+                row_line = lines[i]
+                stripped_row = row_line.strip()
+                if stripped_row.startswith("|+"):
+                    pass  # table caption - not a header or data row
+                elif stripped_row.startswith("|-"):
+                    _flush_row()
+                    row_lines = []
+                    if headers:
+                        headers_done = True
+                elif stripped_row.startswith("!") and not headers_done:
+                    header_text = stripped_row.lstrip("!").strip()
+                    for cell in re.split(r"!!", header_text):
+                        headers.append(_clean_wiki_cell(_strip_wiki_cell_attrs(cell)))
+                else:
+                    row_lines.append(row_line)
+                i += 1
+            _flush_row()
+            in_relevant_section = False
+        i += 1
+    return results
+
+
+_RWC_TOURNAMENT_STATS_CACHE: Dict[int, Dict[str, dict]] = {}
+
+
+def get_rwc_tournament_stats(year: int) -> Dict[str, dict]:
+    """Disk/process-cached `parse_rwc_tournament_stats` result for one RWC
+    edition's "`<year>` Rugby World Cup statistics" page. Returns `{}` if
+    the page doesn't exist or didn't parse (never raises - this is a bonus
+    nudge, not a required input)."""
+    if year in _RWC_TOURNAMENT_STATS_CACHE:
+        return _RWC_TOURNAMENT_STATS_CACHE[year]
+    wikitext = fetch_rwc_statistics_wikitext(year)
+    stats = parse_rwc_tournament_stats(wikitext) if wikitext else {}
+    _RWC_TOURNAMENT_STATS_CACHE[year] = stats
+    return stats
+
+
 def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[Player]:
     strength_code = _NATION_TO_STRENGTH_CODE.get(nation)
     strength = UNION_STRENGTH.get(strength_code, DEFAULT_UNION_STRENGTH) if strength_code else DEFAULT_UNION_STRENGTH
 
     from .pool_builder import _global_reference_peer_proxies
     peer_proxies_by_position = _global_reference_peer_proxies("2026")
+
+    try:
+        tournament_stats = get_rwc_tournament_stats(year)
+    except Exception:
+        tournament_stats = {}
 
     era = f"'{str(year)[-2:]}"
     pool: List[Player] = []
@@ -142,23 +313,47 @@ def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[P
             full_name, peer_proxies=peer_proxies_by_position.get(position)
         )
         if attrs is None:
-            attrs = _archetype_attributes(position)
-        attrs = scale_to_union_strength(attrs, strength)
+            attrs, source = _proxy_attributes(
+                position, entry.get("caps"), tournament_stats.get(full_name.lower())
+            )
+        if source not in ("legends_curated", "ea_rugby08_rating"):
+            attrs = scale_to_union_strength(attrs, strength)
         # Keep the real-vs-archetype distinction visible (same honesty
         # convention as the current-squad Wikipedia pipeline), just
-        # prefixed so it's obviously a *historical* pull either way.
-        data_source = "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
+        # prefixed so it's obviously a *historical* pull either way - except
+        # a curated Hall-of-Fame legend or a real EA-rated player, whose
+        # provenance is tagged honestly as such rather than folded into
+        # either historical bucket.
+        if source in ("legends_curated", "ea_rugby08_rating"):
+            data_source = source
+        elif source == "wikipedia":
+            data_source = "historical_wikipedia"
+        elif source == "historical_proxy":
+            data_source = "historical_proxy"
+        else:
+            data_source = "historical_archetype"
         pool.append(Player(
             name=full_name,
             nation=nation,
             natural_position=position,
             attributes=attrs,
             era=era,
+            caps=entry.get("caps"),
             notes=(
                 f"{year} Rugby World Cup squad. "
-                + ("Attributes from real rugbydata career stats (cross-referenced by name) - "
+                + ("World Rugby Hall of Fame - hand-tuned curated rating from "
+                   "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
+                   if source == "legends_curated" else
+                   "Real, published Rugby 08 (EA Sports) in-game player rating - "
+                   "legends.EA_RATED_PLAYERS, converted via a documented heuristic."
+                   if source == "ea_rugby08_rating" else
+                   "Attributes from real rugbydata career stats (cross-referenced by name) - "
                    "likely a career that extended into rugbydata's 2018+ coverage."
                    if source == "wikipedia" else
+                   "No rugbydata history for this era/name, but real caps and/or this "
+                   "tournament's real scoring-table stats gave a small, bounded nudge "
+                   "off the generic position archetype."
+                   if source == "historical_proxy" else
                    "No rugbydata history found for this era/name, so attributes are a "
                    "generic position-archetype estimate, not a scouted rating.")
             ),

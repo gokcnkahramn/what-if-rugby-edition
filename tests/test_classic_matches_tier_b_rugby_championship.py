@@ -60,5 +60,5 @@ def test_pools_non_empty_for_every_match():
         assert len(home_pool) >= 15, f"{match.id} home pool too small: {len(home_pool)}"
         assert len(away_pool) >= 15, f"{match.id} away pool too small: {len(away_pool)}"
         for p in home_pool + away_pool:
-            assert p.data_source in ("historical_wikipedia", "historical_archetype")
+            assert p.data_source in ("historical_wikipedia", "historical_archetype", "legends_curated")
             assert p.name

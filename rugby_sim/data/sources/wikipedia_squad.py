@@ -40,6 +40,7 @@ import pandas as pd
 from ...models.attributes import Attributes
 from ...models.player import Player
 from ...models.position import Position
+from ..legends import CURATED_LEGENDS
 from .attribute_mapping import (
     DEFAULT_UNION_STRENGTH,
     UNION_STRENGTH,
@@ -211,14 +212,62 @@ def parse_current_squad(wikitext: str) -> List[dict]:
     return entries
 
 
+_CURATED_LEGENDS_BY_NAME = {p.name.strip().lower(): p for p in CURATED_LEGENDS}
+_ea_rated_players_by_name_cache: Optional[dict] = None
+
+
+def _ea_rated_attributes(full_name: str) -> Optional[Attributes]:
+    """Exact-name lookup into `legends.EA_RATED_PLAYERS` - a small, separate
+    list derived from real, published Rugby 08 (EA Sports) in-game player
+    ratings. Checked after `_curated_legend_attributes` (a hand-tuned
+    Hall-of-Fame rating always wins a name collision) but before the
+    rugbydata registry/proxy/archetype chain, since a real published EA
+    rating is a stronger signal than an incidental stats cross-reference.
+    Imports `legends.EA_RATED_PLAYERS` lazily (not at module load time) -
+    `legends.py` itself builds that list's `Attributes` from this module's
+    `_ARCHETYPES`, so a top-level import here would be circular."""
+    global _ea_rated_players_by_name_cache
+    if _ea_rated_players_by_name_cache is None:
+        from ..legends import EA_RATED_PLAYERS
+        _ea_rated_players_by_name_cache = {
+            p.name.strip().lower(): p for p in EA_RATED_PLAYERS
+        }
+    player = _ea_rated_players_by_name_cache.get(full_name.strip().lower())
+    return player.attributes if player is not None else None
+
+
+def _curated_legend_attributes(full_name: str) -> Optional[Attributes]:
+    """Exact-name lookup (same convention as the registry lookup below:
+    exact match first) into `legends.CURATED_LEGENDS` - the small, hand-
+    tuned ~30-entry list, NOT `get_all_legends()`'s larger scraped-archetype
+    set (those are no better than our own archetype fallback). A real
+    Hall-of-Famer who also turns up in a historical/current squad should
+    get their hand-tuned, historically-justified rating instead of a flat
+    archetype or an unrelated-career stats cross-reference."""
+    legend = _CURATED_LEGENDS_BY_NAME.get(full_name.strip().lower())
+    return legend.attributes if legend is not None else None
+
+
 def _cross_reference_attributes(full_name: str, peer_proxies: Optional[dict] = None) -> tuple[Attributes, str]:
-    """Looks `full_name` up in rugbydata's global player registry and, if
-    found, aggregates that person's real career stats. Falls back to None
-    if there's no usable match - caller supplies the position archetype.
+    """Looks `full_name` up, in priority order: (1) `legends.CURATED_LEGENDS`'
+    hand-tuned entries (exact name match) - a real Hall-of-Famer's
+    historically-justified rating always beats a generic archetype or an
+    incidental stats cross-reference; (2) rugbydata's global player
+    registry, aggregating that person's real career stats if found; (3)
+    None, meaning no usable match - caller supplies the position archetype.
     `peer_proxies` (see `pool_builder._global_reference_peer_proxies`) is
-    passed straight through to `map_stats_to_attributes` so this person's
-    rating is calibrated against the same cross-union reference pool as
-    every rugbydata-sourced player, not scored in isolation."""
+    passed straight through to `map_stats_to_attributes` so a registry-
+    sourced rating is calibrated against the same cross-union reference
+    pool as every rugbydata-sourced player, not scored in isolation -
+    curated-legends attributes are already final and skip that step."""
+    legend_attrs = _curated_legend_attributes(full_name)
+    if legend_attrs is not None:
+        return legend_attrs, "legends_curated"
+
+    ea_attrs = _ea_rated_attributes(full_name)
+    if ea_attrs is not None:
+        return ea_attrs, "ea_rugby08_rating"
+
     registry = fetch_player_registry()
     if registry is None or registry.empty:
         return None, "wikipedia_archetype"
@@ -252,6 +301,56 @@ def _cross_reference_attributes(full_name: str, peer_proxies: Optional[dict] = N
 
 def _archetype_attributes(position: Position) -> Attributes:
     return Attributes(**_ARCHETYPES.get(position, {})).clamp()
+
+
+# Bounded nudge caps (deliberately small - see plan section 17: the explicit
+# goal is "prevent anyone from becoming overpowered," not to approximate a
+# real scouted rating from thin proxy signal).
+_MAX_CAPS_NUDGE = 6
+_MAX_STATS_NUDGE = 6
+
+
+def _proxy_attributes(position: Position, caps: Optional[int] = None,
+                       tournament_stats: Optional[dict] = None) -> tuple[Attributes, str]:
+    """Starts from the flat `_archetype_attributes(position)` baseline and
+    applies up to two small, bounded nudges when there's real (if coarse)
+    signal to justify them - used for pre-2018 historical players who have
+    no rugbydata box-score history at all, so would otherwise be byte-
+    identical to every other player at their position:
+
+    1. A caps-based "trusted with real selection" experience nudge - real
+       international caps at the time, bounded to `_MAX_CAPS_NUDGE`.
+    2. A real tournament-output nudge, only on an actual
+       `parse_rwc_tournament_stats` match for this exact player in this
+       exact tournament - points nudge goal-kicking/kicking game, tries
+       nudge pace/footwork/handling, each bounded to `_MAX_STATS_NUDGE`.
+
+    Returns `(attributes, data_source)`: `data_source` is
+    `"historical_proxy"` if either nudge actually fired (real caps>0 or a
+    real tournament-stats match), else the unchanged `"historical_archetype"`
+    - a player with genuinely zero real signal gets EXACTLY the old flat
+    archetype value, no regression."""
+    base = _archetype_attributes(position)
+    caps_nudge = min(_MAX_CAPS_NUDGE, (caps or 0) // 15)
+    stats_nudge_tries = 0
+    stats_nudge_points = 0
+    if tournament_stats:
+        tries = tournament_stats.get("tries") or 0
+        points = tournament_stats.get("points") or 0
+        stats_nudge_tries = min(_MAX_STATS_NUDGE, tries * 2)
+        stats_nudge_points = min(_MAX_STATS_NUDGE, points // 20)
+
+    if not caps_nudge and not stats_nudge_tries and not stats_nudge_points:
+        return base, "historical_archetype"
+
+    data = base.as_dict()
+    for attr in ("fitness", "game_intelligence", "discipline"):
+        data[attr] = data[attr] + caps_nudge
+    for attr in ("goal_kicking", "kicking_game"):
+        data[attr] = data[attr] + stats_nudge_points
+    for attr in ("pace", "footwork", "handling"):
+        data[attr] = data[attr] + stats_nudge_tries
+    return Attributes.from_dict(data), "historical_proxy"
 
 
 # code -> Wikipedia page title. Most unions follow "<Nation> national rugby
@@ -318,12 +417,24 @@ def build_wikipedia_pool(short_code: str, nation: str, season: str = "2026") -> 
             full_name, peer_proxies=peer_proxies_by_position.get(position)
         )
         if attrs is None:
-            attrs = _archetype_attributes(position)
-        attrs = scale_to_union_strength(attrs, strength)
+            attrs, source = _proxy_attributes(position, entry.get("caps"))
+        if source not in ("legends_curated", "ea_rugby08_rating"):
+            attrs = scale_to_union_strength(attrs, strength)
         note = (
+            "World Rugby Hall of Fame - hand-tuned curated rating from "
+            "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
+            if source == "legends_curated" else
+            "Real, published Rugby 08 (EA Sports) in-game player rating - "
+            "legends.EA_RATED_PLAYERS, converted via a documented heuristic, "
+            "not a scouted rating of our own."
+            if source == "ea_rugby08_rating" else
             "2026 Wikipedia squad listing; attributes from that person's real "
             "rugbydata career stats (cross-referenced by name)."
             if source == "wikipedia" else
+            "2026 Wikipedia squad listing; real caps parsed from Wikipedia gave "
+            "a small, bounded experience nudge off the generic position "
+            "archetype - not a scouted rating."
+            if source == "historical_proxy" else
             "2026 Wikipedia squad listing; no rugbydata history found for this "
             "name, so attributes are a generic position-archetype estimate, "
             "not a scouted rating."
@@ -333,6 +444,7 @@ def build_wikipedia_pool(short_code: str, nation: str, season: str = "2026") -> 
             nation=nation,
             natural_position=position,
             attributes=attrs,
+            caps=entry.get("caps"),
             era="'26",
             notes=note,
             data_source=source,

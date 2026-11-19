@@ -1,5 +1,11 @@
 """Detailed phase-by-phase national-team match simulator.
 
+See `MATCH_ENGINE_MODEL.md` (same directory) for the full, honest account of
+how a match is actually decided: which attributes drive each drive-outcome
+probability, the exact formulas, and a direct list of what this engine does
+NOT model (it's a drive-by-drive weighted-dice-roll abstraction, not a
+phase-by-phase physical simulation - despite this docstring's own name).
+
 The model is deliberately "what if"-first: every probability is derived
 from the *lineup* the user built (ratings per position, including the
 out-of-position fit penalty from `Player.rating_at`), not from any notion
@@ -251,17 +257,18 @@ class PlayerMatchStats:
     tries: int = 0
     conversions: int = 0
     penalty_goals: int = 0
+    drop_goals: int = 0
 
     @property
     def points(self) -> int:
-        return self.tries * 5 + self.conversions * 2 + self.penalty_goals * 3
+        return self.tries * 5 + self.conversions * 2 + self.penalty_goals * 3 + self.drop_goals * 3
 
     @property
     def pom_score(self) -> float:
         """Heuristic Player-of-the-Match score - points scored, weighted
         slightly in favour of tries over the boot. Not an official award,
         just a read of what already happened in the match."""
-        return self.tries * 6 + self.conversions * 2 + self.penalty_goals * 3
+        return self.tries * 6 + self.conversions * 2 + self.penalty_goals * 3 + self.drop_goals * 3
 
 
 @dataclass
@@ -994,7 +1001,23 @@ class MatchEngine:
         breakdown_edge = (breakdown_def - breakdown_atk) / 100
         p_breakdown_turnover = self._clamp(0.06 + breakdown_edge * 0.08, 0.01, 0.18)
 
-        p_card = 0.015 * self._clamp(1.4 - discipline_atk / 70, 0.3, 2.0)
+        p_card = 0.015 * self._clamp(1.4 - discipline_def / 70, 0.3, 2.0)
+
+        # Drop goal: a modest, attribute-driven alternative the attacking
+        # side's kicker can land instead of forcing a try/penalty chance -
+        # real rugby's version of "settle for three when the line isn't
+        # breaking." Driven by the designated kicker's own
+        # `place_kicking_range` (execution - drop goals are typically
+        # struck from longer range than a routine penalty) and
+        # `game_intelligence` (the decision to actually go for the drop
+        # rather than keep playing), same per-player-attribute convention
+        # as the conversion/penalty-goal rolls just below (not a team
+        # sub-rating average). Calibrated to a handful of successful drop
+        # goals per 100 simulated matches combined - rare, never guaranteed,
+        # occasionally zero for an entire match either side.
+        dg_kicker = self._best_kicker(attacking)
+        dg_skill = (dg_kicker.attributes.place_kicking_range + dg_kicker.attributes.game_intelligence) / 2
+        p_drop_goal = self._clamp(0.004 + (dg_skill - 55) / 1500, 0.001, 0.01)
 
         roll = self.rng.random()
         cumulative = 0.0
@@ -1006,6 +1029,14 @@ class MatchEngine:
 
         if take(p_try):
             self._score_try(attacking, minute, result)
+        elif take(p_drop_goal):
+            stats_a.drop_goals += 1
+            self._credit(attacking, dg_kicker, drop_goals=1)
+            result.events.append(self._event(
+                minute, attacking,
+                f"DROP GOAL! {dg_kicker.name} ({attacking.name}) drops a goal.",
+                result, add_score=(attacking, 3),
+            ))
         elif take(p_pen_conceded_by_def):
             self._score_penalty_chance(attacking, defending, minute, result)
         elif take(p_scrum_penalty):

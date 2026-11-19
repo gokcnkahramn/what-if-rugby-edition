@@ -17,6 +17,11 @@ breakpoints, since percentiles from a handful of players are noisy.
 
 Input: a pandas Series/dict of *summed or averaged* per-cap stats for one
 player's international appearances (see `pool_builder.build_union_pool`).
+
+See ATTRIBUTE_MAPPING.md (same directory) for the full per-attribute
+reference: which real stat(s) feed every `Attributes` field, the exact
+formula, and whether it's well-supported, a single-proxy stand-in, or a
+hardcoded archetype value with no real statistical backing at all.
 """
 
 from __future__ import annotations
@@ -122,6 +127,16 @@ def _compute_proxies(stats: Mapping, caps: int) -> Dict[str, float]:
 
     lineouts_won = _get(stats, "lineouts_won") / caps
     total_lineouts = _get(stats, "total_lineouts") / caps
+    raw_lineouts_won = _get(stats, "lineouts_won")
+    raw_total_lineouts = _get(stats, "total_lineouts")
+    # Hit rate, not attempt volume: a team that contests a lot of lineouts
+    # isn't necessarily throwing accurately. Default (0.75) applies when a
+    # player has no recorded lineout attempts at all, mirroring the
+    # tackle_success fallback above rather than crediting/penalising them
+    # for data they don't have.
+    lineout_throw_rate = (
+        raw_lineouts_won / raw_total_lineouts if raw_total_lineouts else 0.75
+    )
 
     rucks_won = _get(stats, "rucks_won") / caps
     turnovers_won = _get(stats, "turnovers_won") / caps
@@ -139,7 +154,7 @@ def _compute_proxies(stats: Mapping, caps: int) -> Dict[str, float]:
         "handling": passes - turnovers_lost * 3,
         "kicking_game": kicks_from_hand,
         "lineout_jumping": lineouts_won,
-        "lineout_throwing": total_lineouts,
+        "lineout_throwing": lineout_throw_rate,
         # Weak, honestly-flagged proxy: the dataset has no dedicated
         # scrum-contest stat (no scrums_won/scrums_lost column), so
         # `rucks_won` - general breakdown involvement - is the closest
@@ -155,7 +170,6 @@ def _compute_proxies(stats: Mapping, caps: int) -> Dict[str, float]:
         # and back row) rather than folding it into the scrum proxy above.
         "turnover_threat": turnovers_won,
         "discipline_raw": 2.0 - penalties_conceded - cards * 20,
-        "lineouts_won_flag": 1.0 if lineouts_won else 0.0,
     }
 
 
@@ -188,7 +202,10 @@ def map_stats_to_attributes(
     handling = scaled("handling", 2.0, 25.0)
     kicking_game = scaled("kicking_game", 0.0, 6.0)
     lineout_jumping = scaled("lineout_jumping", 0.0, 3.0)
-    lineout_throwing = scaled("lineout_throwing", 0.0, 10.0)
+    # Hit rate (lineouts_won / total_lineouts), not attempt volume - see the
+    # `lineout_throw_rate` comment in `_compute_proxies`. 0.5-0.95 covers the
+    # realistic range of international lineout success rates.
+    lineout_throwing = scaled("lineout_throwing", 0.5, 0.95)
     scrummaging = scaled("scrummaging", 0.0, 8.0)
     discipline = scaled("discipline_raw", 0.0, 2.0)
     discipline = max(5.0, discipline)
@@ -206,24 +223,45 @@ def map_stats_to_attributes(
 
     return Attributes(
         pace=round(pace),
+        # Intentional proxy-sharing: the dataset has no separate
+        # acceleration/sprint stat, so `acceleration` deliberately mirrors
+        # `pace`.
         acceleration=round(pace),
         strength=round(strength),
         fitness=60,
         agility=round((pace + footwork) / 2),
         tackling=round(tackling),
         tackle_technique=round(tackle_technique),
-        aerial=round(lineout_jumping if proxies["lineouts_won_flag"] else 50),
+        # Weak, honestly-flagged proxy (same convention as `scrummaging`
+        # below): the dataset has no restart/high-ball contest stat, so
+        # `aerial` is blended from the closest available real-data signals
+        # - lineout jumping (aerial-contest timing/athleticism, even though
+        # it's a different skill from catching a kick), strength (winning
+        # the physical contest in the air) and pace (covering ground to
+        # contest a restart) - rather than a silent exact copy of any one
+        # of them.
+        aerial=round((lineout_jumping + strength + pace) / 3),
         scrummaging=round(scrummaging),
         lineout_jumping=round(lineout_jumping),
         lineout_throwing=round(lineout_throwing),
         handling=round(handling),
+        # Intentional proxy-sharing: no real stat in this dataset
+        # distinguishes passing accuracy/vision from general handling, so
+        # `passing` deliberately mirrors `handling` rather than inventing a
+        # separate, unsupported computation.
         passing=round(handling),
         offload=round(offload),
         footwork=round(footwork),
         kicking_game=round(kicking_game),
         goal_kicking=round(goal_kicking),
+        # Intentional proxy-sharing: no real stat distinguishes kicking
+        # range from overall goal-kicking success, so `place_kicking_range`
+        # deliberately mirrors `goal_kicking`.
         place_kicking_range=round(goal_kicking),
         game_intelligence=round((tackling + handling) / 2),
+        # Intentional proxy-sharing: no real stat distinguishes positional
+        # sense from the tackling/handling blend used for
+        # `game_intelligence`, so `positioning` deliberately mirrors it.
         positioning=round((tackling + handling) / 2),
         leadership=50,
         discipline=round(discipline),

@@ -16,6 +16,7 @@ class Player:
     era: Optional[str] = None  # e.g. "1997" or "2008" for historical snapshots
     notes: str = ""
     data_source: str = "manual"  # "rugbydata" | "wikipedia" | "manual" (provenance)
+    caps: Optional[int] = None  # real international caps, when known (historical/Wikipedia pulls)
 
     def rating_at(self, position: Position) -> float:
         """0-100 'fit' rating for playing this player at `position`.

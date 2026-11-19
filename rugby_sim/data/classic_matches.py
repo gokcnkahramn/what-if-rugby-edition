@@ -21,184 +21,32 @@ happened that day - they are not a claim about what really happened.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Literal, Tuple
+from typing import Dict, List, Tuple
 
 from ..engine.match_engine import MatchResult
 
-Tier = Literal["base", "bonus"]
-
-
-@dataclass
-class Objective:
-    key: str
-    tier: Tier
-    description: str
-    # (result, home_code_or_name, away_code_or_name) -> bool. The checker
-    # only ever needs team NAMES (MatchResult.stats/player_stats are keyed
-    # by Team.name, confirmed in rugby_sim/engine/match_engine.py) - the
-    # extra two positional args exist so a single generic `check` fn can be
-    # parameterized per-match without a closure per entry.
-    check: Callable[[MatchResult], bool]
-
-
-@dataclass
-class ClassicMatch:
-    id: str
-    tournament: str  # "rwc" | "six_nations" | "rugby_championship"
-    year: int
-    display_name: str
-    date: str
-    home_code: str
-    home_name: str
-    away_code: str
-    away_name: str
-    blurb: str
-    real_score: str
-    # Which side the match's objectives are actually about (per Rugby 08's
-    # "Classic Rugby" mode convention: you draft only this side; the other
-    # side auto-drafts from its own real pool, same as any AI opponent
-    # elsewhere in this project) - always "home" or "away", never both/none.
-    focus_team: Literal["home", "away"] = "home"
-    objectives: List[Objective] = field(default_factory=list)
-    # True for a real single-elimination/final/semi-final/quarter-final/
-    # historical-knockout match (a genuine tie there, in real rugby, always
-    # goes to extra time -> sudden death -> a kicking competition - see
-    # `MatchEngine.decide_winner` - never just ends level). Threaded into
-    # the live `MatchEngine` for this match's `/start` -> live-match flow
-    # (see `webapp.py`). Defaults to False - every pool-stage/regular-
-    # season entry (round-robin Six Nations/Rugby Championship rounds,
-    # Rugby World Cup pool matches) stays genuinely draw-eligible, exactly
-    # as real rugby allows there.
-    must_have_winner: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Generic, parameterized objective-type vocabulary. Each returns an
-# `Objective` already bound to a real match's two team names. Deliberately a
-# SMALL, FIXED set of types (not one-off hand code per match) - see the
-# plan's "Objective model" section. No per-player drop-goal objective exists
-# because `PlayerMatchStats` has no such field (team-level `drop_goals` only)
-# - an honest data limitation, not silently faked.
-# ---------------------------------------------------------------------------
-
-
-def win(team: str) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        stats = result.stats
-        if team not in stats:
-            return False
-        if result.home.name == team:
-            return result.score_home > result.score_away
-        if result.away.name == team:
-            return result.score_away > result.score_home
-        return False
-
-    return Objective(f"win:{team}", "base", f"{team} win the match", _check)
-
-
-def win_margin_at_least(team: str, margin: int) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        if result.home.name == team:
-            diff = result.score_home - result.score_away
-        elif result.away.name == team:
-            diff = result.score_away - result.score_home
-        else:
-            return False
-        return diff >= margin
-
-    return Objective(
-        f"win_margin:{team}:{margin}", "base",
-        f"{team} win by {margin}+ points", _check,
-    )
-
-
-def team_tries_at_least(team: str, n: int) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        stats = result.stats.get(team)
-        return stats is not None and stats.tries >= n
-
-    return Objective(
-        f"team_tries:{team}:{n}", "bonus",
-        f"{team} score {n}+ tries", _check,
-    )
-
-
-def team_drop_goals_at_least(team: str, n: int) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        stats = result.stats.get(team)
-        return stats is not None and stats.drop_goals >= n
-
-    return Objective(
-        f"team_drop_goals:{team}:{n}", "bonus",
-        f"{team} kick {n}+ drop goals", _check,
-    )
-
-
-def player_points_at_least(team: str, position_or_name: str, n: int) -> Objective:
-    """`position_or_name`: matched against a `PlayerMatchStats.player`'s
-    `natural_position.value` OR `name` (whichever matches, name first -
-    lets a match target either "the left wing, whoever you draft there" or
-    a specific real name)."""
-
-    def _matches(ps) -> bool:
-        if ps.team != team:
-            return False
-        if ps.player.name == position_or_name:
-            return True
-        return ps.player.natural_position.value == position_or_name
-
-    def _check(result: MatchResult) -> bool:
-        return any(_matches(ps) and ps.points >= n for ps in result.player_stats)
-
-    return Objective(
-        f"player_points:{team}:{position_or_name}:{n}", "bonus",
-        f"A {position_or_name} for {team} scores {n}+ points", _check,
-    )
-
-
-def player_tries_at_least(team: str, position_or_name: str, n: int) -> Objective:
-    def _matches(ps) -> bool:
-        if ps.team != team:
-            return False
-        if ps.player.name == position_or_name:
-            return True
-        return ps.player.natural_position.value == position_or_name
-
-    def _check(result: MatchResult) -> bool:
-        return any(_matches(ps) and ps.tries >= n for ps in result.player_stats)
-
-    return Objective(
-        f"player_tries:{team}:{position_or_name}:{n}", "bonus",
-        f"A {position_or_name} for {team} scores {n}+ tries", _check,
-    )
-
-
-def no_cards(team: str) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        stats = result.stats.get(team)
-        return stats is not None and stats.yellow_cards == 0 and stats.red_cards == 0
-
-    return Objective(f"no_cards:{team}", "base", f"{team} finish with no cards", _check)
-
-
-def no_injuries(team: str) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        stats = result.stats.get(team)
-        return stats is not None and stats.injuries == 0
-
-    return Objective(f"no_injuries:{team}", "bonus", f"{team} finish with no injuries", _check)
-
-
-def total_points_at_least(n: int) -> Objective:
-    def _check(result: MatchResult) -> bool:
-        return (result.score_home + result.score_away) >= n
-
-    return Objective(
-        f"total_points:{n}", "bonus",
-        f"The match produces {n}+ combined points", _check,
-    )
-
+# `Objective`/`ClassicMatch` and the generic objective-type vocabulary
+# (`win`, `win_margin_at_least`, etc.) live in `classic_match_objectives`,
+# NOT here, specifically so the Tier-B modules below (which also need
+# them) don't have to import this module to get them - this module
+# imports the Tier-B modules at module level (to merge their match lists
+# into `CLASSIC_MATCHES`), so a Tier-B module importing this model back
+# from here would be a genuine import cycle. Re-exported here unchanged
+# for backward compatibility with any existing `from .classic_matches
+# import ...` of these names.
+from .classic_match_objectives import (  # noqa: F401
+    ClassicMatch,
+    Objective,
+    no_cards,
+    no_injuries,
+    player_points_at_least,
+    player_tries_at_least,
+    team_drop_goals_at_least,
+    team_tries_at_least,
+    total_points_at_least,
+    win,
+    win_margin_at_least,
+)
 
 # ---------------------------------------------------------------------------
 # The 25-entry Tier-A catalog.

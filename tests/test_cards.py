@@ -141,11 +141,14 @@ def test_card_report_json_shape_and_live_matches_remaining():
     import random as _random
     # Seed picked so the REST of the match (played out with a real RNG from
     # here on) doesn't roll any further cards - this test only wants to
-    # check the ONE card it explicitly issued. Re-picked from 99 after the
-    # stamina decay re-tuning (see `engine/match_engine.py`
-    # STAMINA_DECAY_PER_MINUTE) changed downstream RNG consumption enough to
-    # make seed 99 roll a spurious extra yellow card.
-    engine.rng = _random.Random(0)
+    # check the ONE card it explicitly issued. Re-picked from 0 after the
+    # drop-goal outcome branch was added to `_resolve_drive` (see
+    # `engine/MATCH_ENGINE_MODEL.md`'s "Fixed in this pass"): inserting a
+    # new probability slice ahead of the other outcomes shifts which
+    # outcome each drive's single `roll` lands in for every later drive,
+    # which changed downstream RNG consumption enough to make seed 0 roll
+    # a spurious extra yellow card.
+    engine.rng = _random.Random(1)
     engine.finish()
     availability.record_match(result)
 

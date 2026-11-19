@@ -58,7 +58,7 @@ from typing import Dict, List, Tuple
 from ..models.attributes import Attributes
 from ..models.player import Player
 from ..models.position import Position
-from .classic_matches import (
+from .classic_match_objectives import (
     ClassicMatch,
     no_cards,
     team_tries_at_least,
@@ -224,8 +224,12 @@ def _build_pool(entries: List[dict], nation: str, year: int) -> List[Player]:
         )
         if attrs is None:
             attrs = _archetype_attributes(position)
-        attrs: Attributes = scale_to_union_strength(attrs, strength)
-        data_source = "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
+        if source != "legends_curated":
+            attrs: Attributes = scale_to_union_strength(attrs, strength)
+        data_source = (
+            "legends_curated" if source == "legends_curated" else
+            "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
+        )
         pool.append(Player(
             name=full_name,
             nation=nation,
@@ -235,7 +239,10 @@ def _build_pool(entries: List[dict], nation: str, year: int) -> List[Player]:
             notes=(
                 f"{year} {'Tri Nations Series' if year <= 2011 else 'Rugby Championship'} "
                 f"match lineup (real Wikipedia-sourced). "
-                + ("Attributes from real rugbydata career stats (cross-referenced by name)."
+                + ("World Rugby Hall of Fame - hand-tuned curated rating from "
+                   "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
+                   if source == "legends_curated" else
+                   "Attributes from real rugbydata career stats (cross-referenced by name)."
                    if source == "wikipedia" else
                    "No rugbydata history found for this era/name, so attributes are a "
                    "generic position-archetype estimate, not a scouted rating.")
