@@ -2786,6 +2786,21 @@ async function enterClassicMatchesMode() {
     }
   };
 
+  document.getElementById("classic-reset-progress-btn").onclick = async () => {
+    const status = document.getElementById("classic-settings-status");
+    if (!confirm("Reset earned star progress for every Classic Match? This can't be undone.")) return;
+    setStatus(status, "resetting...");
+    try {
+      await api("/api/classic_matches/reset_progress", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({}),
+      });
+      setStatus(status, "");
+      await loadClassicMatchesList();
+    } catch (e) {
+      showError(status, "Error: " + e.message);
+    }
+  };
+
   await loadClassicMatchesList();
 }
 

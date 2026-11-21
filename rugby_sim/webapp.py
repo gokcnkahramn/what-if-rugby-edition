@@ -957,6 +957,22 @@ def api_classic_matches_complete(match_id: str):
     })
 
 
+@app.post("/api/classic_matches/reset_progress")
+def api_classic_matches_reset_progress():
+    """Clears earned star progress from the local cache file. With a
+    `match_id` in the body, resets just that one match; with none (or
+    `match_id: null`), clears every match's progress."""
+    body = request.get_json(silent=True) or {}
+    match_id = body.get("match_id")
+    progress = _load_classic_progress()
+    if match_id:
+        progress["completed"].pop(match_id, None)
+    else:
+        progress["completed"] = {}
+    _save_classic_progress(progress)
+    return jsonify({"completed": progress["completed"]})
+
+
 # -- API: run a single match --------------------------------------------
 @app.post("/api/match")
 def api_match():

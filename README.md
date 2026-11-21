@@ -201,22 +201,22 @@ rugbydata pool (291 unique capped players across 12 unions), rates each
 player at their own natural position (`Player.rating_at`), and groups by
 position. Captured 2026-11-19:
 
-| Position | N | Mean | Median | StdDev | Min | Max |
-|---|---|---|---|---|---|---|
-| Loosehead Prop | 26 | 70.2 | 70.2 | 4.8 | 58.2 | 79.2 |
-| Hooker | 21 | 71.3 | 72.7 | 4.9 | 63.7 | 81.7 |
-| Tighthead Prop | 19 | 73.2 | 73.0 | 6.4 | 63.0 | 84.8 |
-| Lock (4) | 38 | 67.5 | 67.7 | 8.6 | 50.1 | 83.7 |
-| Blindside Flanker | 19 | 63.5 | 64.0 | 5.7 | 52.9 | 73.7 |
-| Openside Flanker | 21 | 65.4 | 67.3 | 7.5 | 52.5 | 76.5 |
-| Number 8 | 16 | 62.6 | 62.3 | 5.7 | 51.6 | 71.7 |
-| Scrum-half | 20 | 66.4 | 67.0 | 10.7 | 47.2 | 84.2 |
-| Fly-half | 18 | 66.5 | 67.0 | 7.8 | 54.1 | 83.9 |
-| Left Wing | 19 | 69.1 | 70.2 | 9.8 | 46.2 | 83.4 |
-| Inside Centre | 22 | 65.5 | 66.4 | 8.8 | 48.8 | 79.6 |
-| Outside Centre | 17 | 67.4 | 68.1 | 6.1 | 56.8 | 77.3 |
-| Right Wing | 18 | 69.6 | 70.7 | 9.0 | 54.2 | 83.5 |
-| Fullback | 17 | 65.3 | 63.5 | 8.1 | 56.4 | 83.4 |
+| Position          | N  | Mean | Median | StdDev | Min  | Max  |
+| ----------------- | -- | ---- | ------ | ------ | ---- | ---- |
+| Loosehead Prop    | 26 | 70.2 | 70.2   | 4.8    | 58.2 | 79.2 |
+| Hooker            | 21 | 71.3 | 72.7   | 4.9    | 63.7 | 81.7 |
+| Tighthead Prop    | 19 | 73.2 | 73.0   | 6.4    | 63.0 | 84.8 |
+| Lock (4)          | 38 | 67.5 | 67.7   | 8.6    | 50.1 | 83.7 |
+| Blindside Flanker | 19 | 63.5 | 64.0   | 5.7    | 52.9 | 73.7 |
+| Openside Flanker  | 21 | 65.4 | 67.3   | 7.5    | 52.5 | 76.5 |
+| Number 8          | 16 | 62.6 | 62.3   | 5.7    | 51.6 | 71.7 |
+| Scrum-half        | 20 | 66.4 | 67.0   | 10.7   | 47.2 | 84.2 |
+| Fly-half          | 18 | 66.5 | 67.0   | 7.8    | 54.1 | 83.9 |
+| Left Wing         | 19 | 69.1 | 70.2   | 9.8    | 46.2 | 83.4 |
+| Inside Centre     | 22 | 65.5 | 66.4   | 8.8    | 48.8 | 79.6 |
+| Outside Centre    | 17 | 67.4 | 68.1   | 6.1    | 56.8 | 77.3 |
+| Right Wing        | 18 | 69.6 | 70.7   | 9.0    | 54.2 | 83.5 |
+| Fullback          | 17 | 65.3 | 63.5   | 8.1    | 56.4 | 83.4 |
 
 Overall: n=291, mean=67.5, median=68.1, stdev=8.0, min=46.2, max=84.8.
 
@@ -361,16 +361,17 @@ invented signal anywhere in that list - see `engine/match_engine.py`'s
 `_decay_stamina`. This softens a player's rating late in a tight match and
 feeds into why a tactical substitution happens. This "condition" (0-100) is
 its own number, always shown separately from position fit (`natural_fit`)
+
 - never folded into one combined figure - in the live lineup/bench views,
-even though the engine does multiply them together internally when it
-builds a team's actual rating. A single friendly or draft-mode match always
-starts everyone at full condition; in a tournament, a player picked into
-their team's last match's squad starts the next one short of full
-condition - this applies in BOTH "fresh squad every match" mode and a
-fixed lineup reused for the whole tournament, and the auto-draft AI (squads
-mode only) weighs it when picking who starts - see
-`engine/match_engine.py` and `tournament/availability.py` for the exact
-(frankly simple) heuristic.
+  even though the engine does multiply them together internally when it
+  builds a team's actual rating. A single friendly or draft-mode match always
+  starts everyone at full condition; in a tournament, a player picked into
+  their team's last match's squad starts the next one short of full
+  condition - this applies in BOTH "fresh squad every match" mode and a
+  fixed lineup reused for the whole tournament, and the auto-draft AI (squads
+  mode only) weighs it when picking who starts - see
+  `engine/match_engine.py` and `tournament/availability.py` for the exact
+  (frankly simple) heuristic.
 
 ### Injury and card reporting in detail
 
@@ -495,12 +496,13 @@ for a union" and "every real player *eligible* for a union" are genuinely
 different, and the uncapped half can't be built from rugbydata alone. As a
 scoped follow-up, `rugby_sim/data/sources/uncapped_pool.py` instead reads
 domestic CLUB squad pages on Wikipedia (`{{RU squad player|NAT| Name|cap=y}}`
+
 - confirmed live, same template, across every club checked) and takes
-"carries this union's nationality flag on a covered club's current squad
-listing, with no `cap=y` (bolded = capped international) marker" as an
-honest proxy for "eligible, never capped" - not a verified
-legal-eligibility check (residency/ancestry rules aren't visible from a
-squad list), and every such player's `notes` says so explicitly.
+  "carries this union's nationality flag on a covered club's current squad
+  listing, with no `cap=y` (bolded = capped international) marker" as an
+  honest proxy for "eligible, never capped" - not a verified
+  legal-eligibility check (residency/ancestry rules aren't visible from a
+  squad list), and every such player's `notes` says so explicitly.
 
 Covered today: **England** (Leicester Tigers, Saracens) and **France**
 (Stade Toulousain, Racing 92) only - two Tier 1 unions, two top-flight
