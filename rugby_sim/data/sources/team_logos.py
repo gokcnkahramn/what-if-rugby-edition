@@ -31,40 +31,24 @@ import urllib.error
 import urllib.request
 from typing import Dict, Optional
 
+from .union_registry import UNION_REGISTRY
 from .wikipedia_squad import USER_AGENT, fetch_wikitext
 
 LOGO_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "web", "logos")
 
 # code -> Wikipedia page title for that union's national team article.
-# Mirrors `pool_builder.ALL_TEAM_IDS`/`NATION_DISPLAY` naming, plus the two
-# Wikipedia-only 2027-draw unions and the Barbarians (a direct Commons file,
-# not a national-team infobox, since they're an invitational club side).
+# Derived from `union_registry.UNION_REGISTRY` (the single source of truth
+# for a union's Wikipedia page title, plus which unions this specific dict
+# covers - 6 Rugby Europe Championship unions are deliberately excluded,
+# `has_logo_page=False`, unverified whether their pages expose a `Badge=`
+# field) - same contents as the hand-written dict this replaced. Mirrors
+# `pool_builder.ALL_TEAM_IDS`/`NATION_DISPLAY` naming, plus the two
+# Wikipedia-only 2027-draw unions and the Barbarians/Lions/Pacific
+# Islanders (direct Commons files, not a national-team infobox, since
+# they're invitational sides - see below).
 TEAM_LOGO_PAGES: Dict[str, str] = {
-    "ENG": "England national rugby union team",
-    "FRA": "France national rugby union team",
-    "IRE": "Ireland national rugby union team",
-    "SCO": "Scotland national rugby union team",
-    "WAL": "Wales national rugby union team",
-    "ITA": "Italy national rugby union team",
-    "NZL": "New Zealand national rugby union team",
-    "AUS": "Australia national rugby union team",
-    "RSA": "South Africa national rugby union team",
-    "ARG": "Argentina national rugby union team",
-    "JPN": "Japan national rugby union team",
-    "FIJ": "Fiji national rugby union team",
-    "GEO": "Georgia national rugby union team",
-    "ROU": "Romania national rugby union team",
-    "ESP": "Spain national rugby union team",
-    "POR": "Portugal national rugby union team",
-    "SAM": "Samoa national rugby union team",
-    "TGA": "Tonga national rugby union team",
-    "USA": "United States national rugby union team",
-    "CAN": "Canada national rugby union team",
-    "URU": "Uruguay national rugby union team",
-    "CHI": "Chile national rugby union team",
-    "NAM": "Namibia national rugby union team",
-    "HKG": "Hong Kong national rugby union team",
-    "ZIM": "Zimbabwe national rugby union team",
+    e.code: e.wiki_page_title for e in UNION_REGISTRY
+    if e.wiki_page_title and e.has_logo_page
 }
 
 # A handful of historical nation names (pre-current naming/branding) that
@@ -76,6 +60,14 @@ HISTORICAL_NATION_ALIASES: Dict[str, str] = {
 _BADGE_FIELD_RE = re.compile(r"\|\s*Badge\s*=\s*([^\n|]+)")
 
 _BARBARIANS_FILE = "Barbarians.png"  # resolved directly via Commons, see fetch_team_logo("BAR")
+# Same direct-Commons-file approach as the Barbarians - both the Lions and
+# the Pacific Islanders use a different infobox template
+# (`{{Infobox rugby team}}`'s `image=` field) than a national team's own
+# `{{Infobox national rugby team}}`'s `Badge=` field, so these are pinned
+# directly rather than parsed from the page (confirmed live - see
+# `invitational_squads.py`'s own docstrings for the exact pages checked).
+_LIONS_FILE = "British & Irish Lions logo (2023).svg"
+_PACIFIC_ISLANDERS_FILE = "pacificislanderrugbylogo.JPG"
 
 
 def _clean_filename(raw: str) -> str:
@@ -89,6 +81,10 @@ def _clean_filename(raw: str) -> str:
 def _extract_badge_filename(nation_code: str) -> Optional[str]:
     if nation_code == "BAR":
         return _BARBARIANS_FILE
+    if nation_code == "LIO":
+        return _LIONS_FILE
+    if nation_code == "PAC":
+        return _PACIFIC_ISLANDERS_FILE
     title = TEAM_LOGO_PAGES.get(nation_code)
     if not title:
         return None
@@ -101,10 +97,25 @@ def _extract_badge_filename(nation_code: str) -> Optional[str]:
     return _clean_filename(m.group(1))
 
 
+#: `upload.wikimedia.org` (the raw image CDN, as opposed to the `api.php`
+#: endpoints) was confirmed live to return a hard 429 specifically for the
+#: plain `USER_AGENT` string every other fetch in this project uses
+#: unmodified (even after waiting and retrying) - it wants something that
+#: looks more like a normal browser/compliant client. This is used ONLY for
+#: the raw image-byte download below, not for any `api.php`/wikitext call
+#: (those keep using the shared `USER_AGENT` unchanged, since they were
+#: never the problem).
+_IMAGE_DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (compatible; what-if-rugby-edition/0.1; "
+    "+https://github.com/example/what-if-rugby-edition)"
+)
+
+
 def _request_with_backoff(url: str, as_json: bool):
     """Same 429-aware retry convention as `wikipedia_squad.fetch_wikitext` -
     this module hits the same API, so it's just as rate-limit-prone."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    agent = USER_AGENT if as_json else _IMAGE_DOWNLOAD_USER_AGENT
+    req = urllib.request.Request(url, headers={"User-Agent": agent})
     for attempt in range(5):
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -127,6 +138,28 @@ def _get_json(url: str) -> Optional[dict]:
 
 def _get_bytes(url: str) -> Optional[bytes]:
     return _request_with_backoff(url, as_json=False)
+
+
+def _ensure_png(content: bytes) -> bytes:
+    """MediaWiki's `iiurlwidth` thumbnail API only ever RESIZES a raster
+    image - it never changes format, so a source file that's already a
+    JPEG (confirmed live for the Pacific Islanders' crest, a `.JPG` upload,
+    unlike every other team's SVG badge) comes back as JPEG bytes even
+    though this cache always saves to a `<code>.png` path. Re-encodes to a
+    real PNG here (via Pillow, already a project dependency - see
+    `favicon.py`) so the on-disk file's bytes actually match its
+    extension; a no-op (bytes already real PNG, e.g. a rasterized SVG)
+    just gets handed back unchanged."""
+    if content[:8] == b"\x89PNG\r\n\x1a\n":
+        return content
+    from io import BytesIO
+
+    from PIL import Image
+
+    with Image.open(BytesIO(content)) as img:
+        out = BytesIO()
+        img.convert("RGBA").save(out, format="PNG")
+        return out.getvalue()
 
 
 def _fetch_thumbnail_png(filename: str, width: int = 240) -> Optional[bytes]:
@@ -160,7 +193,7 @@ def _fetch_thumbnail_png(filename: str, width: int = 240) -> Optional[bytes]:
             try:
                 content = _get_bytes(url)
                 if content:
-                    return content
+                    return _ensure_png(content)
             except Exception:
                 continue
     return None
@@ -193,7 +226,7 @@ def fetch_all_logos() -> Dict[str, bool]:
     hits Wikipedia live on a page load; `/api/logos` only reports what's
     already cached. Safe to re-run - cached files are skipped."""
     results = {}
-    for code in list(TEAM_LOGO_PAGES.keys()) + ["BAR"]:
+    for code in list(TEAM_LOGO_PAGES.keys()) + ["BAR", "LIO", "PAC"]:
         path = get_logo_path(code)
         results[code] = bool(path)
     return results
@@ -203,7 +236,7 @@ def resolve_logo_code(nation_name_or_code: str) -> Optional[str]:
     """Best-effort: given either a union code (already correct) or a real
     nation display name (as historical squads use, e.g. "South Africa",
     "Western Samoa"), returns the code to use for a logo lookup."""
-    if nation_name_or_code in TEAM_LOGO_PAGES or nation_name_or_code in ("BAR",):
+    if nation_name_or_code in TEAM_LOGO_PAGES or nation_name_or_code in ("BAR", "LIO", "PAC"):
         return nation_name_or_code
     aliased = HISTORICAL_NATION_ALIASES.get(nation_name_or_code, nation_name_or_code)
     from .pool_builder import NATION_TO_CODE

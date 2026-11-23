@@ -87,6 +87,17 @@ def test_barbarians_pool_is_manual_and_populated():
     assert all(p.era == "'26" for p in pool)
 
 
+def test_barbarians_pool_covers_every_position():
+    # A real matchday-23 squad must have at least one real option per
+    # position, or a lineup can't actually be built/validated.
+    pool = barbarians_pool()
+    covered = {p.natural_position for p in pool}
+    missing = [pos for pos in Position if pos not in covered]
+    assert not missing, f"Barbarians pool is missing: {missing}"
+    names = [p.name for p in pool]
+    assert len(names) == len(set(names))
+
+
 def test_position_mapping_known_values():
     assert map_raw_position("number_eight") == Position.NUMBER_8
     assert map_raw_position("openside_flanker") == Position.OPENSIDE_FLANKER

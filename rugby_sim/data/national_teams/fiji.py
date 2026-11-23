@@ -15,7 +15,9 @@ from typing import List
 from ...models.attributes import Attributes
 from ...models.player import Player
 from ...models.position import Position
-from ..sources.pool_builder import DEFAULT_SEASON, build_union_pool, build_union_pool_2026
+from ._union_pool import lazy_pool_with_manual_fallback
+
+CODE = "FIJ"
 
 _MANUAL_POOL: List[Player] = [
     Player("Semi Radradra", "Fiji", Position.OUTSIDE_CENTRE,
@@ -42,10 +44,4 @@ _MANUAL_POOL: List[Player] = [
 ]
 
 
-def get_pool(season: str = DEFAULT_SEASON) -> List[Player]:
-    pool = build_union_pool_2026("FIJ") if season == "2026" else build_union_pool("FIJ", season=season)
-    if pool:
-        return pool
-    if season == DEFAULT_SEASON:
-        return list(_MANUAL_POOL)
-    return []
+get_pool = lazy_pool_with_manual_fallback("FIJ", _MANUAL_POOL)

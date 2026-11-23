@@ -36,7 +36,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from .data.legends import get_all_legends
 from .data.national_teams import POOLS
-from .data.sources.pool_builder import ALL_TEAM_IDS
+from .data.sources.pool_builder import NATION_DISPLAY, NATION_TO_CODE
 from .engine import MatchEngine
 from .models import Lineup, Player, Position, Team
 from .tournament import CustomTournament, Tournament, list_tournaments
@@ -49,11 +49,12 @@ HISTORICAL_CODE = "HIST"
 
 # code -> real nation name (e.g. "ENG" -> "England"), used to suggest/default
 # a code when a real fixture's team name already tells us which union it is.
-NATION_DISPLAY = {code: nation for code, (_, _, nation) in ALL_TEAM_IDS.items()}
-NATION_DISPLAY["BAR"] = "Barbarians"
-NATION_DISPLAY["HKG"] = "Hong Kong"
-NATION_DISPLAY["ZIM"] = "Zimbabwe"
-CODE_BY_NATION_NAME = {v: k for k, v in NATION_DISPLAY.items()}
+# `pool_builder.NATION_DISPLAY` is already a superset of what this module
+# used to rebuild by hand (it also covers HKG/ZIM via `WIKI_ONLY_NATIONS`
+# and BAR/LIO/PAC directly) - importing it instead of duplicating it here
+# avoids the two copies drifting (the old local copy was already missing
+# LIO/PAC before this fix).
+CODE_BY_NATION_NAME = NATION_TO_CODE
 
 
 def _prompt(msg: str, default: Optional[str] = None) -> str:

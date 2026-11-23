@@ -2,4 +2,6 @@
 
 from ._union_pool import lazy_pool_2026_via_wikipedia
 
+CODE = "GEO"
+
 get_pool = lazy_pool_2026_via_wikipedia("GEO")

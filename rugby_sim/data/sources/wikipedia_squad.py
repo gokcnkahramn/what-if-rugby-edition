@@ -48,6 +48,7 @@ from .attribute_mapping import (
     scale_to_union_strength,
 )
 from .rugby_data_client import CACHE_DIR, fetch_player_history, fetch_player_registry
+from .union_registry import UNION_REGISTRY
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "what-if-rugby-edition/0.1 (educational hobby project; no API key)"
@@ -303,6 +304,33 @@ def _archetype_attributes(position: Position) -> Attributes:
     return Attributes(**_ARCHETYPES.get(position, {})).clamp()
 
 
+def describe_attribute_source(source: str, *, historical: bool = False) -> Optional[str]:
+    """The shared `notes` fragment for the two source tiers whose wording
+    is identical (or near-identical) across every `build_*_pool` call site
+    - `legends_curated`/`ea_rugby08_rating` - since `_cross_reference_attributes`
+    is the one place that owns the `source` string vocabulary. Returns
+    `None` for any other source: the `wikipedia`/`historical_proxy`/
+    archetype branches each make a genuinely different claim depending on
+    whether this is a current-squad, historical-tournament, or invitational
+    pull, so those stay as each call site's own wording rather than being
+    forced through one shared string. `historical=True` drops the trailing
+    "not a scouted rating of our own" clause the current-squad (2026)
+    wording uses, matching the shorter phrasing historical pulls used
+    before this helper existed."""
+    if source == "legends_curated":
+        return (
+            "World Rugby Hall of Fame - hand-tuned curated rating from "
+            "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
+        )
+    if source == "ea_rugby08_rating":
+        base = (
+            "Real, published Rugby 08 (EA Sports) in-game player rating - "
+            "legends.EA_RATED_PLAYERS, converted via a documented heuristic"
+        )
+        return base + "." if historical else base + ", not a scouted rating of our own."
+    return None
+
+
 # Bounded nudge caps (deliberately small - see plan section 17: the explicit
 # goal is "prevent anyone from becoming overpowered," not to approximate a
 # real scouted rating from thin proxy signal).
@@ -356,32 +384,12 @@ def _proxy_attributes(position: Position, caps: Optional[int] = None,
 # code -> Wikipedia page title. Most unions follow "<Nation> national rugby
 # union team"; a few need an explicit override (checked live - some redirect
 # or use a different page structure and are better skipped than guessed at).
+# Derived from `union_registry.UNION_REGISTRY` (the single source of truth
+# for a union's Wikipedia squad-page title, among other things) - same
+# contents as the hand-written dict this replaced.
 WIKI_UNION_PAGES = {
-    "GEO": "Georgia national rugby union team",
-    "ROU": "Romania national rugby union team",
-    "ESP": "Spain national rugby union team",
-    "POR": "Portugal national rugby union team",
-    "SAM": "Samoa national rugby union team",
-    "TGA": "Tonga national rugby union team",
-    "URU": "Uruguay national rugby union team",
-    "CHI": "Chile national rugby union team",
-    "NAM": "Namibia national rugby union team",
-    "FIJ": "Fiji national rugby union team",
-    "USA": "United States national rugby union team",
-    "CAN": "Canada national rugby union team",
-    "HKG": "Hong Kong national rugby union team",
-    "ZIM": "Zimbabwe national rugby union team",
-    # Rugby Europe Championship coverage (see `pool_builder.py`'s
-    # `TIER2_WIKI_ONLY_TEAM_IDS`) - confirmed live 2026-11-16, standard
-    # `{{nat rs player}}` "Current squad" section on all three, though
-    # dated (Switzerland/Poland: 2021-22 Rugby Europe Trophy; Germany:
-    # November 2024).
-    "SUI": "Switzerland national rugby union team",
-    "GER": "Germany national rugby union team",
-    "POL": "Poland national rugby union team",
-    "NED": "Netherlands national rugby union team",
-    "BEL": "Belgium national rugby union team",
-    "RUS": "Russia national rugby union team",
+    e.code: e.wiki_page_title for e in UNION_REGISTRY
+    if e.wiki_page_title and e.needs_wiki_squad_fallback
 }
 
 
@@ -420,14 +428,7 @@ def build_wikipedia_pool(short_code: str, nation: str, season: str = "2026") -> 
             attrs, source = _proxy_attributes(position, entry.get("caps"))
         if source not in ("legends_curated", "ea_rugby08_rating"):
             attrs = scale_to_union_strength(attrs, strength)
-        note = (
-            "World Rugby Hall of Fame - hand-tuned curated rating from "
-            "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
-            if source == "legends_curated" else
-            "Real, published Rugby 08 (EA Sports) in-game player rating - "
-            "legends.EA_RATED_PLAYERS, converted via a documented heuristic, "
-            "not a scouted rating of our own."
-            if source == "ea_rugby08_rating" else
+        note = describe_attribute_source(source) or (
             "2026 Wikipedia squad listing; attributes from that person's real "
             "rugbydata career stats (cross-referenced by name)."
             if source == "wikipedia" else

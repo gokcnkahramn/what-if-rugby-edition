@@ -208,7 +208,7 @@ def api_logos():
 
     from .data.sources.team_logos import HISTORICAL_NATION_ALIASES, LOGO_DIR, TEAM_LOGO_PAGES
 
-    codes = list(TEAM_LOGO_PAGES.keys()) + ["BAR"]
+    codes = list(TEAM_LOGO_PAGES.keys()) + ["BAR", "LIO", "PAC"]
     available = {}
     for code in codes:
         path = os.path.join(LOGO_DIR, f"{code}.png")
@@ -629,10 +629,12 @@ def _team_form_json(rankings, results: List[MatchResult], universe: Optional[Set
     """One row per union this project tracks at all - every code in
     `pool_builder.ALL_TEAM_IDS`/`NATION_DISPLAY`, unioned with every name
     already in `rankings.rankings.WR_RANKING_SEED` (covers a few seeded
-    unions, e.g. Hong Kong, that aren't in `ALL_TEAM_IDS`), MINUS the
-    Barbarians (an invitational club side, never a real World-Rugby-ranked
-    national team - it has no business in a world rankings table at all,
-    not even at a 0-0-0/baseline row) - not just teams that happen to
+    unions, e.g. Hong Kong, that aren't in `ALL_TEAM_IDS`), MINUS every code
+    in `pool_builder.NON_RANKED_CODES` (the Barbarians, the British & Irish
+    Lions, the Pacific Islanders - real, draftable invitational/composite
+    sides, but none of them a real World-Rugby-ranked national team, so
+    none of them has any business in a world rankings table at all, not
+    even at a 0-0-0/baseline row) - not just teams that happen to
     appear in `results` (Ask 2: a team with zero matches played yet still
     shows up, at its seed/baseline rating and a 0-0-0 record, so the full
     world rankings are always visible). A World-Rugby-style ranking rating
@@ -653,19 +655,21 @@ def _team_form_json(rankings, results: List[MatchResult], universe: Optional[Set
     track it with this year -> no row, not a frozen one)."""
     if rankings is None:
         return []
-    from .data.sources.pool_builder import NATION_DISPLAY
+    from .data.sources.pool_builder import NATION_DISPLAY, NON_RANKED_CODES
     from .tournament.rankings import DEFAULT_RATING, WR_RANKING_SEED
 
     wins: Dict[str, int] = {}
     draws: Dict[str, int] = {}
     losses: Dict[str, int] = {}
 
+    non_ranked_names = {NATION_DISPLAY[code] for code in NON_RANKED_CODES if code in NATION_DISPLAY}
     if universe is None:
         universe = set(NATION_DISPLAY.values()) | set(WR_RANKING_SEED.keys())
-    universe = set(universe)
-    universe.discard("Barbarians")
+    universe = set(universe) - non_ranked_names
 
     def _touch(name: str) -> None:
+        if name in non_ranked_names:
+            return
         if name not in wins:
             wins[name] = draws[name] = losses[name] = 0
         universe.add(name)
@@ -674,6 +678,8 @@ def _team_form_json(rankings, results: List[MatchResult], universe: Optional[Set
         home, away = result.home.name, result.away.name
         _touch(home)
         _touch(away)
+        if home in non_ranked_names or away in non_ranked_names:
+            continue
         if result.score_home > result.score_away:
             wins[home] += 1
             losses[away] += 1

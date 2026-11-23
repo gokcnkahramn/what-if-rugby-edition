@@ -2,4 +2,6 @@
 
 from ._union_pool import lazy_pool
 
+CODE = "FRA"
+
 get_pool = lazy_pool("FRA")

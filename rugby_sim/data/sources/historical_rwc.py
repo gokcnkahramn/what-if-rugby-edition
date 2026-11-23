@@ -27,11 +27,17 @@ from typing import Dict, List
 
 from ...models.player import Player
 from .attribute_mapping import DEFAULT_UNION_STRENGTH, UNION_STRENGTH, scale_to_union_strength
+from .wiki_table_utils import (
+    clean_wiki_cell as _clean_wiki_cell,
+    split_wiki_row_cells as _split_wiki_row_cells,
+    strip_wiki_cell_attrs as _strip_wiki_cell_attrs,
+)
 from .wikipedia_squad import (
     POS_CODE_MAP,
     _archetype_attributes,
     _cross_reference_attributes,
     _proxy_attributes,
+    describe_attribute_source,
     fetch_wikitext,
 )
 
@@ -105,7 +111,7 @@ def parse_rwc_squads(wikitext: str) -> Dict[str, Dict[str, List[dict]]]:
         if "nat rs player" not in line:
             continue
 
-        pos_m = re.search(r"pos=(\w+)", line)
+        pos_m = re.search(r"pos=\s*(\w+)", line)
         name_m = re.search(r"name=\{\{sortname\|([^|}]+)\|([^|}]+)", line)
         caps_m = re.search(r"\|caps=(\d+)", line)
         if not (pos_m and name_m):
@@ -133,51 +139,6 @@ def fetch_rwc_statistics_wikitext(year: int):
     return fetch_wikitext(rwc_statistics_page_title(year))
 
 
-def _clean_wiki_cell(text: str) -> str:
-    """Strips the common real wikitext markup found inside a table cell
-    (refs, `{{template|params}}`, `[[wikilink|display]]`, bold/italic) down
-    to plain display text - e.g. `{{Ru|FRA}}` -> `FRA`, `[[Thierry
-    Lacroix]]` -> `Thierry Lacroix`, `'''112'''` -> `112`."""
-    text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.S)
-    text = re.sub(r"<ref[^>]*/?>", "", text)
-    # {{tooltip|Conv|Conversions}} / {{Ru|FRA}} -> last "|"-separated param;
-    # {{shy}} (soft hyphen, no params) -> drop entirely.
-    text = re.sub(r"\{\{[^{}]*\|([^{}]*)\}\}", r"\1", text)
-    text = re.sub(r"\{\{[^{}]*\}\}", "", text)
-    text = re.sub(r"\[\[[^\]|]*\|([^\]]*)\]\]", r"\1", text)
-    text = re.sub(r"\[\[([^\]]*)\]\]", r"\1", text)
-    text = text.replace("'''", "").replace("''", "")
-    return text.strip()
-
-
-def _strip_wiki_cell_attrs(cell: str) -> str:
-    """A real wikitext cell is often `align="left"|<content>` or
-    `width=40|<content>` (style attributes before the actual value,
-    separated by the first real `|`) - strips that prefix when present,
-    leaving the raw `<content>`."""
-    cell = cell.strip()
-    if "|" in cell and "[[" not in cell.split("|", 1)[0]:
-        prefix, rest = cell.split("|", 1)
-        if re.match(r'^[A-Za-z0-9"=:;#\-\s]*$', prefix):
-            return rest.strip()
-    return cell
-
-
-def _split_wiki_row_cells(row_lines: List[str]) -> List[str]:
-    """A real wikitext table row can span several raw lines (one cell per
-    line) AND/OR pack several cells onto one line with `||` (data cells)
-    or `!!` (header cells) separators - confirmed live on both the 1995
-    and 2003 RWC statistics pages, which even mix a `|`-prefixed cell and
-    a `!`-prefixed cell on the SAME line (e.g. `|5||! scope=row
-    style="background:#ccc"|'''7'''||0||0||0||35`, marking the sorted
-    column). This normalizes all of those real separator forms to one
-    delimiter before splitting, so the drift doesn't need a special case."""
-    joined = "\n".join(row_lines)
-    joined = re.sub(r"\n\s*[|!]", "\x01", joined)
-    joined = re.sub(r"\|\s*!|\|\||!!", "\x01", joined)
-    joined = joined.lstrip("|!").strip()
-    raw_cells = [c for c in joined.split("\x01")]
-    return [_clean_wiki_cell(_strip_wiki_cell_attrs(c)) for c in raw_cells if c.strip() != ""]
 
 
 def parse_rwc_tournament_stats(wikitext: str) -> Dict[str, dict]:
@@ -341,12 +302,7 @@ def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[P
             caps=entry.get("caps"),
             notes=(
                 f"{year} Rugby World Cup squad. "
-                + ("World Rugby Hall of Fame - hand-tuned curated rating from "
-                   "legends.CURATED_LEGENDS, not a Wikipedia/archetype estimate."
-                   if source == "legends_curated" else
-                   "Real, published Rugby 08 (EA Sports) in-game player rating - "
-                   "legends.EA_RATED_PLAYERS, converted via a documented heuristic."
-                   if source == "ea_rugby08_rating" else
+                + (describe_attribute_source(source, historical=True) or
                    "Attributes from real rugbydata career stats (cross-referenced by name) - "
                    "likely a career that extended into rugbydata's 2018+ coverage."
                    if source == "wikipedia" else

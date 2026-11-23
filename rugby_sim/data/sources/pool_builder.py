@@ -34,80 +34,28 @@ from .rugby_data_client import (
     fetch_player_history,
     fetch_team_matches,
 )
+from .union_registry import UNION_REGISTRY
 
 DEFAULT_SEASON = "2026"
 
-# Tier 1 union -> (dataset team_id, dataset team-name, display nation name).
-# Team names/ids resolved by scanning rugbydata's 2026 fixture list.
+# The 4 dicts below are now derived from `union_registry.UNION_REGISTRY`
+# (the single source of truth for which codes exist, their dataset
+# team_id/raw team-name, display nation, and tier) - see that module's
+# docstring for the full rationale per union/tier, including the Rugby
+# Europe Championship wiki-only group and the Usa/USA spelling note. Same
+# names/shapes/contents as before this was consolidated - every external
+# importer of these 4 dicts is unaffected.
 TIER1_TEAM_IDS = {
-    "ENG": ("f60f757d", "England", "England"),
-    "FRA": ("67d88578", "France", "France"),
-    "IRE": ("165b36e5", "Ireland", "Ireland"),
-    "SCO": ("4409215c", "Scotland", "Scotland"),
-    "WAL": ("094dae60", "Wales", "Wales"),
-    "ITA": ("d0cffe5e", "Italy", "Italy"),
-    "NZL": ("d75e45cc", "New Zealand", "New Zealand"),
-    "AUS": ("b904fef9", "Australia", "Australia"),
-    "RSA": ("9b93d911", "South Africa", "South Africa"),
-    "ARG": ("11392c0c", "Argentina", "Argentina"),
-    "JPN": ("f97333f3", "Japan", "Japan"),
-    "FIJ": ("3a1983b3", "Fiji", "Fiji"),
+    e.code: (e.dataset_team_id, e.dataset_team_name, e.nation)
+    for e in UNION_REGISTRY if e.tier == "tier1"
 }
-
-# Tier 2 unions - relevant for the 2027 Rugby World Cup pools. Rugby Europe
-# sides (GEO/ROU/ESP/POR) have 2026 rows already; the Pacific/Americas sides
-# don't yet (their most recent recorded internationals are 2024-2025), so
-# they rely on the latest-available-season fallback in `build_union_pool`.
 TIER2_TEAM_IDS = {
-    "GEO": ("9b13901b", "Georgia", "Georgia"),
-    "ROU": ("931e1c23", "Romania", "Romania"),
-    "ESP": ("219a6262", "Spain", "Spain"),
-    "POR": ("5149996e", "Portugal", "Portugal"),
-    "SAM": ("23778ceb", "Samoa", "Samoa"),
-    "TGA": ("be110f80", "Tonga", "Tonga"),
-    "USA": ("5865faf2", "Usa", "USA"),  # dataset's own team-name spelling is "Usa"
-    "CAN": ("1039f7c4", "Canada", "Canada"),
-    "URU": ("95ba991c", "Uruguay", "Uruguay"),
-    "CHI": ("53ea6ee8", "Chile", "Chile"),
-    "NAM": ("03b35a84", "Namibia", "Namibia"),
+    e.code: (e.dataset_team_id, e.dataset_team_name, e.nation)
+    for e in UNION_REGISTRY if e.tier == "tier2"
 }
-
-# Rugby Europe Championship coverage (added to unblock that competition for
-# Georgia/Romania/Spain/Portugal - see `real_fixtures.py`'s
-# "rugby_europe_championship" entry): Switzerland/Germany/Poland have NO
-# usable rugbydata player-level data (`fetch_team_matches` has their match
-# logs, but every match's `players` id list is empty - confirmed live across
-# 2022-2026 - so `_collect_raw_entries`'s box-score aggregation would always
-# return 0 players). Re-checked live on 2026-11-16 (a prior pass wrongly
-# concluded these three had no scrapeable Wikipedia squad either): all three
-# DO have a standard `==Current squad==` / `{{nat rs player|...}}` section
-# on their " national rugby union team" page - same template
-# `wikipedia_squad.py` already parses for Georgia/Romania/Spain/Portugal/etc.
-# (Poland's/Switzerland's squad listing is dated to the 2021-22 Rugby Europe
-# Trophy season - the most recent one Wikipedia editors have filled in for
-# those two - Germany's to a November 2024 friendly; still real, named,
-# sourced squads, not invented rosters.) So these get a `team_id=None`
-# placeholder here (no rugbydata roster pull possible) paired with a real
-# `WIKI_UNION_PAGES` entry each - `build_union_pool` below skips straight to
-# `build_wikipedia_pool` for a `team_id is None` union, same mechanism
-# Hong Kong/Zimbabwe already use via `WIKI_ONLY_NATIONS`, just folded into
-# `ALL_TEAM_IDS` here (unlike HKG/ZIM) so every other part of this project
-# that resolves a union by walking `ALL_TEAM_IDS` (season blocks, squad
-# lookups, fixture name canonicalization) picks these three up automatically.
 TIER2_WIKI_ONLY_TEAM_IDS = {
-    "SUI": (None, "Switzerland", "Switzerland"),
-    "GER": (None, "Germany", "Germany"),
-    "POL": (None, "Poland", "Poland"),
-    # Rugby Europe Championship's other 3 unions without rugbydata
-    # player-level caps. Netherlands/Belgium DO appear as team names in
-    # rugbydata's fixture index (Russia doesn't, even at match level) but
-    # none of the three has a resolvable per-player box score any more
-    # than Switzerland/Germany/Poland do, so they get the identical
-    # wiki-only treatment - also confirmed live 2026-11-16 to have a
-    # standard, parseable `{{nat rs player}}` squad section.
-    "NED": (None, "Netherlands", "Netherlands"),
-    "BEL": (None, "Belgium", "Belgium"),
-    "RUS": (None, "Russia", "Russia"),
+    e.code: (e.dataset_team_id, e.dataset_team_name, e.nation)
+    for e in UNION_REGISTRY if e.tier == "wiki_only"
 }
 
 ALL_TEAM_IDS = {**TIER1_TEAM_IDS, **TIER2_TEAM_IDS, **TIER2_WIKI_ONLY_TEAM_IDS}
@@ -117,8 +65,7 @@ ALL_TEAM_IDS = {**TIER1_TEAM_IDS, **TIER2_TEAM_IDS, **TIER2_WIKI_ONLY_TEAM_IDS}
 # only, since there's no team-level box score to pull from; these are
 # Wikipedia-only (see `build_union_pool_2026`'s fallback below).
 WIKI_ONLY_NATIONS = {
-    "HKG": "Hong Kong",
-    "ZIM": "Zimbabwe",
+    e.code: e.nation for e in UNION_REGISTRY if e.tier == "wiki_only_nation"
 }
 
 
@@ -130,7 +77,21 @@ WIKI_ONLY_NATIONS = {
 NATION_DISPLAY = {code: nation for code, (_, _, nation) in ALL_TEAM_IDS.items()}
 NATION_DISPLAY.update(WIKI_ONLY_NATIONS)
 NATION_DISPLAY["BAR"] = "Barbarians"
+#: British & Irish Lions and the Pacific Islanders - the other two real
+#: invitational/composite sides this project can draft from (see
+#: `national_teams/lions.py`/`pacific_islanders.py`) - same "not a World
+#: Rugby union" footing as the Barbarians, so they get the same treatment:
+#: listed here for display/lookup, but deliberately excluded from the
+#: world rankings table (see `webapp._team_form_json`) since none of the
+#: three is a real ranked national team.
+NATION_DISPLAY["LIO"] = "British & Irish Lions"
+NATION_DISPLAY["PAC"] = "Pacific Islanders"
 NATION_TO_CODE = {nation: code for code, nation in NATION_DISPLAY.items()}
+
+#: Union/invitational-side codes that are NOT real World-Rugby-ranked
+#: national teams - excluded from the world rankings ("Team form") table
+#: wherever that universe is built (see `webapp._team_form_json`).
+NON_RANKED_CODES = {"BAR", "LIO", "PAC"}
 
 
 def _era_suffix(season: str) -> str:

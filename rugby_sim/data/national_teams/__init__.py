@@ -1,6 +1,7 @@
 """Registry of international player pools: Tier 1 + Tier 2 unions (via the
-rugbydata pipeline) plus the Barbarians (manual, since they're not a union
-and aren't in that dataset at all).
+rugbydata pipeline) plus invitational/composite sides (the Barbarians, the
+British & Irish Lions, the Pacific Islanders - manual or Wikipedia-only,
+since none of them is a World Rugby union, so none is in that dataset).
 
 Tier 2 unions are here because they're part of the 2027 Rugby World Cup
 picture - some (Georgia, Romania, Spain, Portugal) have 2026 rows already;
@@ -14,72 +15,34 @@ triggers (and disk-caches) the data pull the first time. Building an actual
 starting XV from a pool is still a manual step (see `rugby_sim/cli.py`):
 drafting the lineup is the point of the project, not something this
 registry should do for you.
+
+`POOLS` itself is built by auto-discovery, not a hand-maintained dict: every
+submodule in this package that exposes BOTH a module-level `CODE: str`
+(its union/pool short code) and a `get_pool` callable is picked up
+automatically. Adding a new union/pool therefore needs only a new file in
+this package - no edit here - as long as that file sets `CODE` to its
+intended key. A submodule name starting with `_` (today, only
+`_union_pool.py`, the shared lazy-loading-helper module) is skipped, since
+it's a private helper, not a per-union module.
 """
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from typing import Callable, Dict, List
 
-from . import (
-    argentina,
-    australia,
-    barbarians,
-    canada,
-    chile,
-    england,
-    fiji,
-    france,
-    georgia,
-    hongkong,
-    ireland,
-    italy,
-    japan,
-    namibia,
-    new_zealand,
-    portugal,
-    romania,
-    samoa,
-    scotland,
-    south_africa,
-    spain,
-    tonga,
-    uruguay,
-    usa,
-    wales,
-    zimbabwe,
-)
 from ...models.player import Player
 
-POOLS: Dict[str, Callable[[], List[Player]]] = {
-    # Tier 1
-    "ENG": england.get_pool,
-    "FRA": france.get_pool,
-    "IRE": ireland.get_pool,
-    "SCO": scotland.get_pool,
-    "WAL": wales.get_pool,
-    "ITA": italy.get_pool,
-    "NZL": new_zealand.get_pool,
-    "AUS": australia.get_pool,
-    "RSA": south_africa.get_pool,
-    "ARG": argentina.get_pool,
-    "JPN": japan.get_pool,
-    "FIJ": fiji.get_pool,
-    # Tier 2 (2027 Rugby World Cup picture)
-    "GEO": georgia.get_pool,
-    "ROU": romania.get_pool,
-    "ESP": spain.get_pool,
-    "POR": portugal.get_pool,
-    "SAM": samoa.get_pool,
-    "TGA": tonga.get_pool,
-    "USA": usa.get_pool,
-    "CAN": canada.get_pool,
-    "URU": uruguay.get_pool,
-    "CHI": chile.get_pool,
-    "NAM": namibia.get_pool,
-    "HKG": hongkong.get_pool,
-    "ZIM": zimbabwe.get_pool,
-    # Invitational
-    "BAR": barbarians.get_pool,
-}
+POOLS: Dict[str, Callable[[], List[Player]]] = {}
+
+for _mod_info in pkgutil.iter_modules(__path__):
+    if _mod_info.name.startswith("_"):
+        continue
+    _module = importlib.import_module(f".{_mod_info.name}", __name__)
+    _code = getattr(_module, "CODE", None)
+    _get_pool = getattr(_module, "get_pool", None)
+    if _code and _get_pool:
+        POOLS[_code] = _get_pool
 
 __all__ = ["POOLS"]
