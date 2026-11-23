@@ -227,3 +227,34 @@ def test_team_form_json_lists_every_known_union_not_just_played_ones():
     ratings = [row["rating"] for row in team_form]
     assert ratings == sorted(ratings, reverse=True)
     assert len(team_form) > 20
+
+
+def test_team_form_json_excludes_barbarians():
+    # Barbarians is an invitational club side, never a real World-Rugby-
+    # ranked national team - it should never appear in a world rankings
+    # table at all, default universe or not.
+    from rugby_sim.tournament.rankings import TeamRankingTracker
+
+    rankings = TeamRankingTracker()
+    team_form = webapp._team_form_json(rankings, [])
+    assert "Barbarians" not in {row["team"] for row in team_form}
+
+    # Even if a Barbarians match was somehow recorded, it still shouldn't
+    # show up as a tracked union in the output.
+    rankings.record_result("Barbarians", "New Zealand", 20, 30)
+    team_form = webapp._team_form_json(rankings, [])
+    assert "Barbarians" not in {row["team"] for row in team_form}
+
+
+def test_team_form_json_universe_param_restricts_to_given_teams():
+    # Season mode (Ask 2): a union with no real tournament block this
+    # project can source for that particular year shouldn't sit at a
+    # permanently-frozen baseline rating forever - it should simply not be
+    # listed, by passing a restricted `universe`.
+    from rugby_sim.tournament.rankings import TeamRankingTracker
+
+    rankings = TeamRankingTracker()
+    rankings.record_result("Ireland", "France", 24, 20)
+    team_form = webapp._team_form_json(rankings, [], universe={"Ireland", "France"})
+    teams = {row["team"] for row in team_form}
+    assert teams == {"Ireland", "France"}

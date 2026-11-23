@@ -20,7 +20,7 @@ from __future__ import annotations
 import random
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -625,22 +625,32 @@ def _card_report_json(results: List[MatchResult], availability=None) -> list:
     return out
 
 
-def _team_form_json(rankings, results: List[MatchResult]) -> list:
+def _team_form_json(rankings, results: List[MatchResult], universe: Optional[Set[str]] = None) -> list:
     """One row per union this project tracks at all - every code in
     `pool_builder.ALL_TEAM_IDS`/`NATION_DISPLAY`, unioned with every name
     already in `rankings.rankings.WR_RANKING_SEED` (covers a few seeded
-    unions, e.g. Hong Kong, that aren't in `ALL_TEAM_IDS`) - not just teams
-    that happen to appear in `results` (Ask 2: a team with zero matches
-    played yet still shows up, at its seed/baseline rating and a 0-0-0
-    record, so the full world rankings are always visible). A World-Rugby-
-    style ranking rating (see `tournament/rankings.py`) plus the W/D/L
-    record `results` gives each team that did play. `rankings`, if given
-    (the `Tournament`/`CustomTournament`/`SeasonSession`'s own
+    unions, e.g. Hong Kong, that aren't in `ALL_TEAM_IDS`), MINUS the
+    Barbarians (an invitational club side, never a real World-Rugby-ranked
+    national team - it has no business in a world rankings table at all,
+    not even at a 0-0-0/baseline row) - not just teams that happen to
+    appear in `results` (Ask 2: a team with zero matches played yet still
+    shows up, at its seed/baseline rating and a 0-0-0 record, so the full
+    world rankings are always visible). A World-Rugby-style ranking rating
+    (see `tournament/rankings.py`) plus the W/D/L record `results` gives
+    each team that did play. `rankings`, if given (the
+    `Tournament`/`CustomTournament`/`SeasonSession`'s own
     `TeamRankingTracker`), supplies each team's live current rating and
     `baseline` (its `WR_RANKING_SEED`/default starting point) - `change`
     is the net movement since that baseline, i.e. across every match this
     tracker has ever recorded for that team (within this tournament, or -
-    for a shared Season-mode tracker - across the whole season so far)."""
+    for a shared Season-mode tracker - across the whole season so far).
+    `universe`, if given, REPLACES the default "every union this project
+    tracks" set - Season mode passes in just the unions appearing in that
+    season's own chained blocks (see `_season_state_json`), so a union with
+    no real tournament this project can source for that particular year
+    simply isn't listed at all, instead of sitting there at an unmoving
+    baseline rating forever (the other half of Ask 2: no tournament to
+    track it with this year -> no row, not a frozen one)."""
     if rankings is None:
         return []
     from .data.sources.pool_builder import NATION_DISPLAY
@@ -650,7 +660,10 @@ def _team_form_json(rankings, results: List[MatchResult]) -> list:
     draws: Dict[str, int] = {}
     losses: Dict[str, int] = {}
 
-    universe = set(NATION_DISPLAY.values()) | set(WR_RANKING_SEED.keys())
+    if universe is None:
+        universe = set(NATION_DISPLAY.values()) | set(WR_RANKING_SEED.keys())
+    universe = set(universe)
+    universe.discard("Barbarians")
 
     def _touch(name: str) -> None:
         if name not in wins:
@@ -1559,7 +1572,8 @@ def _season_state_json(session_id: str, session: SeasonSession) -> dict:
     results_so_far = [_match_summary_json(r) for r in session.all_results]
     injury_report = _injury_report_json(session.all_results, availability=session.availability)
     card_report = _card_report_json(session.all_results, availability=session.availability)
-    team_form = _team_form_json(session.rankings, session.all_results)
+    season_universe = {name for block in session.blocks for name in block.team_names}
+    team_form = _team_form_json(session.rankings, session.all_results, universe=season_universe)
     base = {
         "session_id": session_id,
         "nation_code": session.nation_code, "year": session.year,
