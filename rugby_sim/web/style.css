@@ -157,6 +157,84 @@ select, input[type=text], input[type=number] {
 #scoreline { font-size: 1.4rem; margin: 10px 0; }
 #events, .events { max-height: 400px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 0.85rem; }
 #events div, .events div { padding: 2px 0; }
+
+/* Live match view: the 2D pitch diagram and the scrolling event log side
+   by side on a wide screen, so watching one never means losing sight of
+   the other (the reported problem: events scrolling past below the pitch
+   meant missing whichever one wasn't currently in view). `.live-pitch-col`
+   is `position: sticky` so on a narrow screen - where there's no room for
+   a side-by-side layout - it stays pinned near the top of the viewport
+   while the events log scrolls underneath it, instead of being pushed
+   off-screen by a growing event list. */
+.live-main-row { display: flex; gap: 12px; align-items: flex-start; }
+.live-pitch-col {
+  flex: 1 1 380px; min-width: 260px;
+  position: sticky; top: 8px; z-index: 5;
+  background: var(--bg); padding-bottom: 6px;
+}
+.live-events-col { flex: 1 1 280px; min-width: 220px; }
+.live-events-col .events { max-height: 60vh; }
+@media (max-width: 760px) {
+  .live-main-row { flex-direction: column; }
+  .live-pitch-col { width: 100%; }
+  .live-events-col { width: 100%; }
+  .live-events-col .events { max-height: 38vh; }
+}
+
+/* Simple "where is play happening" indicator (Phase 1 of a simple-to-
+   complex territory visualization - see MATCH_ENGINE_MODEL.md item 3):
+   three plain segments, one highlighted via .active. Deliberately not an
+   SVG/canvas pitch - just a coarse, honest match to the engine's own
+   3-zone model. */
+.zone-bar { display: flex; gap: 4px; margin: 10px 0; }
+.zone-segment {
+  flex: 1; text-align: center; padding: 6px 4px; font-size: 0.75rem;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--muted); transition: background 0.3s, color 0.3s;
+}
+.zone-segment.active { background: var(--accent2); color: var(--text); border-color: var(--accent); }
+
+/* Phase 2 of the territory visualization - section 24: all 30 players
+   rendered on a real pitch diagram, positions DERIVED from zone/side (a
+   documented heuristic formation, not a simulated/tracked position - see
+   `computePlayerPositions` in app.js). */
+.pitch-svg {
+  display: block; width: 100%; max-height: 70vh;
+  aspect-ratio: 3 / 2; margin: 10px auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+}
+/* Narrow screens keep the pitch from dominating the whole viewport height
+   (a phone's own aspect ratio makes a full-width 3:2 pitch quite tall
+   relative to the screen) - desktop/tablet gets the full-width diagram
+   the user asked for, phones get a gentler cap. */
+@media (max-width: 480px) {
+  .pitch-svg { max-height: 50vh; }
+}
+/* Two separate per-team average-position panels (side by side on a wide
+   screen, stacked on a narrow one) instead of one shared pitch - avoids
+   one team's heatmap visually burying the other's when territory was
+   lopsided (see `averagePitchHtml`'s comment in app.js). */
+.pitch-panel-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.pitch-panel { flex: 1 1 320px; min-width: 260px; }
+.pitch-panel .pitch-svg { margin: 4px auto; }
+.pitch-field { fill: #1d3a26; }
+.pitch-line { stroke: rgba(232, 241, 236, 0.35); stroke-width: 0.4; vector-effect: non-scaling-stroke; }
+.pitch-halfway { stroke: rgba(232, 241, 236, 0.55); }
+.pitch-tryline { stroke: var(--accent); stroke-width: 0.6; }
+.pitch-dot circle { stroke: #0a0f0d; stroke-width: 0.3; }
+/* Deliberately high-contrast against the dark green pitch AND against
+   each other (not reusing --accent, which is close to the pitch's own
+   green and blended in - see user feedback) - a bright "home jersey"
+   white/gold vs. a clearly distinct "away jersey" blue. */
+.pitch-dot-home circle { fill: #f5d33c; }
+.pitch-dot-away circle { fill: #3c8df5; }
+.pitch-dot text {
+  font-size: 1.7px; text-anchor: middle; fill: #0a0f0d; font-weight: 700;
+  pointer-events: none;
+}
+.pitch-ball ellipse { fill: #ffffff; stroke: #0a0f0d; stroke-width: 0.35; }
+.pitch-ball-seam { stroke: #0a0f0d; stroke-width: 0.22; fill: none; }
+.pitch-heat { pointer-events: none; }
 .sort-toggle { font-size: 0.8rem; }
 .depth-chart { display: flex; flex-wrap: wrap; gap: 6px; }
 .depth-slot { min-width: 160px; text-align: left; cursor: default; }

@@ -297,10 +297,49 @@ to find out who actually advances.
 2. No explicit possession-chain or phase count within a drive - a drive is
    an opaque unit; the engine has no notion of "3 phases into this
    possession."
-3. No "attacking shape" or "defensive line" concept, no field position
+3. ~~No "attacking shape" or "defensive line" concept, no field position
    beyond the coarse territory-percentage tally (`_territory_ticks`), and no
    distance-to-try-line or distance-to-posts modeling at all (acknowledged
-   directly in `_score_penalty_chance`'s own comment).
+   directly in `_score_penalty_chance`'s own comment).~~ **Partially fixed
+   in this pass**: a 3-zone field-position model now exists (`Zone`:
+   `HOME_22`/`MIDFIELD`/`AWAY_22`, labelled relative to each team's own try
+   line - see `MatchEngine._advance_zone`/`_zone_relative_to`). Every drive
+   moves the ball one zone (advance/hold/retreat, reusing the existing
+   attack-vs-tackling edge, no new attribute reads), and a drive's try
+   probability is now gated by the resulting zone (`ZONE_TRY_MULTIPLIER`:
+   1.0 in the defending team's 22, 0.4 at midfield, 0.08 pinned in the
+   attacking team's own 22 - verified live: 117/158 simulated tries landed
+   in the "attacking_22" bucket vs. 4/158 in "own_22"). Each
+   `CommentaryEvent` now carries the zone it happened in. **Phase 2 (same
+   pass as the weather fix below)**: `_score_penalty_chance`'s
+   `go_for_posts`/`pen_prob` are now also zone-gated - pinned in their own
+   22, a side never realistically goes for posts regardless of kicker
+   skill (always kicks to the corner instead); in the defending team's 22
+   it almost always takes the points; midfield keeps the original
+   baseline. Verified live over 80 seeds: 230/230 own-22 penalties were
+   kicked to the corner, 0 attempted at goal. **Phase 3 (a further later
+   pass)**: `Zone` grew from 3 to 5 values (`HOME_TRYLINE`/`HOME_22`/
+   `MIDFIELD`/`AWAY_22`/`AWAY_TRYLINE`) - a finer-grained stepping stone
+   toward real spatial modeling, still discrete/coarse, not coordinates.
+   `ZONE_TRY_MULTIPLIER`/`ZONE_GO_FOR_POSTS_BASE`/`ZONE_PEN_PROB_ADJUST`
+   were re-tuned for the 2 new buckets (`attacking_tryline` highest of all,
+   `own_tryline` lowest of all); `_score_penalty_chance` now also
+   short-circuits `go_for_posts=False` at `own_tryline`, not just
+   `own_22`. A new, independent lateral dimension was added alongside it -
+   `Side` (`LEFT`/`MIDDLE`/`RIGHT`, see `_advance_side`, a plain per-drive
+   random walk, NOT yet weighted by either team's actual wing attributes -
+   a deliberately simple first cut) biases `_pick_try_scorer` toward the
+   matching wing and adds a small, honest commentary flavor ("...down the
+   left wing"). Verified live over 100-300 seeds: tries cluster even more
+   heavily near the attacking line than the 3-zone version already showed,
+   penalty kicks still never attempted from either deep zone, `Side`
+   genuinely visits all 3 states over a match, and a try scored while
+   `Side.LEFT` names the left wing as scorer meaningfully more often than
+   at `Side.MIDDLE`. Still coarse (5 zones + 3 lateral positions, not a
+   continuous distance-to-try-line/distance-to-posts/x-y model), and
+   there's still no "attacking shape"/"defensive line" concept - true
+   continuous player-position tracking remains a flagged, much later,
+   far larger ambition, not attempted here.
 4. Drop goals are now tracked in every reporting layer AND actually
    produced by the engine - see "Fixed in this pass" above. (This item is
    kept, renumbered-in-place, as a historical marker of what used to be a
@@ -320,11 +359,19 @@ to find out who actually advances.
 8. `_has_live_advantage` always returns `False` - a vestigial hook with no
    actual implementation; advantage law (letting a non-infringing team play
    on) is not modeled.
-9. Weather ("windy") only flattens the territory-roll home/away split
+9. ~~Weather ("windy") only flattens the territory-roll home/away split
    toward 50/50; "wet" is accepted by the constructor but has no documented
    effect found anywhere in `_resolve_drive`, `_pick_attacking_team`, or
    anywhere else searched in this file - if "wet weather" is meant to do
-   anything today, it isn't wired up in this module.
+   anything today, it isn't wired up in this module.~~ **Fixed in this
+   pass**: `weather == "wet"` now adds a small flat bump to `p_error`
+   (handling errors) and a small flat reduction to `p_try` inside
+   `_resolve_drive` - a slick ball making handling harder and tries harder
+   to finish is rugby's most obvious real weather effect. Verified live
+   over 60 seeds: average handling errors per match rose from 6.6 (dry) to
+   8.2 (wet), average tries fell from 1.8 to 1.3 - a modest, directionally
+   correct shift, not a dramatic one. "Windy"'s existing territory-roll
+   effect is unchanged.
 10. A single `rng.choices` scorer pick and a single conversion/penalty kick
     roll are each their own tiny attribute-weighted step layered after the
     per-drive outcome roll - real, but still single dice rolls, not

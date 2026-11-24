@@ -359,6 +359,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(95),  # real total: 90
         ],
+        venue="loftus_versfeld",
     ),
     ClassicMatch(
         id="rugby_championship_tb_1998", tournament="rugby_championship", year=1998,
@@ -373,6 +374,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(55),  # real total: 47
         ],
+        venue="kings_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_1999", tournament="rugby_championship", year=1999,
@@ -387,6 +389,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             team_tries_at_least("Australia", 3),
         ],
+        venue="stadium_australia",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2000", tournament="rugby_championship", year=2000,
@@ -405,6 +408,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             total_points_at_least(80),  # real total: 74
             team_tries_at_least("New Zealand", 6),
         ],
+        venue="stadium_australia",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2001", tournament="rugby_championship", year=2001,
@@ -419,6 +423,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(60),  # real total: 55
         ],
+        venue="stadium_australia",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2002", tournament="rugby_championship", year=2002,
@@ -433,6 +438,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             team_tries_at_least("New Zealand", 4),
         ],
+        venue="kings_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2003", tournament="rugby_championship", year=2003,
@@ -447,6 +453,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(45),  # real total: 38
         ],
+        venue="eden_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2004", tournament="rugby_championship", year=2004,
@@ -461,6 +468,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(48),  # real total: 42
         ],
+        venue="kings_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2005", tournament="rugby_championship", year=2005,
@@ -475,6 +483,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(65),  # real total: 58
         ],
+        venue="carisbrook",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2006", tournament="rugby_championship", year=2006,
@@ -489,6 +498,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             team_tries_at_least("New Zealand", 4),
         ],
+        venue="eden_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2007", tournament="rugby_championship", year=2007,
@@ -503,6 +513,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(42),  # real total: 38
         ],
+        venue="eden_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2008", tournament="rugby_championship", year=2008,
@@ -520,6 +531,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(62),  # real total: 58
         ],
+        venue="carisbrook",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2009", tournament="rugby_championship", year=2009,
@@ -534,6 +546,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(65),  # real total: 61
         ],
+        venue="waikato_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2010", tournament="rugby_championship", year=2010,
@@ -548,6 +561,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(56),  # real total: 51
         ],
+        venue="fnb_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2011", tournament="rugby_championship", year=2011,
@@ -562,6 +576,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(50),  # real total: 45
         ],
+        venue="suncorp_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2012", tournament="rugby_championship", year=2012,
@@ -576,6 +591,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             team_tries_at_least("New Zealand", 4),
         ],
+        venue="fnb_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2013", tournament="rugby_championship", year=2013,
@@ -590,6 +606,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(70),  # real total: 65
         ],
+        venue="ellis_park",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2014", tournament="rugby_championship", year=2014,
@@ -604,6 +621,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             team_tries_at_least("New Zealand", 4),
         ],
+        venue="estadio_ciudad_de_la_plata",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2015", tournament="rugby_championship", year=2015,
@@ -618,6 +636,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(50),  # real total: 46
         ],
+        venue="stadium_australia",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2016", tournament="rugby_championship", year=2016,
@@ -635,6 +654,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(45),  # real total: 40
         ],
+        venue="suncorp_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_tb_2017", tournament="rugby_championship", year=2017,
@@ -649,6 +669,7 @@ TIER_B_RUGBY_CHAMPIONSHIP_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 3),  # bonus: 3+ tries (margin bonus removed, duplicate win_margin tier bug)
             total_points_at_least(55),  # real total: 49
         ],
+        venue="newlands",
     ),
 ]
 

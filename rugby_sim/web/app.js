@@ -7,6 +7,7 @@ let POSITIONS = [];
 let UNIONS = [];
 let LOGOS = {};         // code -> "/logos/CODE.png"
 let NAME_TO_CODE = {};  // real nation name (incl. historical aliases) -> code
+let TEAM_COLORS = {};   // code -> real primary jersey hex color (data/sources/team_colors.py)
 
 // Shared status-message helpers: every mode (Friendly, Tournament, Draft,
 // Season, live match substitution/swap, etc.) writes progress/result text
@@ -26,6 +27,15 @@ function showError(el, message) {
 function logoCodeFor(codeOrName) {
   if (LOGOS[codeOrName]) return codeOrName;
   return NAME_TO_CODE[codeOrName] || null;
+}
+
+// Real primary jersey color for a team name/code (see
+// `data/sources/team_colors.py`) - `fallback` for anything not a real,
+// known union (a custom/mixed-pool/Legends team has no single real
+// jersey, so there's nothing honest to look up).
+function teamColorFor(codeOrName, fallback) {
+  const code = (TEAM_COLORS[codeOrName] && codeOrName) || NAME_TO_CODE[codeOrName];
+  return (code && TEAM_COLORS[code]) || fallback;
 }
 function logoImgHtml(codeOrName, size) {
   size = size || 20;
@@ -312,11 +322,26 @@ class TeamBuilder {
     this.selectedPosition = pos;
     this.renderPitch();
     const used = this.usedIds();
+    const currentId = this.slots[pos];
     // Exclude bench picks too - without this, a player already sent to the
     // bench could still be clicked into a starting slot, putting the same
-    // person in the squad twice (bench *and* starting XV).
+    // person in the squad twice (bench *and* starting XV). Also exclude by
+    // NAME, not just id: a Wikipedia/historical-sourced pool can contain
+    // the same real person twice under two different ids, one per "twin"
+    // position (see `wikipedia_squad.with_twin_position_duplicates` -
+    // e.g. a real winger with no recorded left/right split) - without
+    // this, nothing stopped drafting that one real person into two
+    // different starting slots at once, only ever caught too late, at
+    // Save time, by the server's own "named in multiple positions" check.
+    const usedNamesElsewhere = new Set(
+      this.pool
+        .filter(p => (used.has(p.id) || this.bench.has(p.id)) && p.id !== currentId)
+        .map(p => p.name)
+    );
     const available = this.pool.filter(p =>
-      (!used.has(p.id) && !this.bench.has(p.id)) || this.slots[pos] === p.id);
+      ((!used.has(p.id) && !this.bench.has(p.id)) || currentId === p.id) &&
+      !usedNamesElsewhere.has(p.name)
+    );
     const ranked = await api("/api/rank", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({player_ids: available.map(p => p.id), position: pos}),
@@ -358,9 +383,28 @@ class TeamBuilder {
       return;
     }
     const starterIds = new Set(Object.values(this.slots));
+    // Excludes by NAME too, not just id - a starter's own "twin position"
+    // duplicate (same real person, a different id/natural_position - see
+    // `wikipedia_squad.with_twin_position_duplicates`) must not be
+    // offerable for the bench, or the same real person could end up
+    // fielded in the starting XV AND on the bench at once.
+    const starterNames = new Set(
+      Object.values(this.slots).map(id => this.pool.find(p => p.id === id)?.name).filter(Boolean)
+    );
     this._benchSortDir = this._benchSortDir || "desc";
-    const benchCandidates = sortPlayersByRating(
-      this.pool.filter(p => !starterIds.has(p.id)), this._benchSortDir, "natural_fit");
+    const benchPool = sortPlayersByRating(
+      this.pool.filter(p => !starterIds.has(p.id) && !starterNames.has(p.name)), this._benchSortDir, "natural_fit");
+    // This list is built client-side (not routed through /api/rank), so it
+    // needs its own dedup: a real player's "twin position" duplicate (same
+    // name, different id/natural_position) must only ever show up once in
+    // the bench picker - keep the highest natural_fit copy per name.
+    const seenBenchNames = new Set();
+    const benchCandidates = [];
+    for (const p of benchPool) {
+      if (seenBenchNames.has(p.name)) continue;
+      seenBenchNames.add(p.name);
+      benchCandidates.push(p);
+    }
     box.innerHTML = `
       <div class="row">
         <label class="muted">Captain:
@@ -569,8 +613,9 @@ async function boot() {
     const logoData = await api("/api/logos");
     LOGOS = logoData.logos;
     NAME_TO_CODE = logoData.name_to_code;
+    TEAM_COLORS = logoData.colors || {};
   } catch (e) {
-    LOGOS = {}; NAME_TO_CODE = {}; // logos are a visual nicety, never block the app
+    LOGOS = {}; NAME_TO_CODE = {}; TEAM_COLORS = {}; // visual nicety, never blocks the app
   }
   setupBackgroundPhoto(); // fire-and-forget, a visual nicety, never blocks boot
   updateClassicMatchCount(); // fire-and-forget, a label nicety, never blocks boot
@@ -715,7 +760,15 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
     <h3>Live match - paused at ${state.minute}'</h3>
     <div id="scoreline">${state.scoreline}</div>
     ${playbackControlsHtml(playbackId, false)}
-    <div id="${playbackId}-events" class="events"></div>
+    <div class="live-main-row">
+      <div class="live-pitch-col">
+        ${zoneBarHtml(`${playbackId}-zonebar`)}
+        ${pitchSvgHtml(`${playbackId}-pitch`)}
+      </div>
+      <div class="live-events-col">
+        <div id="${playbackId}-events" class="events"></div>
+      </div>
+    </div>
     <div class="row">
       <div style="flex:1"><h4>${state.home.name}</h4>${liveLineupTable("home", state.home.lineup, state.home.bench, homeSubsAllowed)}</div>
       <div style="flex:1"><h4>${state.away.name}</h4>${liveLineupTable("away", state.away.lineup, state.away.bench, awaySubsAllowed)}</div>
@@ -733,7 +786,10 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   const scorelineEl = document.getElementById("scoreline");
   const reveal = startPacedReveal(playbackId, eventsEl, state.events, startAt, undefined, undefined, (h, a) => {
     if (scorelineEl) scorelineEl.textContent = `${state.home.name} ${h} - ${a} ${state.away.name}`;
-  }, state.home_advantage_for);
+  }, state.home_advantage_for, {
+    homeName: state.home.name, awayName: state.away.name,
+    home: state.home.lineup, away: state.away.lineup,
+  });
   wirePlaybackControls(playbackId, reveal);
   liveRevealProgress[boxKey].shown = state.events.length;
 
@@ -991,6 +1047,370 @@ function scoreAtCursor(events, cursor) {
   return {home: e.score_home, away: e.score_away};
 }
 
+// The zone (see `CommentaryEvent.zone` - "home_22"/"midfield"/"away_22")
+// AS OF the reveal cursor, same "most recently revealed event" convention
+// as `scoreAtCursor` - `null` before anything's been revealed yet.
+function zoneAtCursor(events, cursor) {
+  if (cursor <= 0 || !events.length) return null;
+  return events[Math.min(cursor, events.length) - 1].zone || null;
+}
+
+// A simple, non-SVG/canvas "where is play happening" indicator - three
+// plain segments (Home 22 / Midfield / Away 22), one highlighted via a CSS
+// class. Phase 1 of a planned simple-to-complex territory visualization
+// (see `MATCH_ENGINE_MODEL.md` item 3) - deliberately coarse, matching the
+// engine's own 3-zone model exactly, nothing fancier promised yet.
+function zoneBarHtml(id) {
+  return `<div class="zone-bar" id="${id}">
+    <div class="zone-segment" data-zone="home_tryline">Home line</div>
+    <div class="zone-segment" data-zone="home_22">Home 22</div>
+    <div class="zone-segment" data-zone="midfield">Midfield</div>
+    <div class="zone-segment" data-zone="away_22">Away 22</div>
+    <div class="zone-segment" data-zone="away_tryline">Away line</div>
+  </div>`;
+}
+
+// Looked up by a naming convention (`<events-el-id minus "-events"> +
+// "-zonebar"`) rather than threaded through as an extra parameter at every
+// `pacedEventReveal`/`startPacedReveal` call site - purely additive: a
+// caller that never rendered a zone-bar div simply finds nothing to
+// update and this is a silent no-op.
+function updateZoneBar(eventsEl, events, cursor) {
+  if (!eventsEl || !eventsEl.id) return;
+  const bar = document.getElementById(eventsEl.id.replace(/-events$/, "-zonebar"));
+  if (!bar) return;
+  const zone = zoneAtCursor(events, cursor);
+  bar.querySelectorAll(".zone-segment").forEach(seg => {
+    seg.classList.toggle("active", zone != null && seg.dataset.zone === zone);
+  });
+}
+
+// -- Pitch diagram (all 30 players, positions DERIVED from zone/side -----
+// not simulated - see MATCH_ENGINE_MODEL.md item 3/section 24 of the
+// project plan). Coordinate system: x in [0,150] (0 = home try line, 150 =
+// away try line, matching `Zone`'s own left-to-right order - a real rugby
+// pitch is roughly 100m x 70m, ~1.43:1, so a 150x100 viewBox is a close,
+// simple stand-in), y in [0,100] (0 = left touchline, 100 = right
+// touchline, matching `Side`). `preserveAspectRatio` is left at its
+// default ("xMidYMid meet") everywhere below - NOT "none" - so a circle
+// drawn in this coordinate space always renders as an actual circle
+// (letterboxed if the container's own aspect ratio doesn't exactly match,
+// never stretched into an oval).
+const ZONE_X = {home_tryline: 8, home_22: 33, midfield: 75, away_22: 117, away_tryline: 142};
+const SIDE_Y = {left: 25, middle: 50, right: 75};
+
+// A stylized "generic phase of play" formation, NOT a simulated/tracked
+// position - the same honesty convention `attribute_mapping.py`'s
+// heuristics already use elsewhere in this project. `dx` is always
+// relative to this team's OWN try line (negative = further back toward
+// it - applied via each team's fixed `xSign` in `computePlayerPositions`,
+// never flipped by who currently has the ball) and `dy` is relative to
+// the ball's current `Side` (0 = right on the ball's lateral position,
+// negative = toward the LEFT touchline, positive = toward the RIGHT
+// touchline).
+//
+// Grounded in real rugby union tactical shape (cross-checked against
+// rugbyslate.com's defending/attacking/backs-moves articles and
+// uprugbyacademy.com's 1-3-3-1 system guide, not invented - see this
+// project's plan notes for the specific pages and concepts checked):
+// attack and defense are two genuinely DIFFERENT shapes - not mirror
+// images of each other, and not the same table reused for both.
+//
+// ATTACK is a staggered pod shape (rugbyslate's "backs moves"/1-3-3-1
+// system): forwards in tight pockets close to the ball, half-backs/
+// centres/wings progressively deeper, fullback deepest of all (~10-14m
+// behind). The backline stays fairly narrow through the forwards/centres
+// (shape width is mostly carried by the wings, who swing in late) - this
+// is deliberate, not a bug: real attacking width research (Hudl's
+// Rugby Championship analysis) puts a team's actual attacking shape width
+// around 10-15m, carried by depth/pod positioning more than by every back
+// standing out wide.
+//
+// DEFENSE, per rugbyslate's own "drift defence"/"blitz defence" articles,
+// is the one that must be WIDE, not narrow: a real defensive line marks
+// the attack's own width player-for-player (a blitz line is "hard and
+// fast... negating the overlap" by meeting each attacker 1-on-1; a drift
+// line shifts the whole line outward to cover the ball once it's passed)
+// - if the defense stayed bunched near the ball the way an earlier version
+// of this table had it, a real team could simply pass to the edge and
+// beat an unmarked defender 1-on-1, exactly the failure mode reported
+// against this diagram. Fixed: DEFENSE's backline (fly-half through
+// outside centre) now spreads AT LEAST as wide as ATTACK's own backline
+// (matching the "cover the overlap" principle), while staying flat/shallow
+// in depth (within a few metres of the gain line - a real blitz/drift line
+// doesn't retreat, it's the fullback alone who drops back 8-12m to cover
+// kicks). Same depth ORDER in both tables (front row -> back row ->
+// half-backs -> centres -> wings -> fullback), genuinely different
+// magnitudes rather than a negated copy of one table - so averaging across
+// many attack/defense events still shows real depth variation instead of
+// cancelling toward a flat line (the original bug this diagram had).
+// (~1.9 diagram units per metre of real pitch length, ~1.4 per metre of
+// width - derived from this diagram's own `ZONE_X`/pitch-width scale.)
+const ATTACK_FORMATION = {
+  "Loosehead Prop": {dx: -1.5, dy: -4}, "Hooker": {dx: 0, dy: 0}, "Tighthead Prop": {dx: -1.5, dy: 4},
+  "Lock (4)": {dx: -5, dy: -3}, "Lock (5)": {dx: -5, dy: 3},
+  "Blindside Flanker": {dx: -3, dy: -6.5}, "Openside Flanker": {dx: -3, dy: 6.5}, "Number 8": {dx: -5.5, dy: 0},
+  "Scrum-half": {dx: -2, dy: 1.5},
+  "Fly-half": {dx: -9, dy: -3},
+  "Inside Centre": {dx: -11, dy: -6}, "Outside Centre": {dx: -13.5, dy: 8},
+  "Left Wing": {dx: -14, dy: -34, farDy: -40},
+  "Right Wing": {dx: -14, dy: 34, farDy: 40},
+  "Fullback": {dx: -23, dy: 0.5},
+};
+const DEFENSE_FORMATION = {
+  "Loosehead Prop": {dx: -1, dy: -4}, "Hooker": {dx: -0.5, dy: 0}, "Tighthead Prop": {dx: -1, dy: 4},
+  "Lock (4)": {dx: -2, dy: -3}, "Lock (5)": {dx: -2, dy: 3},
+  "Blindside Flanker": {dx: -3.5, dy: -6.5}, "Openside Flanker": {dx: -3.5, dy: 6.5}, "Number 8": {dx: -3, dy: 0},
+  "Scrum-half": {dx: -1.5, dy: 1.5},
+  "Fly-half": {dx: -3, dy: -6},
+  "Inside Centre": {dx: -4, dy: -11}, "Outside Centre": {dx: -5, dy: 16},
+  "Left Wing": {dx: -3, dy: -34, farDy: -40},
+  "Right Wing": {dx: -3, dy: 34, farDy: 40},
+  "Fullback": {dx: -19, dy: 0.5},
+};
+
+// One {name, position, x, y, isHome} per player (30 total) for a single
+// revealed event. `nearTeamName` (the event's own `team` field, used as a
+// stylized "which side effectively has it right now" approximation - see
+// the comment on `ATTACK_FORMATION`/`DEFENSE_FORMATION` above) picks which
+// of the two real, distinctly-shaped tables each side uses this frame -
+// `Side` only ever changes a wing's LATERAL position (width), never swaps
+// a team between the two depth tables on its own.
+function computePlayerPositions(zone, side, nearTeamName, homeName, awayName, homeLineup, awayLineup) {
+  const x0 = ZONE_X[zone] ?? 75;
+  const y0 = SIDE_Y[side] ?? 50;
+  const positions = [];
+  for (const [lineup, teamName, isHome] of [[homeLineup, homeName, true], [awayLineup, awayName, false]]) {
+    const isNear = teamName === nearTeamName;
+    const table = isNear ? ATTACK_FORMATION : DEFENSE_FORMATION;
+    // Home's own try line is at x=0 (HOME_TRYLINE), away's is at x=150
+    // (AWAY_TRYLINE) - fixed for the whole match, independent of who's
+    // attacking at any given moment.
+    const xSign = isHome ? 1 : -1;
+    for (const slot of lineup) {
+      const offsets = table[slot.position] || {dx: 0, dy: 0};
+      const dx = offsets.dx;
+      const dy = (offsets.farDy !== undefined && !isNear) ? offsets.farDy : offsets.dy;
+      positions.push({
+        name: slot.name, position: slot.position, isHome,
+        x: clamp(x0 + dx * xSign, 3, 147), y: clamp(y0 + dy, 2, 98),
+      });
+    }
+  }
+  return positions;
+}
+
+// Where the ball itself is, for this zone/side - just the anchor point
+// every player's offset above is built from, surfaced as its own marker
+// too (see `ballDotMarkup`).
+function ballPosition(zone, side) {
+  return {x: ZONE_X[zone] ?? 75, y: SIDE_Y[side] ?? 50};
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+// Position abbreviations for the small dot label - jersey-number-free,
+// just enough to tell positions apart at a glance on a small diagram.
+const POSITION_ABBREV = {
+  "Loosehead Prop": "LH", "Hooker": "HK", "Tighthead Prop": "TH",
+  "Lock (4)": "L4", "Lock (5)": "L5",
+  "Blindside Flanker": "BF", "Openside Flanker": "OF", "Number 8": "N8",
+  "Scrum-half": "SH", "Fly-half": "FH",
+  "Inside Centre": "IC", "Outside Centre": "OC",
+  "Left Wing": "LW", "Right Wing": "RW", "Fullback": "FB",
+};
+
+// The static field/lines, shared by every pitch diagram below - a 150x100
+// viewBox (see the coordinate-system comment above `ZONE_X`).
+function pitchFrameSvg() {
+  return `
+    <rect x="0" y="0" width="150" height="100" class="pitch-field"/>
+    <line x1="0" y1="0" x2="0" y2="100" class="pitch-line pitch-tryline"/>
+    <line x1="150" y1="0" x2="150" y2="100" class="pitch-line pitch-tryline"/>
+    <line x1="33" y1="0" x2="33" y2="100" class="pitch-line"/>
+    <line x1="117" y1="0" x2="117" y2="100" class="pitch-line"/>
+    <line x1="75" y1="0" x2="75" y2="100" class="pitch-line pitch-halfway"/>`;
+}
+
+// Plain luminance check (standard relative-luminance weights) to decide
+// whether a dot's position label should be dark or light text - works for
+// ANY real jersey color (some are very dark, e.g. New Zealand black; some
+// are very light, e.g. England white), not just the two fallback colors.
+function readableTextColor(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+  if (!m) return "#0a0f0d";
+  const [r, g, b] = m.slice(1).map(h => parseInt(h, 16));
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.55 ? "#0a0f0d" : "#f5f5f5";
+}
+
+// Markup for one player dot - colored by the REAL team's own jersey color
+// when it's a known real union (`colors.home`/`colors.away`, from
+// `data/sources/team_colors.py` via `/api/logos`), falling back to the
+// generic high-contrast home/away colors (style.css's `.pitch-dot-home`/
+// `-away`) for a custom/mixed-pool/Legends team that has no single real
+// jersey to look up - 2-letter position label, text color auto-picked for
+// readability against whatever the actual fill color turns out to be.
+function playerDotMarkup(p, colors) {
+  const color = p.isHome ? colors?.home : colors?.away;
+  const fillStyle = color ? ` style="fill:${color}"` : "";
+  const fallbackClass = color ? "" : (p.isHome ? " pitch-dot-home" : " pitch-dot-away");
+  return `
+    <g class="pitch-dot${fallbackClass}" transform="translate(${p.x},${p.y})">
+      <circle r="2.2"${fillStyle}/>
+      <text y="0.8" style="fill:${readableTextColor(color)}">${POSITION_ABBREV[p.position] || ""}</text>
+    </g>`;
+}
+
+// The ball itself - a small, neutral marker distinct from either team's
+// color, at the exact zone/side anchor point every player offset above is
+// built from.
+// A stylized rugby ball matching the classic white Gilbert look - white
+// body, bold black outline, and two curved seam lines bowing toward each
+// other from tip to tip (forming the lens/eye shape where they cross
+// mid-ball), not a single straight lace line like an American football.
+// Rounder/fatter proportions than a football too (roughly 1.6:1
+// length:width), not the elongated, pointy-tipped shape earlier versions
+// of this marker accidentally read as.
+function ballDotMarkup(ball) {
+  return `<g class="pitch-ball" transform="translate(${ball.x},${ball.y})">
+    <ellipse rx="1.5" ry="0.95"/>
+    <path d="M -1.4,0 Q 0,-0.55 1.4,0" class="pitch-ball-seam"/>
+    <path d="M -1.4,0 Q 0,0.55 1.4,0" class="pitch-ball-seam"/>
+  </g>`;
+}
+
+function pitchSvgHtml(id) {
+  return `<svg class="pitch-svg" id="${id}" viewBox="0 0 150 100">
+    ${pitchFrameSvg()}
+    <g id="${id}-dots"></g>
+  </svg>`;
+}
+
+// Averages each player's (and the ball's) `computePlayerPositions`/
+// `ballPosition` location across EVERY event in a finished match - a
+// simple mean of real, simulated-state-derived per-event positions, not a
+// separately invented "heatmap" model. Same honest limitation as
+// `webapp.py`'s `home_lineup`/`away_lineup` fields this reads: always the
+// STARTING XV, a player subbed off still counts for the whole match's
+// average (this report has never tracked per-player on-field minutes, so
+// this isn't a new gap).
+// Tracks each player's mean (x,y) AND how much they moved around
+// (`spreadX`/`spreadY`, a standard deviation over every revealed event) -
+// the spread is what lets `averagePitchHtml` draw a genuine "heatmap"
+// blob (bigger/softer for a player whose position varied a lot across the
+// match, tight for one who stayed put) instead of just a single frozen
+// dot that looks identical to the live view.
+function averagePlayerPositions(events, homeName, awayName, homeLineup, awayLineup) {
+  const sums = new Map(); // name -> {x, y, xx, yy, n, position, isHome}
+  let ballX = 0, ballY = 0, ballN = 0;
+  for (const e of events) {
+    if (!e.zone || !e.side) continue;
+    const ball = ballPosition(e.zone, e.side);
+    ballX += ball.x; ballY += ball.y; ballN += 1;
+    for (const p of computePlayerPositions(e.zone, e.side, e.team, homeName, awayName, homeLineup, awayLineup)) {
+      const entry = sums.get(p.name) || {x: 0, y: 0, xx: 0, yy: 0, n: 0, position: p.position, isHome: p.isHome};
+      entry.x += p.x; entry.y += p.y;
+      entry.xx += p.x * p.x; entry.yy += p.y * p.y;
+      entry.n += 1;
+      sums.set(p.name, entry);
+    }
+  }
+  const positions = [...sums.values()].map(e => {
+    const meanX = e.x / e.n, meanY = e.y / e.n;
+    const varX = Math.max(0, e.xx / e.n - meanX * meanX);
+    const varY = Math.max(0, e.yy / e.n - meanY * meanY);
+    return {
+      name: "", position: e.position, isHome: e.isHome, x: meanX, y: meanY,
+      spread: Math.sqrt((varX + varY) / 2),
+    };
+  });
+  const ball = ballN ? {x: ballX / ballN, y: ballY / ballN} : null;
+  return {positions, ball};
+}
+
+// A soft, radial "heat" blob under a player's dot - bigger/hazier for a
+// player whose position varied a lot across the match (high `spread`),
+// tight for one who barely moved - what actually makes this view read as
+// a heatmap rather than just a frozen single-frame snapshot like the live
+// pitch. `gradientId` points at one of the two shared team-colored
+// gradients `averagePitchHtml` defines once (an SVG radial gradient
+// scales to each shape's own bounding box by default, so one definition
+// per team color works for every player's differently-sized blob).
+function heatBlobMarkup(p, gradientId) {
+  const radius = clamp(3 + p.spread * 0.9, 4, 18);
+  return `<circle class="pitch-heat" cx="${p.x}" cy="${p.y}" r="${radius}" fill="url(#${gradientId})"/>`;
+}
+
+// One team's own full-pitch panel (heat blobs + dots + the shared mean
+// ball position). Split out from `averagePitchHtml` below so each team
+// gets its OWN pitch rather than both overlaid on one - see that
+// function's comment for why.
+function teamAveragePitchPanel(id, teamLabel, teamPositions, ball, color) {
+  const gradId = `${id}-heat`;
+  const colors = {home: color, away: color}; // playerDotMarkup only reads one side per call
+  const heatBlobs = teamPositions.map(p => heatBlobMarkup(p, gradId)).join("");
+  const dots = teamPositions.map(p => playerDotMarkup({...p, isHome: true}, colors)).join("");
+  return `<div class="pitch-panel">
+    <div class="muted">${teamLabel}</div>
+    <svg class="pitch-svg" id="${id}" viewBox="0 0 150 100">
+      <defs>
+        <radialGradient id="${gradId}">
+          <stop offset="0%" stop-color="${color || "#f5d33c"}" stop-opacity="0.85"/>
+          <stop offset="100%" stop-color="${color || "#f5d33c"}" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      ${pitchFrameSvg()}
+      <g>${heatBlobs}</g>
+      <g>${dots}${ball ? ballDotMarkup(ball) : ""}</g>
+    </svg>
+  </div>`;
+}
+
+// Two SEPARATE full-pitch panels, one per team, instead of both teams'
+// heat blobs overlaid on a single shared pitch. An earlier overlaid
+// version had a real, reported problem: when one team had much more
+// territory/ball time than the other, that team's blobs (bigger spread,
+// more events contributing) rendered with enough size/opacity to visually
+// bury the other team's smaller blobs wherever the two overlapped -
+// exactly the user's complaint ("bir taraf diğerine baskın geldiği için
+// bir tarafın ısı haritası gözükmüyor"). Checked how real sports match
+// reports handle this (web search, not assumed): no example of two teams'
+// average-position heatmaps overlaid on one shared pitch was found at
+// all - the two-separate-panels approach used here is the safe, standard
+// choice, and it also sidesteps the occlusion problem entirely rather
+// than trying to fix it with opacity/blend-mode tricks.
+function averagePitchHtml(id, events, homeName, awayName, homeLineup, awayLineup) {
+  if (!homeLineup || !awayLineup || !events || !events.length) return "";
+  const {positions, ball} = averagePlayerPositions(events, homeName, awayName, homeLineup, awayLineup);
+  if (!positions.length) return "";
+  const colors = {home: teamColorFor(homeName), away: teamColorFor(awayName)};
+  const homePositions = positions.filter(p => p.isHome);
+  const awayPositions = positions.filter(p => !p.isHome);
+  return `<h3>Average positions (heatmap - size shows how much each player moved around)</h3>
+    <div class="pitch-panel-row">
+      ${teamAveragePitchPanel(`${id}-home`, homeName, homePositions, ball, colors.home || "#f5d33c")}
+      ${teamAveragePitchPanel(`${id}-away`, awayName, awayPositions, ball, colors.away || "#3c8df5")}
+    </div>`;
+}
+
+function updatePitchSvg(eventsEl, events, cursor, lineups) {
+  if (!eventsEl || !eventsEl.id || !lineups) return;
+  const dotsGroup = document.getElementById(`${eventsEl.id.replace(/-events$/, "-pitch")}-dots`);
+  if (!dotsGroup) return;
+  if (cursor <= 0 || !events.length) return;
+  const e = events[Math.min(cursor, events.length) - 1];
+  if (!e.zone || !e.side) return;
+  const positions = computePlayerPositions(
+    e.zone, e.side, e.team, lineups.homeName, lineups.awayName, lineups.home, lineups.away,
+  );
+  const ball = ballPosition(e.zone, e.side);
+  const colors = {home: teamColorFor(lineups.homeName), away: teamColorFor(lineups.awayName)};
+  dotsGroup.innerHTML = positions.map(p => playerDotMarkup(p, colors)).join("") + ballDotMarkup(ball);
+}
+
 // Rebuilds a "Home X - Y Away" scoreline string (the exact format
 // `MatchResult.scoreline()` produces server-side) with a different score
 // substituted in, by locating the FINAL score's "X - Y" substring and
@@ -1023,7 +1443,7 @@ function scorelineWithScore(fullScoreline, finalHome, finalAway, curHome, curAwa
 // playback, never on "skip to next substitution"/"skip to end" (which can
 // jump over, or instantly reveal, many events at once - playing a cheer
 // per skipped-over score would spam N sounds simultaneously).
-function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete, onScoreUpdate, homeAdvantageFor) {
+function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete, onScoreUpdate, homeAdvantageFor, pitchLineups) {
   let cursor = startAt || 0;
   let delay = delayMs || 650;
   let timer = null;
@@ -1036,6 +1456,8 @@ function pacedEventReveal(eventsEl, events, startAt, delayMs, onComplete, onScor
       const s = scoreAtCursor(events, cursor);
       onScoreUpdate(s.home, s.away);
     }
+    updateZoneBar(eventsEl, events, cursor);
+    updatePitchSvg(eventsEl, events, cursor, pitchLineups);
   }
   function stop() {
     if (timer) { clearInterval(timer); timer = null; }
@@ -1199,6 +1621,9 @@ function renderReport(data, targetId, startRevealed) {
     : "";
   const playbackId = `${targetId || "report"}-playback`;
   const fullEventsHtml = data.events.map(formatEventLine).join("");
+  const avgPitchHtml = averagePitchHtml(
+    `${playbackId}-avgpitch`, data.events, data.home_name, data.away_name, data.home_lineup, data.away_lineup,
+  );
   // `reportHtml` (used for the downloadable snapshot) always shows every
   // event - the paced reveal is a live-viewing animation only, never a
   // reason to ship an incomplete snapshot.
@@ -1216,6 +1641,7 @@ function renderReport(data, targetId, startRevealed) {
       <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
       ${scorerRows}
     </table>` : ""}
+    ${avgPitchHtml}
     ${injuryHtml}
     ${cardHtml}`;
   // The final score/Player of the Match/box score are spoilers - they stay
@@ -1227,6 +1653,7 @@ function renderReport(data, targetId, startRevealed) {
   const liveHtml = `
     ${playbackControlsHtml(playbackId)}
     <div class="row muted" id="${playbackId}-skip-status"></div>
+    ${zoneBarHtml(`${playbackId}-zonebar`)}
     <div id="${playbackId}-events" class="events"></div>
     <div id="${spoilersId}" class="${startRevealed ? "" : "hidden"}">
       <div id="scoreline">${data.scoreline}</div>
@@ -1241,6 +1668,7 @@ function renderReport(data, targetId, startRevealed) {
         <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
         ${scorerRows}
       </table>` : ""}
+      ${avgPitchHtml}
       ${injuryHtml}
     </div>`;
   const snapshotBtnId = `${targetId || "report"}-snapshot-btn`;
@@ -2855,15 +3283,30 @@ function classicAutoLineupHtml(auto) {
     ${bench}`;
 }
 
+// Real venue/weather line for a Classic Match's draft screen - `weather`
+// is `/api/classic_matches/<id>/start`'s own `weather` field (real venue
+// name/city + a real historical-weather classification for that match's
+// real date, via Open-Meteo - see `historical_weather.py`). Required
+// attribution for Open-Meteo's CC BY 4.0 licence lives here too, right
+// next to the data it licenses.
+function classicVenueWeatherHtml(weather) {
+  if (!weather || !weather.venue_name) return "";
+  const temp = weather.real_temperature_max_c != null ? `, ${Math.round(weather.real_temperature_max_c)}°C` : "";
+  return `<p class="muted">${weather.venue_name}, ${weather.venue_city} - real conditions: ${weather.real_conditions}${temp}
+    (<a href="https://open-meteo.com/" target="_blank" rel="noopener">weather data by Open-Meteo.com</a>)</p>`;
+}
+
 function renderClassicMatchDraft(startRes) {
   const match = startRes.match;
   const focus = startRes.focus;
   const auto = startRes.auto;
+  const weather = startRes.weather;
   const focusIsHome = match.focus_team === "home";
   const detailBox = document.getElementById("classic-match-detail");
   detailBox.innerHTML = `
     <h3>${match.display_name}</h3>
     <p class="muted">${match.blurb} Real score: ${match.real_score}.</p>
+    ${classicVenueWeatherHtml(weather)}
     <p class="muted">Base objectives: ${match.base_objectives.join(" / ")}</p>
     <p class="muted">Bonus objectives: ${match.bonus_objectives.join(" / ")}</p>
     <div class="row">
@@ -2898,6 +3341,7 @@ function renderClassicMatchDraft(startRes) {
         body: JSON.stringify({
           home_team_id: homeTeamId, away_team_id: awayTeamId,
           decide_winner: !!match.must_have_winner,
+          weather: (weather && weather.real_conditions) || "dry",
         }),
       });
       setStatus(status, "");

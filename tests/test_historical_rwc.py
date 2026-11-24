@@ -7,6 +7,7 @@ from rugby_sim.data.sources.historical_rwc import (
 from rugby_sim.data.sources.wikipedia_squad import _archetype_attributes, _proxy_attributes
 from rugby_sim.models.position import Position
 from rugby_sim.tournament import Tournament
+from tests.test_data_pipeline import assert_duplicates_are_only_real_twin_position_pairs
 
 # Real wikitext fixture, taken from the live "1995 Rugby World Cup
 # statistics" Wikipedia page (fetched 2026-11-19) - exercises the genuine
@@ -108,8 +109,7 @@ def test_2003_world_cup_squads_resolve_to_20_real_teams():
     assert all_teams == set(squads.keys())
     for name, pool in squads.items():
         assert pool, f"{name} squad came back empty"
-        player_names = [p.name for p in pool]
-        assert len(player_names) == len(set(player_names)), f"{name} has a duplicate player"
+        assert_duplicates_are_only_real_twin_position_pairs(pool, label=f"{name}: ")
         assert all(p.era == "'03" for p in pool)
         assert all(
             p.data_source in (

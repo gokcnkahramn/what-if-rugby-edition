@@ -18,7 +18,7 @@ re-exporting it for backward compatibility, avoids the cycle entirely.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Literal
+from typing import Callable, List, Literal, Optional
 
 from ..engine.match_engine import MatchResult
 
@@ -67,6 +67,14 @@ class ClassicMatch:
     # Rugby World Cup pool matches) stays genuinely draw-eligible, exactly
     # as real rugby allows there.
     must_have_winner: bool = False
+    # Real venue this match was actually played at - a key into
+    # `rugby_sim.data.sources.venues.VENUES` (e.g. "twickenham",
+    # "stade_de_france"). `None` only for an entry whose real venue hasn't
+    # been researched/added yet - never guessed. Combined with the real
+    # `date` above, this is what lets `/api/classic_matches/<id>/start`
+    # look up real historical weather for the match (see
+    # `rugby_sim.data.sources.historical_weather`).
+    venue: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

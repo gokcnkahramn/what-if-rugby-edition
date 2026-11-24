@@ -30,7 +30,8 @@ def test_api_logos_endpoint_matches_disk_cache():
     res = client.get("/api/logos")
     assert res.status_code == 200
     data = res.get_json()
-    assert "logos" in data and "name_to_code" in data
+    assert "logos" in data and "name_to_code" in data and "colors" in data
+    assert data["colors"]["ENG"].startswith("#") and len(data["colors"]["ENG"]) == 7
     for code, url in data["logos"].items():
         assert url == f"/logos/{code}.png"
         static_res = client.get(url)

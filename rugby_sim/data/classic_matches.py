@@ -74,6 +74,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("South Africa", 2),  # real: 1 (Stransky's winner)
             total_points_at_least(30),  # real total: 27
         ],
+        venue="ellis_park",
     ),
     ClassicMatch(
         id="rwc_1999_sf", tournament="rwc", year=1999,
@@ -95,6 +96,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("Australia", 1),
             total_points_at_least(50),  # real total: 48
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="rwc_2003_final", tournament="rwc", year=2003,
@@ -115,6 +117,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("England", 2),  # real: 1 (Wilkinson's winner)
             total_points_at_least(40),  # real total: 37
         ],
+        venue="stadium_australia",
     ),
     ClassicMatch(
         id="rwc_2007_qf", tournament="rwc", year=2007,
@@ -135,6 +138,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("France", 3),  # real: 2
             total_points_at_least(40),  # real total: 38
         ],
+        venue="millennium_stadium",
     ),
     ClassicMatch(
         id="rwc_2011_pool", tournament="rwc", year=2011,
@@ -155,6 +159,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Tonga", 2),  # real: 2
             total_points_at_least(35),  # real total: 33
         ],
+        venue="wellington_regional_stadium",
     ),
     ClassicMatch(
         id="rwc_2015_pool", tournament="rwc", year=2015,
@@ -174,6 +179,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Japan", 5),  # real: 5
             total_points_at_least(70),  # real total: 66
         ],
+        venue="brighton_community_stadium",
     ),
     ClassicMatch(
         id="rwc_2019_pool", tournament="rwc", year=2019,
@@ -194,6 +200,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Japan", 3),  # real: 2
             total_points_at_least(35),  # real total: 31
         ],
+        venue="shizuoka_stadium_ecopa",
     ),
     ClassicMatch(
         id="rwc_2023_final", tournament="rwc", year=2023,
@@ -214,6 +221,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 1),  # real: 1
             total_points_at_least(25),  # real total: 23
         ],
+        venue="stade_de_france",
     ),
     # -- Rugby World Cup, additional classics (8) ---------------------------
     # Same low-risk expansion as the 8 above: every one of these reuses an
@@ -243,6 +251,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("New Zealand", "Left Wing", 5),  # real: 4 (Lomu)
             total_points_at_least(80),  # real total: 74
         ],
+        venue="newlands",
     ),
     ClassicMatch(
         id="rwc_1999_sf_fra_nz", tournament="rwc", year=1999,
@@ -265,6 +274,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("France", 5),  # real: 4
             total_points_at_least(75),  # real total: 74
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="rwc_2003_sf", tournament="rwc", year=2003,
@@ -286,6 +296,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 3),
             total_points_at_least(35),  # real total: 32
         ],
+        venue="stadium_australia",
     ),
     ClassicMatch(
         id="rwc_2007_sf", tournament="rwc", year=2007,
@@ -307,6 +318,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("England", 1),
             total_points_at_least(28),  # real total: 23
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="rwc_2011_qf", tournament="rwc", year=2011,
@@ -328,6 +340,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Wales", 3),
             total_points_at_least(35),  # real total: 32
         ],
+        venue="wellington_regional_stadium",
     ),
     ClassicMatch(
         id="rwc_2015_qf", tournament="rwc", year=2015,
@@ -348,6 +361,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 2),
             total_points_at_least(45),  # real total: 42
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="rwc_2019_sf", tournament="rwc", year=2019,
@@ -369,6 +383,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 3),  # real: 2
             total_points_at_least(30),  # real total: 26
         ],
+        venue="yokohama_stadium",
     ),
     ClassicMatch(
         id="rwc_2023_qf", tournament="rwc", year=2023,
@@ -391,6 +406,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 4),
             total_points_at_least(60),  # real total: 57
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="rwc_2007_pool_arg_fra", tournament="rwc", year=2007,
@@ -411,6 +427,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Argentina", 2),  # real: 1 (Corleto)
             total_points_at_least(32),  # real total: 29
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="rwc_2007_pool_fij_wal", tournament="rwc", year=2007,
@@ -432,6 +449,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Fiji", 5),  # real: 5
             total_points_at_least(75),  # real total: 72
         ],
+        venue="stade_de_la_beaujoire",
     ),
     ClassicMatch(
         id="rwc_2011_pool_ire_aus", tournament="rwc", year=2011,
@@ -452,6 +470,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Ireland", 1),
             total_points_at_least(25),  # real total: 21
         ],
+        venue="eden_park",
     ),
     ClassicMatch(
         id="rwc_2023_pool_fij_aus", tournament="rwc", year=2023,
@@ -473,6 +492,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Fiji", 3),  # real: 2
             total_points_at_least(40),  # real total: 37
         ],
+        venue="stade_geoffroy_guichard",
     ),
     # -- Six Nations 2018-2026 (9) ------------------------------------------
     ClassicMatch(
@@ -494,6 +514,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("Ireland", "Left Wing", 2),
             total_points_at_least(45),  # real total: 39
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_2019", tournament="six_nations", year=2019,
@@ -513,6 +534,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_points_at_least("Wales", "Fly-half", 22),  # real: 20
             total_points_at_least(35),  # real total: 32
         ],
+        venue="principality_stadium",
     ),
     ClassicMatch(
         id="six_nations_2020", tournament="six_nations", year=2020,
@@ -533,6 +555,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 5),  # real: 5
             total_points_at_least(45),  # real total: 39
         ],
+        venue="stadio_olimpico",
     ),
     ClassicMatch(
         id="six_nations_2021", tournament="six_nations", year=2021,
@@ -553,6 +576,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             total_points_at_least(65),  # real total: 62
             team_tries_at_least("France", 4),  # real: 4
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_2022", tournament="six_nations", year=2022,
@@ -572,6 +596,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("France", 3),  # real: 3
             total_points_at_least(42),  # real total: 38
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_2023", tournament="six_nations", year=2023,
@@ -593,6 +618,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_points_at_least("Ireland", "Fly-half", 14),  # Sexton's role
             total_points_at_least(50),  # real total: 45
         ],
+        venue="aviva_stadium",
     ),
     ClassicMatch(
         id="six_nations_2024", tournament="six_nations", year=2024,
@@ -612,6 +638,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("England", 1),
             total_points_at_least(48),  # real total: 45
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_2025", tournament="six_nations", year=2025,
@@ -632,6 +659,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("France", "Left Wing", 2),
             total_points_at_least(55),  # real total: 51
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_2026", tournament="six_nations", year=2026,
@@ -654,6 +682,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             total_points_at_least(95),  # real total: 94
             player_tries_at_least("France", "Left Wing", 5),  # real: 4 (Bielle-Biarrey)
         ],
+        venue="stade_de_france",
     ),
     # -- Six Nations, additional classics (6) --------------------------------
     # Same low-risk expansion as the RWC additions above - every one of
@@ -682,6 +711,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Scotland", 3),  # real: 2
             total_points_at_least(45),  # real total: 38
         ],
+        venue="murrayfield",
     ),
     ClassicMatch(
         id="six_nations_2019_calcutta", tournament="six_nations", year=2019,
@@ -708,6 +738,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Scotland", 5),  # real: 4
             total_points_at_least(80),  # real total: 76
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_2022_italy", tournament="six_nations", year=2022,
@@ -728,6 +759,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Italy", 3),  # real: 2
             total_points_at_least(48),  # real total: 43
         ],
+        venue="principality_stadium",
     ),
     ClassicMatch(
         id="six_nations_2024_italy", tournament="six_nations", year=2024,
@@ -747,6 +779,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Italy", 4),  # real: 4
             total_points_at_least(65),  # real total: 60
         ],
+        venue="stadio_olimpico",
     ),
     ClassicMatch(
         id="six_nations_2025_twickenham", tournament="six_nations", year=2025,
@@ -768,6 +801,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 4),  # real: 3
             total_points_at_least(55),  # real total: 51
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_2026_cardiff", tournament="six_nations", year=2026,
@@ -789,6 +823,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Scotland", 5),  # real: 4
             total_points_at_least(55),  # real total: 49
         ],
+        venue="principality_stadium",
     ),
     # -- Rugby Championship 2018-2025 (8) ------------------------------------
     ClassicMatch(
@@ -809,6 +844,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_points_at_least("Argentina", "Fly-half", 18),  # real: 17
             total_points_at_least(55),  # real total: 51
         ],
+        venue="estadio_malvinas_argentinas",
     ),
     ClassicMatch(
         id="rugby_championship_2019", tournament="rugby_championship", year=2019,
@@ -829,6 +865,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_points_at_least("South Africa", "Fly-half", 32),  # real: 31
             total_points_at_least(62),  # real total: 59
         ],
+        venue="estadio_padre_martearena",
     ),
     ClassicMatch(
         id="rugby_championship_2020", tournament="rugby_championship", year=2020,
@@ -849,6 +886,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_points_at_least("Argentina", "Fly-half", 26),  # real: 25 (Sanchez, all of it)
             total_points_at_least(45),  # real total: 40
         ],
+        venue="bankwest_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_2021", tournament="rugby_championship", year=2021,
@@ -868,6 +906,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 2),  # real: 2
             total_points_at_least(40),  # real total: 36
         ],
+        venue="queensland_country_bank_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_2022", tournament="rugby_championship", year=2022,
@@ -889,6 +928,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             player_points_at_least("Argentina", "Fly-half", 20),  # Boffelli's haul was 20
             total_points_at_least(48),  # real total: 43
         ],
+        venue="orangetheory_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_2023", tournament="rugby_championship", year=2023,
@@ -908,6 +948,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("New Zealand", 6),  # real: 6
             total_points_at_least(50),  # real total: 45
         ],
+        venue="melbourne_cricket_ground",
     ),
     ClassicMatch(
         id="rugby_championship_2024", tournament="rugby_championship", year=2024,
@@ -927,6 +968,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("South Africa", 7),  # real: 7
             total_points_at_least(60),  # real total: 55
         ],
+        venue="mbombela_stadium",
     ),
     ClassicMatch(
         id="rugby_championship_2025", tournament="rugby_championship", year=2025,
@@ -947,6 +989,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             total_points_at_least(60),  # real total: 56
             team_tries_at_least("South Africa", 3),
         ],
+        venue="twickenham",
     ),
     # -- Rugby Championship, additional classics (3) -------------------------
     # Same 2018+ low-risk `build_union_pool` path as above.
@@ -969,6 +1012,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 7),  # real: 6
             total_points_at_least(85),  # real total: 79
         ],
+        venue="estadio_padre_martearena",
     ),
     ClassicMatch(
         id="rugby_championship_2025_argentina_nz", tournament="rugby_championship", year=2025,
@@ -989,6 +1033,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Argentina", 3),  # real: 2
             total_points_at_least(55),  # real total: 52
         ],
+        venue="velez_sarsfield",
     ),
     ClassicMatch(
         id="rugby_championship_2025_australia_rsa", tournament="rugby_championship", year=2025,
@@ -1009,6 +1054,7 @@ CLASSIC_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Australia", 7),  # real: 6
             total_points_at_least(65),  # real total: 60
         ],
+        venue="ellis_park",
     ),
 ]
 

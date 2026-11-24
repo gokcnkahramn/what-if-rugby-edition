@@ -267,6 +267,17 @@ def test_classic_matches_start_auto_drafts_the_non_focus_side():
     assert len(data["auto"]["lineup"]) == 15
     assert data["auto"]["problems"] == []  # a full, valid 15-player lineup
 
+    # Real venue + real historical weather (see `historical_weather.py`) -
+    # shape-only assertion: a venue may or may not have been researched yet
+    # for any given match, but the field must always be present and, when
+    # a venue IS known, its weather classification must be one of the
+    # engine's real 3 categories, never missing/invalid.
+    weather = data["weather"]
+    assert set(weather.keys()) == {"venue_name", "venue_city", "real_conditions", "real_temperature_max_c"}
+    assert weather["real_conditions"] in ("dry", "wet", "windy")
+    if weather["venue_name"] is None:
+        assert weather["venue_city"] is None
+
 
 @pytest.mark.slow
 def test_full_classic_match_flow_start_draft_live_complete():

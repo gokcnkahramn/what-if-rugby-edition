@@ -36,7 +36,9 @@ from .data.classic_matches import (
 from .data.legends import get_all_legends
 from .data.national_teams import POOLS
 from .data.sources.auto_draft import auto_draft_team
+from .data.sources.historical_weather import classify_weather, fetch_historical_weather
 from .data.sources.pool_builder import DEFAULT_SEASON, NATION_DISPLAY, NATION_TO_CODE
+from .data.sources.venues import VENUES
 from .data.squad_repository import team_from_dict, team_to_dict
 from .engine import MatchEngine
 from .engine.match_engine import MatchResult
@@ -206,6 +208,7 @@ def api_logos():
     Wikipedia infobox at all."""
     import os
 
+    from .data.sources.team_colors import TEAM_COLORS
     from .data.sources.team_logos import HISTORICAL_NATION_ALIASES, LOGO_DIR, TEAM_LOGO_PAGES
 
     codes = list(TEAM_LOGO_PAGES.keys()) + ["BAR", "LIO", "PAC"]
@@ -222,7 +225,7 @@ def api_logos():
         if current_name in name_to_code:
             name_to_code[old_name] = name_to_code[current_name]
 
-    return jsonify({"logos": available, "name_to_code": name_to_code})
+    return jsonify({"logos": available, "name_to_code": name_to_code, "colors": TEAM_COLORS})
 
 
 @app.get("/api/backgrounds")
@@ -330,9 +333,22 @@ def api_rank():
     position = Position(body["position"])
     candidates = [_PLAYER_BY_ID[pid] for pid in player_ids if pid in _PLAYER_BY_ID]
     ranked = sorted(candidates, key=lambda p: p.rating_at(position), reverse=True)
+    # A real player can appear twice in a pool under two different ids - once
+    # per "twin" position (see wikipedia_squad.with_twin_position_duplicates).
+    # Both copies are legitimate candidates for whichever slot they fit best,
+    # but showing the same real name twice in one candidate list is just
+    # confusing clutter - keep only the highest-rated copy per name (already
+    # the first one encountered, since `ranked` is sorted descending).
+    seen_names = set()
+    deduped = []
+    for p in ranked:
+        if p.name in seen_names:
+            continue
+        seen_names.add(p.name)
+        deduped.append(p)
     return jsonify([
         {**_player_json(p), "fit": p.rating_at(position)}
-        for p in ranked
+        for p in deduped
     ])
 
 
@@ -348,9 +364,26 @@ def api_build_team():
     duplicate_ids = {pid for pid in slots.values() if list(slots.values()).count(pid) > 1}
     duplicate_ids |= {pid for pid in bench_ids if bench_ids.count(pid) > 1}
     duplicate_ids |= set(slots.values()) & set(bench_ids)
+    # Also catch a duplicate by NAME, not just id: a Wikipedia/historical-
+    # sourced pool can contain the same real person twice under two
+    # different ids, one per "twin" position (e.g. a real winger with no
+    # recorded left/right split - see
+    # `wikipedia_squad.with_twin_position_duplicates`) - the id-only check
+    # above would miss that real person being fielded in two starting
+    # slots (or a slot AND the bench) under their two different ids.
+    all_ids = list(slots.values()) + bench_ids
+    names_seen: Dict[str, int] = {}
+    for pid in all_ids:
+        player = _PLAYER_BY_ID.get(pid)
+        if player is None:
+            continue
+        if player.name in names_seen and names_seen[player.name] != pid:
+            duplicate_ids.add(pid)
+            duplicate_ids.add(names_seen[player.name])
+        names_seen[player.name] = pid
     if duplicate_ids:
         names = ", ".join(
-            _PLAYER_BY_ID[pid].name for pid in duplicate_ids if pid in _PLAYER_BY_ID
+            sorted({_PLAYER_BY_ID[pid].name for pid in duplicate_ids if pid in _PLAYER_BY_ID})
         )
         return jsonify({"error": f"same player picked more than once in this squad: {names}"}), 400
 
@@ -486,7 +519,7 @@ def _match_json(result: MatchResult) -> dict:
         ],
         "events": [
             {"minute": e.minute, "team": e.team, "text": e.text,
-             "score_home": e.score_home, "score_away": e.score_away}
+             "score_home": e.score_home, "score_away": e.score_away, "zone": e.zone, "side": e.side}
             for e in result.events
         ],
         "injuries": list(result.injury_details),
@@ -503,6 +536,24 @@ def _match_json(result: MatchResult) -> dict:
             }
             for name, s in result.stats.items()
         },
+        # The STARTING XV only (never mutated mid-match, unlike the live
+        # engine's own working copy - see `Team.lineup`'s own docstring) -
+        # exactly what the finished-report screen's average-position pitch
+        # diagram needs (see `app.js`'s `averagePlayerPositions`). A
+        # deliberate simplification: a player swapped out partway through
+        # still shows as having "played" their slot for the whole average,
+        # not just the real sub window - the report doesn't currently
+        # track per-player on-field minutes either, so this is consistent
+        # with the rest of this JSON, not a new gap.
+        "home_lineup": [
+            {"position": pos.value, "name": slot.player.name}
+            for pos, slot in result.home.lineup.starters.items()
+        ],
+        "away_lineup": [
+            {"position": pos.value, "name": slot.player.name}
+            for pos, slot in result.away.lineup.starters.items()
+        ],
+        "home_name": result.home.name, "away_name": result.away.name,
     }
 
 
@@ -812,6 +863,24 @@ def _save_classic_progress(progress: dict) -> None:
         json.dump(progress, f, indent=2)
 
 
+def _classic_match_weather(match) -> dict:
+    """Real venue name/city + real historical weather for this match's real
+    `date`, if its `venue` has been researched and added to `VENUES` - see
+    `data/sources/venues.py`/`historical_weather.py`. Never blocks the app:
+    a missing venue or a failed live fetch just means no venue/weather
+    info is shown (and the live match falls back to "dry"), same "visual
+    nicety, never required" convention as team crests/background photos."""
+    venue = VENUES.get(match.venue) if match.venue else None
+    if venue is None:
+        return {"venue_name": None, "venue_city": None, "real_conditions": "dry", "real_temperature_max_c": None}
+    weather_data = fetch_historical_weather(venue.latitude, venue.longitude, match.date)
+    return {
+        "venue_name": venue.name, "venue_city": f"{venue.city}, {venue.country}",
+        "real_conditions": classify_weather(weather_data),
+        "real_temperature_max_c": weather_data["temperature_2m_max"] if weather_data else None,
+    }
+
+
 def _classic_match_json(match, progress: dict) -> dict:
     entry = progress["completed"].get(match.id)
     return {
@@ -898,6 +967,7 @@ def api_classic_matches_start(match_id: str):
 
     return jsonify({
         "match": _classic_match_json(match, _load_classic_progress()),
+        "weather": _classic_match_weather(match),
         "focus_team": match.focus_team,
         "focus": {
             "name": focus_name, "code": focus_code,
@@ -1053,7 +1123,7 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
         "shootout_detail": result.shootout_detail if result else None,
         "events": [
             {"minute": e.minute, "team": e.team, "text": e.text,
-             "score_home": e.score_home, "score_away": e.score_away}
+             "score_home": e.score_home, "score_away": e.score_away, "zone": e.zone, "side": e.side}
             for e in (result.events if result else [])
         ],
         "home": {
@@ -1068,7 +1138,7 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
 
 
 def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condition: Optional[Dict[int, float]] = None,
-                       decide_winner: bool = False) -> str:
+                       decide_winner: bool = False, weather: str = "dry") -> str:
     """Starts a pausable match (engine advanced to its first checkpoint) and
     registers it in `_LIVE_MATCHES`, returning its session id. Shared by the
     single-friendly `/api/match/live/start` endpoint and the interactive
@@ -1082,9 +1152,17 @@ def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condi
     time goes to extra time/sudden death/a kicking competition here too,
     through this SAME pausable checkpoint loop (the engine's own
     `is_finished`/`_advance_one_drive` primitives already handle it - no
-    separate wiring needed for the live flow)."""
+    separate wiring needed for the live flow). `weather`: defaults to the
+    engine's own "dry" default for every caller except the Classic Matches
+    flow, which passes the REAL historical weather for that match's real
+    venue+date (see `data/sources/historical_weather.py` and
+    `api_classic_matches_start` below) - the first real caller of this
+    param anywhere in the app (see `MATCH_ENGINE_MODEL.md` item 9)."""
     global _next_live_match_id
-    engine = MatchEngine(home, away, seed=seed, initial_condition=initial_condition, decide_winner=decide_winner)
+    engine = MatchEngine(
+        home, away, seed=seed, initial_condition=initial_condition,
+        decide_winner=decide_winner, weather=weather,
+    )
     engine.start()
     if LIVE_MATCH_CHECKPOINTS:
         engine.advance_to(LIVE_MATCH_CHECKPOINTS[0])
@@ -1106,7 +1184,11 @@ def api_match_live_start():
     Matches flow passes `match.must_have_winner` here for a real knockout
     classic match, so a tie goes to extra time/sudden death/a kicking
     competition instead of just ending level - see
-    `MatchEngine.__init__`."""
+    `MatchEngine.__init__`. `weather` (optional, default "dry"): the
+    Classic Matches flow passes the real historical weather category for
+    that match's real venue+date here (see `_classic_match_json`'s
+    `real_conditions` field) - every other caller leaves it at the
+    engine's own default."""
     body = request.get_json(force=True)
     home = _TEAMS.get(body["home_team_id"])
     away = _TEAMS.get(body["away_team_id"])
@@ -1114,9 +1196,10 @@ def api_match_live_start():
         return jsonify({"error": "unknown team_id - build both teams first"}), 400
     seed = body.get("seed")
     decide_winner = bool(body.get("decide_winner", False))
+    weather = str(body.get("weather", "dry"))
 
     try:
-        session_id = _start_live_match(home, away, seed, decide_winner=decide_winner)
+        session_id = _start_live_match(home, away, seed, decide_winner=decide_winner, weather=weather)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

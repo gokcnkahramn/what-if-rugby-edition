@@ -32,6 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -73,6 +74,47 @@ POS_CODE_MAP = {
     "W": Position.LEFT_WING,
     "FB": Position.FULLBACK,
 }
+
+# A real data-source gap, not a per-player data gap: every Wikipedia/
+# historical squad source this project has (this file's own
+# `POS_CODE_MAP` above, `invitational_squads.py`'s Lions/Pacific Islanders
+# parsers) can only tell "prop"/"lock"/"wing"/"centre"/"flanker" apart as
+# ONE generic jersey category, never which specific real-world slot
+# (loosehead vs tighthead, left vs right wing, etc.) a given real player
+# actually played - so every pool built this way ends up with real players
+# ONLY at one of each pair's two `Position` enum values and genuinely NONE
+# at the other (confirmed live: a real 2003 England RWC squad and Hong
+# Kong's real current squad both came back with zero players at Tighthead
+# Prop/Lock (5)/Openside Flanker/Outside Centre/Right Wing - not because
+# nobody in the real squad played those roles, but because this mapping
+# can't tell). The honest fix is NOT a new per-player "alternate position"
+# field (nothing in any of these real sources ever says which specific
+# slot a player preferred) - it's to stop silently excluding these real
+# players from a slot they're exactly as plausible a candidate for as the
+# slot they got mapped to. `with_twin_position_duplicates` adds a second
+# `Player` entry (same real name/attributes/nation/everything, just
+# `natural_position` set to the twin slot) for anyone mapped to one of
+# these 5 "primary" positions - `Lineup.validate()` already rejects
+# fielding the same real name in two slots at once (see its own "named in
+# multiple positions" check), so this can never result in literally
+# drafting one real person twice - it only ever makes them a real,
+# draftable candidate for either slot, same "what if" freedom every other
+# player in this project already has.
+TWIN_POSITION = {
+    Position.LOOSEHEAD_PROP: Position.TIGHTHEAD_PROP,
+    Position.LOCK_1: Position.LOCK_2,
+    Position.LEFT_WING: Position.RIGHT_WING,
+    Position.INSIDE_CENTRE: Position.OUTSIDE_CENTRE,
+    Position.BLINDSIDE_FLANKER: Position.OPENSIDE_FLANKER,
+}
+
+
+def with_twin_position_duplicates(pool: List[Player]) -> List[Player]:
+    extra = [
+        replace(p, natural_position=TWIN_POSITION[p.natural_position])
+        for p in pool if p.natural_position in TWIN_POSITION
+    ]
+    return pool + extra
 
 # A plausible "solid Tier 2 international" baseline per position, used only
 # when a scraped player has no findable rugbydata history at all. Deliberately
@@ -450,4 +492,4 @@ def build_wikipedia_pool(short_code: str, nation: str, season: str = "2026") -> 
             notes=note,
             data_source=source,
         ))
-    return pool
+    return with_twin_position_duplicates(pool)

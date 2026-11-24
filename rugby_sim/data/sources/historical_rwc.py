@@ -39,6 +39,7 @@ from .wikipedia_squad import (
     _proxy_attributes,
     describe_attribute_source,
     fetch_wikitext,
+    with_twin_position_duplicates,
 )
 
 # A handful of past participants have no `POOLS` code at all (not relevant
@@ -315,7 +316,7 @@ def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[P
             ),
             data_source=data_source,
         ))
-    return pool
+    return with_twin_position_duplicates(pool)
 
 
 _RWC_POOLS_CACHE: Dict[int, Dict[str, List[str]]] = {}

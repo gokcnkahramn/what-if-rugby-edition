@@ -62,7 +62,17 @@ def auto_draft_lineup(
             break
         best = max(remaining, key=lambda p: p.rating_at(position) * _condition_factor(p, condition))
         lineup.set_starter(position, best)
-        remaining = [p for p in remaining if p is not best]
+        # Excludes by NAME, not just object identity: a real player mapped
+        # to one of `wikipedia_squad.TWIN_POSITION`'s pairs (e.g. a real
+        # winger with no recorded left/right split) exists in the pool as
+        # TWO distinct `Player` objects - same name, two different
+        # `natural_position`s, each a genuine candidate for either slot
+        # (see `with_twin_position_duplicates`). Excluding only the exact
+        # object just drafted would let this auto-drafter happily pick the
+        # SAME real person's other copy for the twin slot too, fielding
+        # one real person in two positions at once - `is not best` alone
+        # used to be correct back when every name in a pool was unique.
+        remaining = [p for p in remaining if p is not best and p.name != best.name]
 
     if lineup.starters:
         lineup.captain = max(

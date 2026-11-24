@@ -2,6 +2,7 @@ from rugby_sim import webapp
 from rugby_sim.data.national_teams import POOLS
 from rugby_sim.data.sources.pool_builder import NATION_DISPLAY, NON_RANKED_CODES
 from rugby_sim.tournament.rankings import TeamRankingTracker
+from tests.test_data_pipeline import assert_duplicates_are_only_real_twin_position_pairs
 
 
 def test_lions_and_pacific_islanders_are_registered_pools():
@@ -15,8 +16,7 @@ def test_lions_and_pacific_islanders_are_registered_pools():
 def test_lions_pool_is_real_and_non_trivial():
     pool = POOLS["LIO"]()
     assert len(pool) >= 30
-    names = [p.name for p in pool]
-    assert len(names) == len(set(names))
+    assert_duplicates_are_only_real_twin_position_pairs(pool)
     # Real, well-known 2025 tour squad members.
     assert any(p.name == "Maro Itoje" for p in pool)
     # Every player keeps their own real national eligibility - selection
@@ -28,8 +28,7 @@ def test_lions_pool_is_real_and_non_trivial():
 def test_pacific_islanders_pool_is_real_and_non_trivial():
     pool = POOLS["PAC"]()
     assert len(pool) >= 20
-    names = [p.name for p in pool]
-    assert len(names) == len(set(names))
+    assert_duplicates_are_only_real_twin_position_pairs(pool)
     nations = {p.nation for p in pool}
     assert nations <= {"Fiji", "Samoa", "Tonga"}
 

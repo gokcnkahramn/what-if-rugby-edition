@@ -141,14 +141,14 @@ def test_card_report_json_shape_and_live_matches_remaining():
     import random as _random
     # Seed picked so the REST of the match (played out with a real RNG from
     # here on) doesn't roll any further cards - this test only wants to
-    # check the ONE card it explicitly issued. Re-picked from 0 after the
-    # drop-goal outcome branch was added to `_resolve_drive` (see
-    # `engine/MATCH_ENGINE_MODEL.md`'s "Fixed in this pass"): inserting a
-    # new probability slice ahead of the other outcomes shifts which
-    # outcome each drive's single `roll` lands in for every later drive,
-    # which changed downstream RNG consumption enough to make seed 0 roll
-    # a spurious extra yellow card.
-    engine.rng = _random.Random(1)
+    # check the ONE card it explicitly issued. Re-picked from 1 to 2 after
+    # the territory/zone model's `_advance_zone` roll was added to
+    # `_resolve_drive` (see `MATCH_ENGINE_MODEL.md` item 3): consuming one
+    # extra `rng.random()` per drive shifts downstream RNG consumption for
+    # every later drive, same class of reseed this test's own history
+    # already describes for the drop-goal addition - seed 1 started
+    # rolling a spurious extra yellow card after this change.
+    engine.rng = _random.Random(2)
     engine.finish()
     availability.record_match(result)
 

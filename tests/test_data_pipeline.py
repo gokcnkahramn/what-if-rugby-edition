@@ -8,17 +8,47 @@ from rugby_sim.models.position import Position
 TIER2_CODES = ["GEO", "ROU", "ESP", "POR", "SAM", "TGA", "USA", "CAN", "URU", "CHI", "NAM"]
 
 
+def assert_duplicates_are_only_real_twin_position_pairs(pool, label=""):
+    """A Wikipedia/historical-sourced pool deliberately contains a second
+    `Player` entry (same name) for anyone mapped to one of
+    `wikipedia_squad.TWIN_POSITION`'s 5 "primary" positions (loosehead
+    prop/lock/left wing/inside centre/blindside flanker) - these real
+    players are genuine candidates for the "twin" slot too (tighthead
+    prop/lock/right wing/outside centre/openside flanker), since the real
+    data source this pool came from can't distinguish which of the two a
+    given real person actually played (see `with_twin_position_duplicates`'s
+    own module-level comment for the full rationale). This is a real,
+    intentional exception to "no duplicate names" - this helper confirms
+    every duplicate name in `pool` is EXACTLY this kind (never more than 2
+    occurrences, and always a genuine twin-position pair), not some other,
+    unintended duplication slipping through."""
+    from rugby_sim.data.sources.wikipedia_squad import TWIN_POSITION
+
+    seen = {}
+    for p in pool:
+        seen.setdefault(p.name, []).append(p.natural_position)
+    for name, positions in seen.items():
+        if len(positions) == 1:
+            continue
+        assert len(positions) == 2, f"{label}{name} appears {len(positions)} times: {positions}"
+        a, b = positions
+        assert TWIN_POSITION.get(a) == b or TWIN_POSITION.get(b) == a, (
+            f"{label}{name} duplicated at non-twin positions {positions}"
+        )
+
+
 def test_tier2_pools_are_all_populated():
     # Each Tier 2 union (2027 Rugby World Cup picture) must resolve a usable,
-    # full-size 2026 pool via the rugbydata+Wikipedia merge, with no two
-    # players sharing a name (regression: Portugal's Wikipedia squad listing
+    # full-size 2026 pool via the rugbydata+Wikipedia merge. A name CAN now
+    # legitimately appear twice (a real twin-position duplicate - see
+    # `assert_duplicates_are_only_real_twin_position_pairs`), but never for
+    # any other reason (regression: Portugal's Wikipedia squad listing
     # genuinely repeats a few utility players once per position group they
     # cover - parse_current_squad must dedupe that, not pool_builder).
     for code in TIER2_CODES:
         pool = POOLS[code]()
         assert len(pool) >= 20, f"{code} returned a suspiciously small pool ({len(pool)})"
-        names = [p.name for p in pool]
-        assert len(names) == len(set(names)), f"{code} pool has duplicate names"
+        assert_duplicates_are_only_real_twin_position_pairs(pool, label=f"{code}: ")
         assert all(p.era == "'26" for p in pool), f"{code} pool isn't all tagged 2026"
 
 

@@ -1,4 +1,5 @@
 from rugby_sim import webapp
+from rugby_sim.models import Position
 
 
 def _client():
@@ -53,18 +54,39 @@ def test_build_team_and_play_a_match_end_to_end():
     assert "scoreline" in match
     assert len(match["events"]) > 0
     assert "England" in match["stats"] and "France" in match["stats"]
+    assert all(
+        e["zone"] in ("home_tryline", "home_22", "midfield", "away_22", "away_tryline")
+        for e in match["events"]
+    )
+    assert all(e["side"] in ("left", "middle", "right") for e in match["events"])
+
+    # Starting XV + team names - what the finished-report screen's average-
+    # position pitch diagram needs (see app.js's `averagePlayerPositions`).
+    assert match["home_name"] == "England" and match["away_name"] == "France"
+    assert len(match["home_lineup"]) == 15 and len(match["away_lineup"]) == 15
+    assert {slot["position"] for slot in match["home_lineup"]} == {p.value for p in Position}
 
 
 def _build_minimal_team(client, code, name):
     pool = client.get(f"/api/pool/{code}?season=2026").get_json()
     positions = client.get("/api/positions").get_json()
-    used, slots = set(), {}
+    # Excludes by NAME, not just id: a Wikipedia/historical-sourced pool
+    # can legitimately contain the same real person twice under two
+    # different ids, one per "twin" position (e.g. a real winger with no
+    # recorded left/right split - see `wikipedia_squad.with_twin_position_duplicates`)
+    # - picking the best-ranked candidate per slot using only an id-based
+    # exclusion set (the old version of this helper) could field that one
+    # real person in two different starting positions at once, an invalid
+    # lineup that made this test's own tournament run error out instead of
+    # producing a champion. Same fix as `auto_draft_lineup`'s own.
+    used_ids, used_names, slots = set(), set(), {}
     for pos in positions:
-        candidates = [p["id"] for p in pool if p["id"] not in used]
+        candidates = [p["id"] for p in pool if p["id"] not in used_ids and p["name"] not in used_names]
         ranked = client.post("/api/rank", json={"player_ids": candidates, "position": pos}).get_json()
         best = ranked[0]
         slots[pos] = best["id"]
-        used.add(best["id"])
+        used_ids.add(best["id"])
+        used_names.add(best["name"])
     res = client.post("/api/team", json={
         "name": name, "slots": slots, "captain": list(slots.values())[0], "bench": [],
     }).get_json()
@@ -84,6 +106,33 @@ def test_auto_draft_team_endpoint_resolves_code_from_nation_name():
     res = client.post("/api/team/auto", json={"name": "Wales"}).get_json()
     assert res["problems"] == []
     assert res["code"] == "WAL"
+
+
+def test_api_team_rejects_same_real_player_drafted_at_two_positions_by_name():
+    # A Wikipedia/historical-sourced squad can contain the same real
+    # person twice under two different ids, one per "twin" position (see
+    # `wikipedia_squad.with_twin_position_duplicates`) - `/api/team` must
+    # reject fielding them in two slots at once even though their ids
+    # genuinely differ, not just an exact-id duplicate (the pre-existing
+    # check).
+    client = _client()
+    hist = client.get("/api/historical_rwc/1995").get_json()
+    squad = hist["squads"]["South Africa"]
+    dup = [p for p in squad if p["name"] == "Os du Randt"]
+    assert len(dup) == 2, "expected the real 1995 Os du Randt twin-position duplicate"
+    others = iter(p for p in squad if p["name"] != "Os du Randt")
+
+    positions = client.get("/api/positions").get_json()
+    slots = {"Loosehead Prop": dup[0]["id"], "Hooker": dup[1]["id"]}
+    for pos in positions:
+        if pos not in slots:
+            slots[pos] = next(others)["id"]
+
+    res = client.post("/api/team", json={
+        "name": "Test", "slots": slots, "captain": list(slots.values())[0], "bench": [],
+    })
+    assert res.status_code == 400
+    assert "Os du Randt" in res.get_json()["error"]
 
 
 def test_tournament_match_results_are_drillable_into_full_detail():

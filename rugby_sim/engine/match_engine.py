@@ -82,12 +82,88 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 from ..models.team import Team, Lineup, SquadSlot
 from ..models.position import Position, BACKS, CATEGORY_POSITION_GROUPS, POSITION_PROFILES
 from ..models.player import Player
 from .commentary import CommentaryEvent
+
+
+class Zone(Enum):
+    """Where the ball is notionally on the pitch, labelled relative to each
+    team's OWN try line (not physical pitch ends - so no halftime-swap
+    handling is needed; "AWAY_22" always means "near the away team's own
+    22," for as long as the match runs). This is the engine's first real
+    field-position concept - see `MATCH_ENGINE_MODEL.md` item 3, previously
+    an acknowledged gap ("no field position beyond the coarse territory-
+    percentage tally... no distance-to-try-line modeling at all").
+
+    5 zones (grown from an original 3 - see `_advance_zone`/`_resolve_drive`'s
+    zone-gated `p_try`/`_score_penalty_chance`'s zone-gated kick realism):
+    `HOME_TRYLINE` (right on/near the home team's own line - highest danger
+    if the away team is attacking there, rare in practice), `HOME_22`,
+    `MIDFIELD`, `AWAY_22`, `AWAY_TRYLINE`. Still a discrete, coarse model
+    (5 buckets, not continuous distance or x/y coordinates) - a deliberate
+    stepping stone, not a claim of full spatial realism."""
+    HOME_TRYLINE = "home_tryline"
+    HOME_22 = "home_22"
+    MIDFIELD = "midfield"
+    AWAY_22 = "away_22"
+    AWAY_TRYLINE = "away_tryline"
+
+
+class Side(Enum):
+    """Which side of the pitch play is notionally on (left/middle/right,
+    from a neutral onlooker's perspective - not relative to either team).
+    A simple, independent-of-`Zone` dimension (see `_advance_side`) used
+    only to bias which wing scores a try (`_pick_try_scorer`) and to add
+    an honest flavor detail to try commentary - deliberately NOT yet
+    weighted by either team's actual wing attributes (a plain random walk
+    this pass), and deliberately not a full lateral-position model."""
+    LEFT = "left"
+    MIDDLE = "middle"
+    RIGHT = "right"
+
+
+# Try-probability multiplier by "where the ball is, relative to the
+# ATTACKING team" (see `MatchEngine._zone_relative_to`): highest right on
+# the defending team's own line, still high (but a notch lower) in their
+# 22, a reduced chance at midfield, and a small-but-nonzero chance when the
+# attack is pinned deep in its own territory (a length-of-field
+# counterattack/intercept try should stay possible, just rare, and rarer
+# still right on the attacking side's own line) - five deliberately simple,
+# clearly-labelled constants, not a formula reverse-engineered to hit a
+# target number. Tuned by running many seeds and eyeballing the
+# try-rate-by-zone split (see `tests/test_territory_zone.py`), same
+# "worked-example, many seeds, modest not dramatic" discipline this file's
+# other tuning passes (stamina, home advantage) already followed.
+ZONE_TRY_MULTIPLIER = {
+    "attacking_tryline": 1.15,  # ball right on the DEFENDING team's own line
+    "attacking_22": 1.0,        # ball in the DEFENDING team's 22 - try range
+    "midfield": 0.4,
+    "own_22": 0.08,             # attack pinned in their own 22 - rare, not impossible
+    "own_tryline": 0.03,        # pinned right on their OWN line - genuinely rare
+}
+
+# Zone-gated penalty-kick realism (see `_score_penalty_chance`): how often
+# the attacking side goes for posts rather than kicking for territory, and
+# a flat adjustment to the actual kick's success probability, by the same
+# zone keys `ZONE_TRY_MULTIPLIER` uses. `"own_22"`/`"own_tryline"` have no
+# entry here - `_score_penalty_chance` short-circuits `go_for_posts = False`
+# for both zones outright (too far out to realistically attempt, regardless
+# of kicker skill).
+ZONE_GO_FOR_POSTS_BASE = {
+    "attacking_tryline": 0.97,
+    "attacking_22": 0.92,
+    "midfield": 0.75,
+}
+ZONE_PEN_PROB_ADJUST = {
+    "attacking_tryline": 0.15,
+    "attacking_22": 0.10,
+    "midfield": 0.0,
+}
 
 MATCH_MINUTES = 80
 MAX_SUBSTITUTIONS = 8
@@ -563,6 +639,8 @@ class MatchEngine:
         self.result.stats[self.away.name] = TeamMatchStats()
         self._minute = 0
         self._territory_ticks = {self.home.name: 0, self.away.name: 0}
+        self._zone = Zone.MIDFIELD
+        self._side = Side.MIDDLE
         self._started = True
 
     def _advance_one_drive(self) -> None:
@@ -719,12 +797,19 @@ class MatchEngine:
     def _pick_try_scorer(self, team: Team) -> "Player":
         """Weighted toward backs and players with a strong attacking
         profile at their current slot - not a uniform coin flip, but not a
-        separate play-by-play simulation either."""
+        separate play-by-play simulation either. Also biased by
+        `self._side` (see `Side`/`_advance_side`): when play is out on the
+        left or right, that side's winger gets a further weight bump - at
+        `Side.MIDDLE` nobody gets this bump, so the distribution matches
+        exactly what it was before `Side` existed."""
+        side_bonus_position = {Side.LEFT: Position.LEFT_WING, Side.RIGHT: Position.RIGHT_WING}.get(self._side)
         slots = list(self._active[team.name].values())
         weights = []
         for slot in slots:
             attack = slot.player.sub_ratings(slot.position).get("attack", 50)
             weight = attack + (25 if slot.position in BACKS else 0)
+            if slot.position == side_bonus_position:
+                weight += 20
             weights.append(max(weight, 1))
         return self.rng.choices(slots, weights=weights, k=1)[0].player
 
@@ -948,6 +1033,95 @@ class MatchEngine:
             + self._team_sub_rating(team, "handling") * 0.2
         )
 
+    def _kick_tendency(self, team: Team) -> float:
+        """How much a team favours territorial kicking over ball-in-hand
+        play, derived purely from the lineup's own existing attribute
+        averages (no new manual data, no new per-team setting to invent) -
+        roughly [-1, 1], positive = kicks more, negative = carries more.
+        Read live every drive (like every other `_team_sub_rating` call in
+        this file), so a substitution mid-match shifts it naturally. Used
+        only to nudge `_advance_zone`'s advance probability (a kicking-
+        heavy team gains territory faster) - a deliberately small, single-
+        purpose use of this number, NOT a full tactical model (it doesn't
+        yet model the extra turnover/counterattack risk a loose territorial
+        kick concedes in real rugby - a natural candidate for a later pass,
+        not bundled into this one)."""
+        kicking = self._team_sub_rating(team, "kicking")
+        handling = self._team_sub_rating(team, "handling")
+        return self._clamp((kicking - handling) / 40, -1.0, 1.0)
+
+    # Fixed left-to-right ordering of the 5 zones (index 0 = home's own
+    # line, index 4 = away's own line) - the single place every zone/index
+    # translation below reads from, so adding/reordering a zone only ever
+    # needs to change this one tuple.
+    _ZONES = (Zone.HOME_TRYLINE, Zone.HOME_22, Zone.MIDFIELD, Zone.AWAY_22, Zone.AWAY_TRYLINE)
+
+    def _advance_zone(self, attacking: Team, defending: Team, edge: float) -> None:
+        """Moves `self._zone` one step toward the DEFENDING team's try line
+        (advance), leaves it unchanged (hold), or moves it one step toward
+        the ATTACKING team's own try line (retreat) - a single three-way
+        weighted roll per drive, reusing `edge` (the attack-vs-tackling
+        edge `_resolve_drive` already computed, no new attribute reads).
+        Clamped at both ends: `HOME_TRYLINE`/`AWAY_TRYLINE` is as far as the
+        ball can go in either direction. 5 zones (not 3) means it now takes
+        longer, on average, to travel all the way from midfield to a
+        tryline zone than the original 3-zone version did - a deliberate,
+        more realistic side effect, not an oversight."""
+        tendency = self._kick_tendency(attacking)
+        p_advance = self._clamp(0.35 + edge * 0.15 + tendency * 0.05, 0.1, 0.65)
+        p_retreat = self._clamp(0.15 - edge * 0.10, 0.05, 0.3)
+        toward_away = attacking is self.home  # home attacking -> ball moves toward AWAY_TRYLINE
+        roll = self.rng.random()
+        if roll < p_advance:
+            step = 1 if toward_away else -1
+        elif roll < p_advance + p_retreat:
+            step = -1 if toward_away else 1
+        else:
+            return
+        new_index = self._clamp(self._ZONES.index(self._zone) + step, 0, len(self._ZONES) - 1)
+        self._zone = self._ZONES[int(new_index)]
+
+    def _advance_side(self) -> None:
+        """A simple, independent-of-`Zone` per-drive random walk for
+        `self._side` (`Side.LEFT`/`MIDDLE`/`RIGHT`) - deliberately NOT yet
+        weighted by either team's actual wing attributes (a plain,
+        symmetric walk this pass - see `Side`'s own docstring). Used only
+        to bias `_pick_try_scorer`'s wing weighting and to flavor try
+        commentary."""
+        sides = (Side.LEFT, Side.MIDDLE, Side.RIGHT)
+        roll = self.rng.random()
+        idx = sides.index(self._side)
+        if roll < 0.3:
+            step = -1
+        elif roll < 0.6:
+            step = 1
+        else:
+            return
+        new_index = self._clamp(idx + step, 0, len(sides) - 1)
+        self._side = sides[int(new_index)]
+
+    def _zone_relative_to(self, attacking: Team) -> str:
+        """Translates the absolute `self._zone` into one of 5 relative
+        buckets ("attacking_tryline"/"attacking_22"/"midfield"/"own_22"/
+        "own_tryline") from `attacking`'s own point of view, for
+        `ZONE_TRY_MULTIPLIER`/`ZONE_GO_FOR_POSTS_BASE`/`ZONE_PEN_PROB_ADJUST`
+        to key off."""
+        idx = self._ZONES.index(self._zone)
+        # From home's perspective, index 4 (AWAY_TRYLINE) is the most
+        # advanced/attacking position; from away's perspective it's the
+        # mirror image (index 0). `distance_from_attacking_end` is always
+        # 0 at the zone nearest the DEFENDING team's own line (full
+        # attacking danger) and 4 at the zone nearest the ATTACKING team's
+        # own line (pinned deep in their own territory).
+        distance_from_attacking_end = (len(self._ZONES) - 1 - idx) if attacking is self.home else idx
+        return {
+            0: "attacking_tryline",
+            1: "attacking_22",
+            2: "midfield",
+            3: "own_22",
+            4: "own_tryline",
+        }[distance_from_attacking_end]
+
     def _resolve_drive(self, attacking: Team, defending: Team, minute: int, result: MatchResult):
         stats_a = result.stats[attacking.name]
         stats_a.possessions += 1
@@ -983,8 +1157,27 @@ class MatchEngine:
         edge = (attack_rating - tackling_def) / 100  # roughly [-1, 1]
         p_try = self._clamp(0.11 + edge * 0.10, 0.02, 0.45)
 
+        # Zone: advance/hold/retreat the ball one step along the pitch
+        # (reusing the attack/tackling edge already computed above - no new
+        # attribute reads), THEN gate this drive's try chance by where the
+        # ball ended up - see `_advance_zone`/`ZONE_TRY_MULTIPLIER`.
+        self._advance_zone(attacking, defending, edge)
+        self._advance_side()
+        p_try *= ZONE_TRY_MULTIPLIER[self._zone_relative_to(attacking)]
+
         handling_edge = (handling_rating - 60) / 100
         p_error = self._clamp(0.16 - handling_edge * 0.10, 0.04, 0.35)
+
+        # Wet weather: a slick ball genuinely makes handling errors more
+        # common and tries harder to finish - real rugby's most obvious
+        # weather effect (closes the other open half of `MATCH_ENGINE_MODEL.md`
+        # item 9: "windy" already flattened the territory roll; "wet" was
+        # accepted by the constructor but did nothing). Small, flat
+        # adjustments to the two probabilities most directly tied to
+        # handling a wet ball, not a wholesale re-tuning of every outcome.
+        if self.weather == "wet":
+            p_error = self._clamp(p_error + 0.05, 0.04, 0.45)
+            p_try = self._clamp(p_try - 0.02, 0.005, 0.45)
 
         discipline_edge = (70 - discipline_def) / 100
         p_pen_conceded_by_def = self._clamp(0.14 + discipline_edge * 0.12, 0.03, 0.35)
@@ -1212,7 +1405,16 @@ class MatchEngine:
         stats.tries += 1
         scorer = self._pick_try_scorer(team)
         self._credit(team, scorer, tries=1)
-        result.events.append(self._event(minute, team, f"TRY! {scorer.name} ({team.name}) crosses the whitewash after a well-worked move.", result, add_score=(team, 5)))
+        # Honest flavor only - `self._side` is read here for commentary
+        # text, it never changes who actually scored (that's already
+        # decided above, by `_pick_try_scorer`); see `Side`'s own
+        # docstring.
+        side_flavor = {Side.LEFT: " down the left wing", Side.RIGHT: " down the right wing"}.get(self._side, "")
+        result.events.append(self._event(
+            minute, team,
+            f"TRY! {scorer.name} ({team.name}) crosses the whitewash{side_flavor} after a well-worked move.",
+            result, add_score=(team, 5),
+        ))
 
         kicker = self._best_kicker(team)
         conv_prob = self._clamp(0.35 + kicker.attributes.goal_kicking / 150, 0.15, 0.95)
@@ -1231,14 +1433,26 @@ class MatchEngine:
         result.events.append(self._event(minute, conceded_by, f"Penalty against {conceded_by.name} {reason}.", result))
 
         kicker = self._best_kicker(attacking)
-        # Occasionally the attacking team kicks to the corner instead of at goal
-        # (more likely with a weak kicker, deep territory heuristics omitted for simplicity).
-        go_for_posts = self.rng.random() < 0.75 or kicker.attributes.goal_kicking > 70
+        # Zone-gated now (closes `MATCH_ENGINE_MODEL.md` item 3's previously
+        # open "deep territory heuristics omitted for simplicity" gap, same
+        # zone concept Phase 1 added for try probability): pinned in their
+        # own 22 or own tryline, a kick is too far out to realistically go
+        # for posts at all, whatever the kicker's skill - real rugby
+        # essentially never attempts this range. In the defending team's
+        # 22/tryline zone a side almost always takes the points; midfield
+        # keeps the original baseline.
+        zone_rel = self._zone_relative_to(attacking)
+        if zone_rel in ("own_22", "own_tryline"):
+            go_for_posts = False
+        else:
+            go_for_posts = self.rng.random() < ZONE_GO_FOR_POSTS_BASE[zone_rel] or kicker.attributes.goal_kicking > 70
         if not go_for_posts:
             result.events.append(self._event(minute, attacking, f"{attacking.name} kick to the corner instead of taking the points.", result))
             return
 
-        pen_prob = self._clamp(0.55 + kicker.attributes.goal_kicking / 200, 0.3, 0.95)
+        pen_prob = self._clamp(
+            0.55 + kicker.attributes.goal_kicking / 200 + ZONE_PEN_PROB_ADJUST[zone_rel], 0.15, 0.97
+        )
         stats_atk = result.stats[attacking.name]
         if self.rng.random() < pen_prob:
             stats_atk.penalty_goals += 1
@@ -1254,7 +1468,11 @@ class MatchEngine:
                 result.score_home += pts
             else:
                 result.score_away += pts
-        return CommentaryEvent(minute=minute, team=team.name, text=text, score_home=result.score_home, score_away=result.score_away)
+        return CommentaryEvent(
+            minute=minute, team=team.name, text=text,
+            score_home=result.score_home, score_away=result.score_away,
+            zone=self._zone.value, side=self._side.value,
+        )
 
     @staticmethod
     def _clamp(value: float, lo: float, hi: float) -> float:

@@ -399,6 +399,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("Scotland", "Fullback", 1),
             total_points_at_least(50),  # real total: 44
         ],
+        venue="murrayfield",
     ),
     ClassicMatch(
         id="six_nations_tier_b_1996", tournament="six_nations", year=1996,
@@ -418,6 +419,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 2),
             total_points_at_least(30),  # real total: 27
         ],
+        venue="murrayfield",
     ),
     ClassicMatch(
         id="six_nations_tier_b_1997", tournament="six_nations", year=1997,
@@ -437,6 +439,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             player_points_at_least("France", "Fly-half", 21),  # real: 20 (Lamaison)
             total_points_at_least(48),  # real total: 43
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_tier_b_1998", tournament="six_nations", year=1998,
@@ -456,6 +459,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 8),  # real: 8
             total_points_at_least(90),  # real total: 86
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_tier_b_1999", tournament="six_nations", year=1999,
@@ -476,6 +480,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("Wales", "Inside Centre", 1),
             total_points_at_least(65),  # real total: 63
         ],
+        venue="wembley_stadium",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2000", tournament="six_nations", year=2000,
@@ -495,6 +500,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Scotland", 2),  # real: 2
             total_points_at_least(35),  # real total: 32
         ],
+        venue="murrayfield",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2001", tournament="six_nations", year=2001,
@@ -514,6 +520,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("Ireland", "Hooker", 1),
             total_points_at_least(38),  # real total: 34
         ],
+        venue="lansdowne_road",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2002", tournament="six_nations", year=2002,
@@ -533,6 +540,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("France", 5),  # real: 5
             total_points_at_least(55),  # real total: 49
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2003", tournament="six_nations", year=2003,
@@ -552,6 +560,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("England", 3),  # real: 3 (Wilkinson)
             total_points_at_least(50),  # real total: 48
         ],
+        venue="lansdowne_road",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2004", tournament="six_nations", year=2004,
@@ -571,6 +580,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("France", 2),  # real: 2
             total_points_at_least(50),  # real total: 45
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2005", tournament="six_nations", year=2005,
@@ -590,6 +600,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Wales", 3),  # real: 3
             total_points_at_least(55),  # real total: 52
         ],
+        venue="millennium_stadium",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2006", tournament="six_nations", year=2006,
@@ -609,6 +620,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Scotland", 2),  # real: 2
             total_points_at_least(40),  # real total: 36
         ],
+        venue="murrayfield",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2007", tournament="six_nations", year=2007,
@@ -628,6 +640,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("France", "Right Wing", 1),
             total_points_at_least(40),  # real total: 37
         ],
+        venue="croke_park",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2008", tournament="six_nations", year=2008,
@@ -647,6 +660,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Wales", 3),  # real: 3
             total_points_at_least(45),  # real total: 41
         ],
+        venue="millennium_stadium",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2009", tournament="six_nations", year=2009,
@@ -666,6 +680,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_drop_goals_at_least("Ireland", 1),  # real: 1 (O'Gara's winner)
             total_points_at_least(38),  # real total: 32
         ],
+        venue="millennium_stadium",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2010", tournament="six_nations", year=2010,
@@ -685,6 +700,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             total_points_at_least(28),  # real total: 22
             team_tries_at_least("France", 1),
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2011", tournament="six_nations", year=2011,
@@ -704,6 +720,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Italy", 2),  # real: 2
             total_points_at_least(48),  # real total: 43
         ],
+        venue="stadio_olimpico",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2012", tournament="six_nations", year=2012,
@@ -723,6 +740,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             total_points_at_least(30),  # real total: 25
             team_tries_at_least("Wales", 1),
         ],
+        venue="millennium_stadium",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2013", tournament="six_nations", year=2013,
@@ -742,6 +760,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Wales", 3),  # real: 3
             total_points_at_least(40),  # real total: 33
         ],
+        venue="millennium_stadium",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2014", tournament="six_nations", year=2014,
@@ -761,6 +780,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             player_tries_at_least("Ireland", "Outside Centre", 1),
             total_points_at_least(48),  # real total: 42
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2015", tournament="six_nations", year=2015,
@@ -781,6 +801,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 8),  # real: 8
             total_points_at_least(100),  # real total: 90
         ],
+        venue="twickenham",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2016", tournament="six_nations", year=2016,
@@ -800,6 +821,7 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("England", 3),  # real: 3
             total_points_at_least(55),  # real total: 52
         ],
+        venue="stade_de_france",
     ),
     ClassicMatch(
         id="six_nations_tier_b_2017", tournament="six_nations", year=2017,
@@ -819,5 +841,6 @@ TIER_B_SIX_NATIONS_MATCHES: List[ClassicMatch] = [
             team_tries_at_least("Ireland", 1),  # real: 1
             total_points_at_least(28),  # real total: 22
         ],
+        venue="aviva_stadium",
     ),
 ]

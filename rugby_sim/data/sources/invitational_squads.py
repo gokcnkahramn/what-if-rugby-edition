@@ -28,6 +28,7 @@ from .wikipedia_squad import (
     _cross_reference_attributes,
     _proxy_attributes,
     fetch_wikitext,
+    with_twin_position_duplicates,
 )
 
 # -- British & Irish Lions -----------------------------------------------
@@ -192,7 +193,7 @@ def build_lions_pool() -> List[Player]:
             position, attrs, era="'25", notes=note, data_source=source,
             caps=entry.get("caps"),
         ))
-    return pool
+    return with_twin_position_duplicates(pool)
 
 
 # -- Pacific Islanders (2004-2008, discontinued) --------------------------
@@ -270,4 +271,4 @@ def build_pacific_islanders_pool() -> List[Player]:
             full_name, NATION_DISPLAY.get(nation_code, nation_code or "Unknown"),
             position, attrs, era="'08", notes=note, data_source=source,
         ))
-    return pool
+    return with_twin_position_duplicates(pool)
