@@ -12,23 +12,30 @@ out-of-position fit penalty from `Player.rating_at`), not from any notion
 of the real historical result. Put Jonah Lomu at fullback and the engine
 will actually weigh his pace/footwork/aerial numbers at fullback's profile.
 
-How a drive's outcome is decided: each drive is one weighted dice roll
-across a fixed menu of outcomes (try / penalty conceded by the defense, at
-the breakdown or the scrum / card / penalty conceded by the attack /
-lineout turnover / breakdown turnover / handling error / no outcome), not
-a separate phase-by-phase simulation of rucks, mauls, scrums and lineouts
-individually. Each outcome's probability is a baseline plus a swing term
-built from the *edge* between the two teams' relevant `team_sub_rating`
-categories (e.g. `p_scrum_penalty` swings with `scrum_atk - scrum_def`)
-- see `_resolve_drive`. Set-piece (scrum penalty, lineout turnover) and
-breakdown/open-play outcomes (breakdown turnover, driven by the
-defense's `tackle_technique` - dominant hits + jackal threat - against
-attacking handling) are deliberately separate swing terms with different
-inputs, so a scrum-dominant pack and a jackal-heavy back row produce
-different, distinguishable match signatures rather than both just moving
-one shared discipline number. All of this still resolves through the
-same single per-drive roll, not independent set-piece-by-set-piece
-contests - a deliberate scope limit, not an oversight.
+How a drive's outcome is decided: the once-per-possession events (a card,
+or the starting scrum/lineout producing a penalty or turnover) are each one
+weighted dice roll, checked once per drive in `_resolve_drive` - these
+genuinely only happen once per possession, not once per phase. The
+open-play part of the drive is then a bounded LOOP of per-phase rolls
+(`_resolve_phase`, up to `MAX_PHASES_PER_DRIVE` times), across a fixed menu
+of outcomes (try / drop goal / penalty conceded by the defense / breakdown
+turnover / penalty conceded by the attack / handling error / continue to
+the next phase) - a "continue" keeps the drive alive and credits real
+carry/tackle/ruck stats, any other outcome ends it. Each outcome's
+probability is a baseline plus a swing term built from the *edge* between
+the two teams' relevant `team_sub_rating` categories (e.g. `p_scrum_penalty`
+swings with `scrum_atk - scrum_def`) - see `_resolve_drive`/`_resolve_phase`.
+Set-piece (scrum penalty, lineout turnover) and breakdown/open-play outcomes
+(breakdown turnover, driven by the defense's `tackle_technique` - dominant
+hits + jackal threat - against attacking handling) are deliberately separate
+swing terms with different inputs, so a scrum-dominant pack and a
+jackal-heavy back row produce different, distinguishable match signatures
+rather than both just moving one shared discipline number. This is still
+not independent, continuous set-piece-by-set-piece or ruck-by-ruck physical
+resolution - a deliberate scope limit, not an oversight - but it is a real,
+multi-step phase loop now, not a single roll for the whole possession (see
+`MATCH_ENGINE_MODEL.md`'s "What kind of simulation this is" for the full
+account, including exactly what changed and what didn't).
 
 How a team rating is built from individual fit scores: `Player.rating_at`
 gives one player's 0-100 fit at one position (position-profile-weighted
@@ -168,6 +175,39 @@ ZONE_PEN_PROB_ADJUST = {
 MATCH_MINUTES = 80
 MAX_SUBSTITUTIONS = 8
 
+# -- Phase-by-phase drive resolution (Phase 4 of the match-engine-depth arc) -
+# A drive used to be resolved as ONE weighted roll covering the whole
+# possession. It's now a bounded loop of explicit phases (one ruck/tackle/
+# carry exchange each) - `MAX_PHASES_PER_DRIVE` is a simulation safety valve
+# (a real multi-phase rugby passage of play is commonly ~3-6 phases before a
+# break), not a claimed real-world law, same role `SUDDEN_DEATH_CAP_MINUTES`
+# already plays for the knockout state machine. `PHASE_TRY_RAMP` layers a
+# small per-phase multiplier on top of the existing `ZONE_TRY_MULTIPLIER`
+# (not replacing it): a try is still reachable from phase 1 if the zone is
+# already deep in the defending team's territory (an instant line break/
+# intercept stays possible), but is otherwise damped on the earliest phases
+# and reaches full strength by phase 3 - this is what lets a quick-ball,
+# high-edge attack still score in very few phases (a real "quick pass,
+# 1-on-1 overlap" try) while a grinding, low-edge forwards drive takes
+# longer, instead of every drive having an identical, phase-count-blind try
+# chance the way the old single-roll model structurally had to.
+MAX_PHASES_PER_DRIVE = 6
+PHASE_TRY_RAMP: Dict[int, float] = {1: 0.3, 2: 0.7}
+
+# -- Set-piece origin (Phase 5 of the match-engine-depth arc) --------------
+# Every drive used to run the SAME scrum-penalty/lineout-turnover check,
+# unconditionally - treating every one of a match's ~32 drives as a
+# contested set piece, when a real Test match only has ~8-15 scrums and
+# ~12-20 lineouts per team in 80 minutes. These two constants decide, once
+# per drive, whether THIS possession actually started from a scrum, a
+# lineout, or open play (a turnover/kick return/continuation) - tuned by
+# running many seeds and counting realized scrums/lineouts per match
+# against that real range, not invented to hit an exact number. The
+# remainder (1 - these two) is `"open_play"`, which skips the set-piece
+# check entirely and goes straight to the phase loop, same as before.
+DRIVE_ORIGIN_SCRUM_PROB = 0.35
+DRIVE_ORIGIN_LINEOUT_PROB = 0.40
+
 # -- Knockout tiebreak (decide_winner=True only - see MatchEngine.__init__) -
 # Real World Rugby knockout procedure when a tie, draws aren't allowed:
 # extra time (2x10 = 20 min, played in FULL regardless of scoring during it
@@ -269,6 +309,24 @@ STAMINA_MAX_FACTOR = 1.0
 STAMINA_RATE_MIN = 0.3
 STAMINA_RATE_MAX = 2.2
 
+# -- Per-phase involvement stamina (match-engine-depth Phase 7) ------------
+# The team-wide decay above (`_decay_stamina`, once per DRIVE) already
+# scales with `drive_minutes`, but `drive_minutes` is an unrelated random
+# roll (1-4, no attribute input at all - see its own comment) - a drive
+# that grinds through 6 real phases (lots of carries/tackles/rucks) could
+# easily roll the SAME `drive_minutes` as a drive that scores clean on
+# phase 1, so both cost the SAME team-wide stamina regardless of how much
+# actual physical involvement happened. This adds a small, SEPARATE extra
+# cost on top of that unchanged team-wide decay: only the specific player
+# actually credited with a carry or a tackle that phase (see
+# `_credit_phase_continue`) pays it - so a team's go-to ball-carrier/
+# go-to tackler genuinely tires faster over a match than a teammate who's
+# rarely involved, which the old once-per-drive-only model had no way to
+# express at all. Deliberately small (a single phase's involvement costs
+# far less than a whole drive's team-wide decay) so it doesn't require
+# re-tuning the whole `STAMINA_DECAY_PER_MINUTE` calibration above.
+PHASE_INVOLVEMENT_STAMINA_COST = 0.4
+
 # Position "physical workload" signal for stamina decay, derived from
 # `POSITION_PROFILES` rather than a new table: the share of each position's
 # total attribute weight that sits on fitness/strength/scrummaging - the
@@ -286,6 +344,33 @@ def _compute_position_workload() -> Dict[Position, float]:
 
 
 POSITION_WORKLOAD: Dict[Position, float] = _compute_position_workload()
+
+# Thresholds for `team_tactical_identity` below - same [-1, 1] scale
+# `MatchEngine._kick_tendency` already uses live, mid-match (see that
+# method's own docstring); these just name three bands of it for display.
+TACTICAL_IDENTITY_THRESHOLD = 0.35
+
+
+def team_tactical_identity(lineup: Lineup) -> str:
+    """Labels a team's natural attacking tendency - kick-heavy/territorial
+    vs. ball-in-hand/expansive vs. balanced - purely from the STARTING
+    lineup's own kicking/handling sub-ratings (`Lineup.team_sub_rating`,
+    no new manual data, no new per-team setting to invent). Same formula
+    `MatchEngine._kick_tendency` already applies live, mid-match (reading
+    the per-match working roster instead of the static starting lineup) to
+    nudge `_advance_zone`'s odds - this is the same signal, just computed
+    from the pre-match team sheet so it can be shown on a report/team-sheet
+    screen, not only inferred from watching a live match unfold. A real,
+    attribute-derived label, not a cosmetic flavor string: swap in a
+    kicking-heavy backline and this label genuinely changes."""
+    kicking = lineup.team_sub_rating("kicking")
+    handling = lineup.team_sub_rating("handling")
+    tendency = max(-1.0, min(1.0, (kicking - handling) / 40))
+    if tendency >= TACTICAL_IDENTITY_THRESHOLD:
+        return "Kick-heavy / territorial"
+    if tendency <= -TACTICAL_IDENTITY_THRESHOLD:
+        return "Ball-in-hand / expansive"
+    return "Balanced"
 
 # -- Injury severity (heuristic, documented honestly - not a medical model) -
 # When an injury happens (see `_apply_injury`), one of these tiers is rolled
@@ -321,6 +406,26 @@ class TeamMatchStats:
     territory_pct: float = 0.0
     injuries: int = 0
     substitutions: int = 0
+    # Emerge from the phase-by-phase drive loop (see `_resolve_phase`/
+    # `MAX_PHASES_PER_DRIVE`), credited only on a "continue" phase (the
+    # attack retains clean ball) - a real, simulated-from-within-the-model
+    # byproduct, not a separately invented stat. `rucks_won` is team-level
+    # only: this model has no real per-player "who won the ruck"
+    # attribution to draw on, same honesty convention as everywhere else
+    # in this file.
+    carries: int = 0
+    metres_gained: int = 0
+    tackles_made: int = 0
+    tackles_missed: int = 0
+    rucks_won: int = 0
+    # Only incremented on a drive whose "possession origin" roll actually
+    # came up scrum/lineout (see `DRIVE_ORIGIN_SCRUM_PROB`/
+    # `_resolve_scrum`/`_resolve_lineout`) - team-level only, same
+    # "no real per-player attribution" convention as `rucks_won` (the
+    # commentary still names a specific player for flavor/credit, the
+    # counting stat just doesn't).
+    scrums_won: int = 0
+    lineouts_won: int = 0
 
 
 @dataclass
@@ -334,6 +439,10 @@ class PlayerMatchStats:
     conversions: int = 0
     penalty_goals: int = 0
     drop_goals: int = 0
+    carries: int = 0
+    metres_gained: int = 0
+    tackles_made: int = 0
+    tackles_missed: int = 0
 
     @property
     def points(self) -> int:
@@ -1123,6 +1232,17 @@ class MatchEngine:
         }[distance_from_attacking_end]
 
     def _resolve_drive(self, attacking: Team, defending: Team, minute: int, result: MatchResult):
+        """Drive-level setup, done ONCE per possession (ratings don't
+        meaningfully change within the few minutes a drive takes, and
+        stamina is still only decayed once per drive - see the match-
+        engine-depth plan's explicitly deferred "per-phase stamina" item):
+        computes every team sub-rating, resolves the one-off set-piece/
+        card checks that genuinely only happen once per possession (you
+        don't re-contest the scrum or get carded twice for the same
+        drive), then hands off to `_resolve_phase` - a bounded loop of
+        individual ruck/tackle/carry exchanges - for the open-play part of
+        the drive. See `MAX_PHASES_PER_DRIVE`'s comment for why this
+        replaced the old "one roll decides the whole drive" model."""
         stats_a = result.stats[attacking.name]
         stats_a.possessions += 1
 
@@ -1137,12 +1257,6 @@ class MatchEngine:
         scrum_atk = self._team_sub_rating(attacking, "scrum") * atk_card_pen
         scrum_def = self._team_sub_rating(defending, "scrum") * def_card_pen
 
-        lineout_quality_atk = (
-            self._team_sub_rating(attacking, "lineout")
-            + self._team_sub_rating(attacking, "lineout_throw")
-        ) / 2 * atk_card_pen
-        lineout_def = self._team_sub_rating(defending, "lineout") * def_card_pen
-
         # Breakdown contest, kept separate from both the scrum penalty and
         # the lineout turnover above: driven by the defense's
         # tackle_technique (dominant hits + jackal/turnover threat, see
@@ -1155,29 +1269,6 @@ class MatchEngine:
         # Base probabilities, tuned so an evenly matched drive yields a try
         # roughly 1 time in 7-8, consistent with real Test rugby try counts.
         edge = (attack_rating - tackling_def) / 100  # roughly [-1, 1]
-        p_try = self._clamp(0.11 + edge * 0.10, 0.02, 0.45)
-
-        # Zone: advance/hold/retreat the ball one step along the pitch
-        # (reusing the attack/tackling edge already computed above - no new
-        # attribute reads), THEN gate this drive's try chance by where the
-        # ball ended up - see `_advance_zone`/`ZONE_TRY_MULTIPLIER`.
-        self._advance_zone(attacking, defending, edge)
-        self._advance_side()
-        p_try *= ZONE_TRY_MULTIPLIER[self._zone_relative_to(attacking)]
-
-        handling_edge = (handling_rating - 60) / 100
-        p_error = self._clamp(0.16 - handling_edge * 0.10, 0.04, 0.35)
-
-        # Wet weather: a slick ball genuinely makes handling errors more
-        # common and tries harder to finish - real rugby's most obvious
-        # weather effect (closes the other open half of `MATCH_ENGINE_MODEL.md`
-        # item 9: "windy" already flattened the territory roll; "wet" was
-        # accepted by the constructor but did nothing). Small, flat
-        # adjustments to the two probabilities most directly tied to
-        # handling a wet ball, not a wholesale re-tuning of every outcome.
-        if self.weather == "wet":
-            p_error = self._clamp(p_error + 0.05, 0.04, 0.45)
-            p_try = self._clamp(p_try - 0.02, 0.005, 0.45)
 
         discipline_edge = (70 - discipline_def) / 100
         p_pen_conceded_by_def = self._clamp(0.14 + discipline_edge * 0.12, 0.03, 0.35)
@@ -1185,16 +1276,38 @@ class MatchEngine:
         discipline_edge_atk = (70 - discipline_atk) / 100
         p_pen_conceded_by_atk = self._clamp(0.08 + discipline_edge_atk * 0.10, 0.02, 0.30)
 
-        scrum_edge = (scrum_atk - scrum_def) / 100
-        p_scrum_penalty = self._clamp(0.04 + scrum_edge * 0.05, 0.0, 0.12)
-
-        lineout_edge = (lineout_quality_atk - lineout_def) / 100
-        p_lineout_turnover = self._clamp(0.05 - lineout_edge * 0.06, 0.01, 0.14)
-
-        breakdown_edge = (breakdown_def - breakdown_atk) / 100
-        p_breakdown_turnover = self._clamp(0.06 + breakdown_edge * 0.08, 0.01, 0.18)
-
         p_card = 0.015 * self._clamp(1.4 - discipline_def / 70, 0.3, 2.0)
+
+        # Card check: once per DRIVE, not per phase (a cynical/foul-based
+        # card is a whole-possession event, not something re-rolled on
+        # every ruck) - checked first, mutually exclusive with everything
+        # else this drive, matching the old single-roll model's own
+        # effective behavior (a card drive produced no try/penalty that
+        # same drive either).
+        if self.rng.random() < p_card:
+            is_red, carded_player = self._issue_card(defending, minute, result)
+            detail = result.card_details[-1] if result.card_details else None
+            if detail and detail.get("escalated_second_yellow"):
+                card_word = "second yellow card - RED CARD"
+            else:
+                card_word = "red card" if is_red else "yellow card"
+            who = f"{carded_player.name} ({defending.name})" if carded_player else defending.name
+            result.events.append(self._event(minute, defending, f"{who} is shown a {card_word}.", result))
+            return
+
+        # Possession origin: once per drive, decide whether this one
+        # actually started from a scrum, a lineout, or open play (a
+        # turnover/kick return/continuation) - see `DRIVE_ORIGIN_SCRUM_PROB`'s
+        # comment for why this replaced the old "every drive is a contested
+        # set piece" behavior. `"open_play"` falls straight through to the
+        # phase loop below, unchanged.
+        origin_roll = self.rng.random()
+        if origin_roll < DRIVE_ORIGIN_SCRUM_PROB:
+            if self._resolve_scrum(attacking, defending, scrum_atk, scrum_def, minute, result) != "continue":
+                return
+        elif origin_roll < DRIVE_ORIGIN_SCRUM_PROB + DRIVE_ORIGIN_LINEOUT_PROB:
+            if self._resolve_lineout(attacking, defending, minute, result) != "continue":
+                return
 
         # Drop goal: a modest, attribute-driven alternative the attacking
         # side's kicker can land instead of forcing a try/penalty chance -
@@ -1204,13 +1317,130 @@ class MatchEngine:
         # struck from longer range than a routine penalty) and
         # `game_intelligence` (the decision to actually go for the drop
         # rather than keep playing), same per-player-attribute convention
-        # as the conversion/penalty-goal rolls just below (not a team
-        # sub-rating average). Calibrated to a handful of successful drop
-        # goals per 100 simulated matches combined - rare, never guaranteed,
-        # occasionally zero for an entire match either side.
+        # as the conversion/penalty-goal rolls (not a team sub-rating
+        # average). Calibrated to a handful of successful drop goals per
+        # 100 simulated matches combined - rare, never guaranteed,
+        # occasionally zero for an entire match either side. Evaluated
+        # fresh each phase below (the kicker could drop a goal at any
+        # point in open play, not just once per drive).
         dg_kicker = self._best_kicker(attacking)
         dg_skill = (dg_kicker.attributes.place_kicking_range + dg_kicker.attributes.game_intelligence) / 2
         p_drop_goal = self._clamp(0.004 + (dg_skill - 55) / 1500, 0.001, 0.01)
+
+        breakdown_edge = (breakdown_def - breakdown_atk) / 100
+        p_breakdown_turnover = self._clamp(0.06 + breakdown_edge * 0.08, 0.01, 0.18)
+
+        # Second player-specific decision behavior (match-engine-depth
+        # Phase 8, same pattern as the scrum-half snipe try above): a
+        # standout openside flanker's OWN `tackle_technique`/
+        # `game_intelligence` (not the team-wide `breakdown_def` average
+        # above) can create a real, individually-attributed extra jackal
+        # threat - a team with an elite fetcher at 7 should turn the ball
+        # over more often than its team-wide breakdown rating alone
+        # suggests, same real-world distinction the review's "Dupont" ask
+        # was about, applied to a second position.
+        jackal_flanker = None
+        jackal_bonus = 0.0
+        of_slot = self._active[defending.name].get(Position.OPENSIDE_FLANKER)
+        if of_slot is not None:
+            jackal_flanker = of_slot.player
+            fetcher_skill = (jackal_flanker.attributes.tackle_technique + jackal_flanker.attributes.game_intelligence) / 2
+            jackal_bonus = self._clamp((fetcher_skill - 60) / 300, 0.0, 0.04)
+        p_breakdown_turnover = self._clamp(p_breakdown_turnover + jackal_bonus, 0.01, 0.22)
+
+        for phase_num in range(1, MAX_PHASES_PER_DRIVE + 1):
+            outcome = self._resolve_phase(
+                attacking, defending, phase_num, minute, result,
+                edge=edge, handling_rating=handling_rating,
+                p_pen_conceded_by_def=p_pen_conceded_by_def,
+                p_pen_conceded_by_atk=p_pen_conceded_by_atk,
+                p_breakdown_turnover=p_breakdown_turnover, jackal_flanker=jackal_flanker,
+                dg_kicker=dg_kicker, p_drop_goal=p_drop_goal,
+            )
+            if outcome != "continue":
+                return
+
+        # Reached MAX_PHASES_PER_DRIVE still "continuing" - the attack
+        # couldn't finish what it started; the defense eventually resets
+        # it. A simulation safety valve (see `MAX_PHASES_PER_DRIVE`), not a
+        # claimed real rugby law.
+        result.events.append(self._event(minute, attacking, f"{attacking.name} work through the phases but {defending.name}'s defense holds firm.", result))
+
+    def _resolve_phase(
+        self, attacking: Team, defending: Team, phase_num: int, minute: int, result: MatchResult,
+        *, edge: float, handling_rating: float,
+        p_pen_conceded_by_def: float, p_pen_conceded_by_atk: float, p_breakdown_turnover: float,
+        jackal_flanker: Optional[Player],
+        dg_kicker: "Player", p_drop_goal: float,
+    ) -> str:
+        """One ruck/tackle/carry exchange within a drive - see
+        `MAX_PHASES_PER_DRIVE`'s comment for why a drive is now a bounded
+        loop of these instead of one roll. Returns `"continue"` if the
+        attack retains clean, usable ball (the loop keeps going), or a
+        short tag naming whatever decisive outcome ended the drive."""
+        stats_a = result.stats[attacking.name]
+
+        p_try = self._clamp(0.11 + edge * 0.10, 0.02, 0.45) * PHASE_TRY_RAMP.get(phase_num, 1.0)
+
+        # Zone: advance/hold/retreat the ball one step along the pitch
+        # (reusing the attack/tackling edge already computed for this
+        # drive - no new attribute reads), once per PHASE now (a longer,
+        # multi-phase drive genuinely advances further than a one-phase
+        # one - the old once-per-drive version couldn't express this at
+        # all), THEN gate this phase's try chance by where the ball ended
+        # up - see `_advance_zone`/`ZONE_TRY_MULTIPLIER`.
+        self._advance_zone(attacking, defending, edge)
+        self._advance_side()
+        zone_rel = self._zone_relative_to(attacking)
+        p_try *= ZONE_TRY_MULTIPLIER[zone_rel]
+
+        # Player-specific decision behavior (a real Dupont-vs-an-average-9
+        # distinction, not just a team-wide average): close to the
+        # defending team's line, a sharp, fast scrum-half can sniff out a
+        # gap and snipe over themselves - a genuinely individual read of
+        # the game, not a team-level outcome. Driven by THIS specific
+        # player's own `pace`/`game_intelligence` (not a team sub-rating),
+        # so a world-class 9 behind an otherwise-average team still
+        # produces a measurably higher snipe-try rate than a mediocre 9
+        # behind the exact same team - see `MATCH_ENGINE_MODEL.md`.
+        p_snipe = 0.0
+        snipe_scrum_half = None
+        if zone_rel in ("attacking_tryline", "attacking_22"):
+            sh_slot = self._active[attacking.name].get(Position.SCRUM_HALF)
+            if sh_slot is not None:
+                snipe_scrum_half = sh_slot.player
+                skill = (snipe_scrum_half.attributes.pace + snipe_scrum_half.attributes.game_intelligence) / 2
+                p_snipe = self._clamp((skill - 60) / 400, 0.0, 0.05)
+
+        # A third player-specific decision behavior (match-engine-depth
+        # Phase 9, same pattern as the scrum-half snipe and the openside
+        # flanker's jackal threat): the NEAR wing (matching the ball's
+        # current `Side` - the real winger the attack is actually using,
+        # not the far/blindside one) can beat the last defender on their
+        # own footwork/pace when the ball is already close to the line -
+        # a real "stepped the fullback" moment, driven by that ONE
+        # player's own attributes, not a team-wide average.
+        p_wing_break = 0.0
+        wing_breaker = None
+        if zone_rel in ("attacking_tryline", "attacking_22"):
+            wing_position = {Side.LEFT: Position.LEFT_WING, Side.RIGHT: Position.RIGHT_WING}.get(self._side)
+            if wing_position is not None:
+                wing_slot = self._active[attacking.name].get(wing_position)
+                if wing_slot is not None:
+                    wing_breaker = wing_slot.player
+                    wing_skill = (wing_breaker.attributes.footwork + wing_breaker.attributes.pace) / 2
+                    p_wing_break = self._clamp((wing_skill - 60) / 350, 0.0, 0.05)
+
+        handling_edge = (handling_rating - 60) / 100
+        p_error = self._clamp(0.16 - handling_edge * 0.10, 0.04, 0.35)
+
+        # Wet weather: a slick ball genuinely makes handling errors more
+        # common and tries harder to finish - real rugby's most obvious
+        # weather effect. Small, flat adjustments to the two probabilities
+        # most directly tied to handling a wet ball.
+        if self.weather == "wet":
+            p_error = self._clamp(p_error + 0.05, 0.04, 0.45)
+            p_try = self._clamp(p_try - 0.02, 0.005, 0.45)
 
         roll = self.rng.random()
         cumulative = 0.0
@@ -1222,7 +1452,17 @@ class MatchEngine:
 
         if take(p_try):
             self._score_try(attacking, minute, result)
-        elif take(p_drop_goal):
+            return "try"
+        if take(p_snipe):
+            self._score_try(attacking, minute, result, forced_scorer=snipe_scrum_half, snipe=True)
+            return "try"
+        if take(p_wing_break):
+            self._score_try(
+                attacking, minute, result, forced_scorer=wing_breaker,
+                individual_flavor="steps the last defender and goes over in the corner - a brilliant individual finish.",
+            )
+            return "try"
+        if take(p_drop_goal):
             stats_a.drop_goals += 1
             self._credit(attacking, dg_kicker, drop_goals=1)
             result.events.append(self._event(
@@ -1230,41 +1470,241 @@ class MatchEngine:
                 f"DROP GOAL! {dg_kicker.name} ({attacking.name}) drops a goal.",
                 result, add_score=(attacking, 3),
             ))
-        elif take(p_pen_conceded_by_def):
+            return "drop_goal"
+        if take(p_pen_conceded_by_def):
             self._score_penalty_chance(attacking, defending, minute, result)
-        elif take(p_scrum_penalty):
-            self._score_penalty_chance(attacking, defending, minute, result, via="scrum")
-        elif take(p_lineout_turnover):
+            return "penalty"
+        if take(p_breakdown_turnover):
             result.stats[defending.name].turnovers_won += 1
-            result.events.append(self._event(
-                minute, defending,
-                f"{defending.name} win the lineout - overthrow/steal from {attacking.name}.",
-                result,
-            ))
-        elif take(p_breakdown_turnover):
-            result.stats[defending.name].turnovers_won += 1
-            result.events.append(self._event(
-                minute, defending,
-                f"{defending.name} jackal over the ball - turnover won at the breakdown against {attacking.name}.",
-                result,
-            ))
-        elif take(p_card):
-            is_red, carded_player = self._issue_card(defending, minute, result)
-            detail = result.card_details[-1] if result.card_details else None
-            if detail and detail.get("escalated_second_yellow"):
-                card_word = "second yellow card - RED CARD"
+            if jackal_flanker is not None:
+                self._apply_phase_involvement_stamina(jackal_flanker)
+                jackal_text = f"{jackal_flanker.name} jackals over the ball"
             else:
-                card_word = "red card" if is_red else "yellow card"
-            who = f"{carded_player.name} ({defending.name})" if carded_player else defending.name
-            result.events.append(self._event(minute, defending, f"{who} is shown a {card_word}.", result))
-        elif take(p_pen_conceded_by_atk):
+                jackal_text = f"{defending.name} jackal over the ball"
+            result.events.append(self._event(
+                minute, defending,
+                f"{jackal_text} - turnover won at the breakdown against {attacking.name}.",
+                result,
+            ))
+            self._credit_defensive_phase_win(defending, missed=True)
+            return "turnover"
+        if take(p_pen_conceded_by_atk):
             self._score_penalty_chance(defending, attacking, minute, result)
-        elif take(p_error):
+            return "penalty"
+        if take(p_error):
             stats_a.handling_errors += 1
             result.events.append(self._event(minute, attacking, f"{attacking.name} lose the ball - handling error, scrum to {defending.name}.", result))
             result.stats[defending.name].turnovers_won += 1
-        else:
-            result.events.append(self._event(minute, attacking, f"{attacking.name} work through the phases but {defending.name}'s defense holds firm.", result))
+            return "error"
+
+        # Clean continuation - no commentary line of its own (reserved for
+        # the drive's eventual decisive outcome, same "one line per
+        # meaningful event" convention the event log already followed
+        # before phases existed) - but a real, phase-by-phase stats
+        # byproduct: the attack carried it up, the defense made the
+        # tackle, the attack won the ruck and keeps the ball.
+        self._credit_phase_continue(attacking, defending, result, edge)
+        return "continue"
+
+    def _apply_phase_involvement_stamina(self, player: Player) -> None:
+        """A small EXTRA stamina cost for one player's direct involvement
+        in a single phase (a carry or a tackle attempt) - see
+        `PHASE_INVOLVEMENT_STAMINA_COST`'s own comment for why this is
+        separate from, and smaller than, the existing once-per-drive
+        team-wide decay (`_decay_stamina`), not a replacement for it."""
+        key = id(player)
+        current = self._stamina.get(key, 100.0)
+        self._stamina[key] = max(STAMINA_FLOOR, current - PHASE_INVOLVEMENT_STAMINA_COST)
+
+    def _credit_phase_continue(self, attacking: Team, defending: Team, result: MatchResult, edge: float) -> None:
+        """Stats credited on a "continue" phase only - see `TeamMatchStats`'
+        own comment on these fields for why nothing is credited on a
+        scoring/turnover/error phase instead (those already have their own,
+        longer-standing stat fields)."""
+        stats_a = result.stats[attacking.name]
+        stats_d = result.stats[defending.name]
+        carrier = self._pick_try_scorer(attacking)
+        metres = round(self._clamp(4 + edge * 8, 1, 15))
+        stats_a.carries += 1
+        stats_a.metres_gained += metres
+        stats_a.rucks_won += 1
+        self._credit(attacking, carrier, carries=1, metres_gained=metres)
+        self._apply_phase_involvement_stamina(carrier)
+
+        stats_d.tackles_made += 1
+        tackler = self._pick_defender(defending)
+        if tackler is not None:
+            self._credit(defending, tackler, tackles_made=1)
+            self._apply_phase_involvement_stamina(tackler)
+
+    def _credit_defensive_phase_win(self, defending: Team, missed: bool) -> None:
+        """A broken-tackle/jackal-won-it phase (see the breakdown-turnover
+        branch above): credits the tackle attempt as missed for a defender
+        picked the same uniform way `_issue_card` picks a carded player -
+        this model has no real per-defender skill differentiation to
+        weight the pick by yet (see `MATCH_ENGINE_MODEL.md`'s own "Known
+        limitations" on the card pick for the same reason)."""
+        result = self.result
+        if result is None:
+            return
+        stats_d = result.stats[defending.name]
+        if missed:
+            stats_d.tackles_missed += 1
+        tackler = self._pick_defender(defending)
+        if tackler is not None and missed:
+            self._credit(defending, tackler, tackles_missed=1)
+            self._apply_phase_involvement_stamina(tackler)
+
+    def _pick_defender(self, team: Team) -> Optional[Player]:
+        slots = list(self._active[team.name].values())
+        return self.rng.choice(slots).player if slots else None
+
+    _SCRUM_POSITIONS = (Position.LOOSEHEAD_PROP, Position.HOOKER, Position.TIGHTHEAD_PROP)
+
+    def _weakest_scrum_player(self, team: Team) -> Optional[Player]:
+        """The front-row player with the lowest `scrummaging` attribute -
+        who "got outscrummaged" when a scrum is lost against the head (see
+        `_resolve_scrum`). Same single-attribute-min pick style as
+        `_best_kicker`'s max pick."""
+        slots = [s for s in self._active[team.name].values() if s.position in self._SCRUM_POSITIONS]
+        if not slots:
+            return None
+        return min(slots, key=lambda s: s.player.attributes.scrummaging).player
+
+    def _strongest_scrum_player(self, team: Team) -> Optional[Player]:
+        """The front-row player with the highest `scrummaging` attribute -
+        who actually won a scrum against the head."""
+        slots = [s for s in self._active[team.name].values() if s.position in self._SCRUM_POSITIONS]
+        if not slots:
+            return None
+        return max(slots, key=lambda s: s.player.attributes.scrummaging).player
+
+    def _best_lineout_jumper(self, team: Team) -> Optional[Player]:
+        """The player with the highest `lineout_jumping` attribute among
+        the real lineout-contesting positions (`CATEGORY_POSITION_GROUPS
+        ["lineout"]` - hooker, locks, back row), for the lineout jumping
+        contest in `_resolve_lineout`. Same `_best_kicker`-style single-
+        attribute-max pick, just scoped to the positions that actually
+        contest a lineout."""
+        group = CATEGORY_POSITION_GROUPS.get("lineout")
+        slots = [s for s in self._active[team.name].values() if group is None or s.position in group]
+        if not slots:
+            return None
+        return max(slots, key=lambda s: s.player.attributes.lineout_jumping).player
+
+    def _resolve_scrum(
+        self, attacking: Team, defending: Team, scrum_atk: float, scrum_def: float, minute: int, result: MatchResult,
+    ) -> str:
+        """Resolves a drive whose possession-origin roll came up `"scrum"`
+        (see `DRIVE_ORIGIN_SCRUM_PROB`) - reuses the EXISTING, already
+        individually-scoped `scrum_atk`/`scrum_def` sub-ratings
+        (`_resolve_drive` already computed them, no new attribute reads)
+        for the penalty-conceded probability (same formula as the old
+        unconditional-every-drive version), plus a new, small chance of a
+        clean scrum turnover "against the head." Returns `"continue"` if
+        the attacking team keeps the ball (the normal, common case - the
+        phase loop runs as usual), or a short outcome tag otherwise."""
+        scrum_edge = (scrum_atk - scrum_def) / 100
+        p_scrum_penalty = self._clamp(0.04 + scrum_edge * 0.05, 0.0, 0.12)
+        p_scrum_turnover = self._clamp(0.01 - scrum_edge * 0.02, 0.002, 0.05)
+
+        roll = self.rng.random()
+        if roll < p_scrum_penalty:
+            self._score_penalty_chance(attacking, defending, minute, result, via="scrum")
+            return "penalty"
+        if roll < p_scrum_penalty + p_scrum_turnover:
+            result.stats[defending.name].scrums_won += 1
+            result.stats[defending.name].turnovers_won += 1
+            loser = self._weakest_scrum_player(attacking)
+            winner = self._strongest_scrum_player(defending)
+            loser_text = f" - {loser.name} outscrummaged" if loser else ""
+            winner_text = f" by {winner.name}" if winner else ""
+            result.events.append(self._event(
+                minute, defending,
+                f"{defending.name} win the scrum against the head{winner_text}{loser_text} ({attacking.name}).",
+                result,
+            ))
+            return "turnover"
+
+        result.stats[attacking.name].scrums_won += 1
+
+        # Set-piece sub-scenario (match-engine-depth Phase 10): a real,
+        # recognizable rugby pattern - the number 8 picks up from the base
+        # of a dominant scrum and drives over himself - distinct from the
+        # phase loop's own generic try chance, only reachable right off a
+        # clean scrum win close to the line, and driven by THIS specific
+        # player's own `strength`/`game_intelligence`, not a team average.
+        zone_rel = self._zone_relative_to(attacking)
+        if zone_rel in ("attacking_tryline", "attacking_22"):
+            no8_slot = self._active[attacking.name].get(Position.NUMBER_8)
+            if no8_slot is not None:
+                no8 = no8_slot.player
+                skill = (no8.attributes.strength + no8.attributes.game_intelligence) / 2
+                p_pick_and_go = self._clamp((skill - 65) / 300, 0.0, 0.06)
+                if self.rng.random() < p_pick_and_go:
+                    self._score_try(
+                        attacking, minute, result, forced_scorer=no8,
+                        individual_flavor="picks up from the base and drives over himself - a real number 8's try.",
+                    )
+                    return "try"
+
+        return "continue"
+
+    def _resolve_lineout(self, attacking: Team, defending: Team, minute: int, result: MatchResult) -> str:
+        """Resolves a drive whose possession-origin roll came up
+        `"lineout"` (see `DRIVE_ORIGIN_LINEOUT_PROB`) - unlike the old
+        team-sub-rating-average version, this genuinely picks two named
+        individuals per side: the attacking HOOKER specifically (the real
+        thrower - `lineout_throwing`) plus each side's best jumper
+        (`_best_lineout_jumper`, `lineout_jumping`), not a whole-team
+        average. Returns `"continue"` if the attack secures clean ball."""
+        thrower_slot = self._active[attacking.name].get(Position.HOOKER)
+        thrower_throwing = thrower_slot.player.attributes.lineout_throwing if thrower_slot else 50.0
+        attacking_jumper = self._best_lineout_jumper(attacking)
+        defending_jumper = self._best_lineout_jumper(defending)
+        attacking_jumping = attacking_jumper.attributes.lineout_jumping if attacking_jumper else 50.0
+        defending_jumping = defending_jumper.attributes.lineout_jumping if defending_jumper else 50.0
+
+        atk_card_pen = self._active_card_penalty(attacking)
+        def_card_pen = self._active_card_penalty(defending)
+        lineout_edge = (
+            ((thrower_throwing + attacking_jumping) / 2) * atk_card_pen
+            - defending_jumping * def_card_pen
+        ) / 100
+        p_lineout_turnover = self._clamp(0.05 - lineout_edge * 0.06, 0.01, 0.14)
+
+        if self.rng.random() < p_lineout_turnover:
+            result.stats[defending.name].lineouts_won += 1
+            result.stats[defending.name].turnovers_won += 1
+            jumper_text = f" - {defending_jumper.name} climbs above everyone" if defending_jumper else ""
+            result.events.append(self._event(
+                minute, defending,
+                f"{defending.name} win the lineout{jumper_text} - overthrow/steal from {attacking.name}.",
+                result,
+            ))
+            return "turnover"
+
+        result.stats[attacking.name].lineouts_won += 1
+
+        # Set-piece sub-scenario (match-engine-depth Phase 10, same idea
+        # as the scrum's own pick-and-go): a catch-and-drive maul off a
+        # clean lineout win, close to the line - the HOOKER peeling off
+        # the back of the drive to finish it (a real, recognizable rugby
+        # pattern), driven by THIS specific player's own `strength`/
+        # `game_intelligence`, not a team average.
+        zone_rel = self._zone_relative_to(attacking)
+        if zone_rel in ("attacking_tryline", "attacking_22") and thrower_slot is not None:
+            hooker = thrower_slot.player
+            skill = (hooker.attributes.strength + hooker.attributes.game_intelligence) / 2
+            p_maul_try = self._clamp((skill - 65) / 300, 0.0, 0.06)
+            if self.rng.random() < p_maul_try:
+                self._score_try(
+                    attacking, minute, result, forced_scorer=hooker,
+                    individual_flavor="peels off the back of a driving maul to finish it - a real catch-and-drive try.",
+                )
+                return "try"
+
+        return "continue"
 
     def _issue_card(self, team: Team, minute: int, result: MatchResult) -> Tuple[bool, Optional[Player]]:
         # A player already sent off this match can't be carded again - they're
@@ -1400,21 +1840,35 @@ class MatchEngine:
             score_home=result.score_home, score_away=result.score_away,
         ))
 
-    def _score_try(self, team: Team, minute: int, result: MatchResult):
+    def _score_try(
+        self, team: Team, minute: int, result: MatchResult,
+        forced_scorer: Optional[Player] = None, snipe: bool = False, individual_flavor: Optional[str] = None,
+    ):
+        """`forced_scorer`/`individual_flavor` (`snipe=True` is a thin,
+        backward-compatible alias for the scrum-half's own flavor text):
+        used by this engine's player-specific decision outcomes (see
+        `_resolve_phase`'s `p_snipe` branch, and any later one following
+        the same pattern) - a real, individually-attributed try a specific
+        standout player can create, not just a team-wide average pick.
+        Default behavior (no args) is unchanged from before any of these
+        existed: `_pick_try_scorer`'s usual weighted pick, generic
+        commentary."""
         stats = result.stats[team.name]
         stats.tries += 1
-        scorer = self._pick_try_scorer(team)
+        scorer = forced_scorer if forced_scorer is not None else self._pick_try_scorer(team)
         self._credit(team, scorer, tries=1)
-        # Honest flavor only - `self._side` is read here for commentary
-        # text, it never changes who actually scored (that's already
-        # decided above, by `_pick_try_scorer`); see `Side`'s own
-        # docstring.
-        side_flavor = {Side.LEFT: " down the left wing", Side.RIGHT: " down the right wing"}.get(self._side, "")
-        result.events.append(self._event(
-            minute, team,
-            f"TRY! {scorer.name} ({team.name}) crosses the whitewash{side_flavor} after a well-worked move.",
-            result, add_score=(team, 5),
-        ))
+        if snipe:
+            text = f"TRY! {scorer.name} ({team.name}) sniffs out a gap and snipes over from close range - a sharp individual read, not a team move."
+        elif individual_flavor is not None:
+            text = f"TRY! {scorer.name} ({team.name}) {individual_flavor}"
+        else:
+            # Honest flavor only - `self._side` is read here for commentary
+            # text, it never changes who actually scored (that's already
+            # decided above, by `_pick_try_scorer`); see `Side`'s own
+            # docstring.
+            side_flavor = {Side.LEFT: " down the left wing", Side.RIGHT: " down the right wing"}.get(self._side, "")
+            text = f"TRY! {scorer.name} ({team.name}) crosses the whitewash{side_flavor} after a well-worked move."
+        result.events.append(self._event(minute, team, text, result, add_score=(team, 5)))
 
         kicker = self._best_kicker(team)
         conv_prob = self._clamp(0.35 + kicker.attributes.goal_kicking / 150, 0.15, 0.95)

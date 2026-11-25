@@ -147,8 +147,12 @@ def test_card_report_json_shape_and_live_matches_remaining():
     # extra `rng.random()` per drive shifts downstream RNG consumption for
     # every later drive, same class of reseed this test's own history
     # already describes for the drop-goal addition - seed 1 started
-    # rolling a spurious extra yellow card after this change.
-    engine.rng = _random.Random(2)
+    # rolling a spurious extra yellow card after this change. Re-picked
+    # again, 2 -> 3, after the player-specific "scrum-half snipe try"
+    # branch (match-engine-depth Phase 6) re-shuffled the same cumulative
+    # per-phase roll's outcome boundaries. Re-picked again, 3 -> 6, after
+    # the wing-break try (Phase 9) re-shuffled it again.
+    engine.rng = _random.Random(6)
     engine.finish()
     availability.record_match(result)
 
@@ -171,8 +175,17 @@ def test_card_report_json_without_availability_has_no_matches_remaining_field():
     engine.rng = _FakeRng([0.5])  # yellow
     engine._issue_card(home, 7, result)
     import random as _random
-    # See comment on the same re-seeding above.
-    engine.rng = _random.Random(0)
+    # See comment on the same re-seeding above. Re-picked from 0 to 1 after
+    # the phase-by-phase drive resolution model (match-engine-depth Phase 4)
+    # replaced the old one-roll-per-drive model - the new per-phase rolls
+    # shift downstream RNG consumption the same way every previous
+    # per-drive-roll addition in this file's history already did.
+    # Re-picked again, 1 -> 2, after the player-specific "scrum-half snipe
+    # try" branch (match-engine-depth Phase 6) re-shuffled the same
+    # cumulative per-phase roll's outcome boundaries. Re-picked again,
+    # 2 -> 3, after the openside flanker's individual jackal-threat bonus
+    # (Phase 8) re-shuffled it again.
+    engine.rng = _random.Random(3)
     engine.finish()
 
     report = _card_report_json([result])

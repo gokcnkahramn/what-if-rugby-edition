@@ -192,12 +192,31 @@ class Tournament:
 
     def _resolve_team_for_match(self, name: str) -> Team:
         if name in self.squads:
-            pool = self.availability.filter_available(name, self.squads[name])
+            full_squad = self.squads[name]
+            pool = self.availability.filter_available(name, full_squad)
             if not pool:
                 raise ValueError(
                     f"No available players left for '{name}' this match - "
                     f"everyone in their pool is currently sidelined."
                 )
+            if len(pool) < 15:
+                # A squad with no real depth margin (e.g. exactly 15
+                # players, no bench to speak of - confirmed this happens
+                # for real, thin-pool unions) can have its available count
+                # drop below 15 after enough accumulated injuries/
+                # suspensions over a long tournament. `auto_draft_lineup`
+                # fills positions in a fixed order and simply stops once
+                # it runs out of candidates, silently leaving whichever
+                # position came last unfilled - which `MatchEngine.start()`
+                # only catches later, as a confusing "lineup invalid"
+                # crash. Same last-resort "play a sidelined player rather
+                # than leave the slot empty" convention the `teams=` mode
+                # fallback below already uses - here it's simpler to just
+                # top the pool back up to a full 15 with sidelined squad
+                # members (order doesn't matter much: this only ever
+                # activates in an already-degenerate, rare scenario).
+                sidelined = [p for p in full_squad if p not in pool]
+                pool = pool + sidelined[: 15 - len(pool)]
             # Condition reflects THIS team's rest since its own last match
             # (see `availability.starting_condition`) - it also discounts
             # who the greedy auto-draft picks (a tired starter can lose a

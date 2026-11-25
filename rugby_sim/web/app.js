@@ -1572,9 +1572,19 @@ function renderReport(data, targetId, startRevealed) {
     <tr><td>${name}</td><td>${s.tries}</td><td>${s.penalty_goals}</td><td>${s.drop_goals}</td>
     <td>${s.turnovers_won}</td><td>${s.handling_errors}</td><td>${s.penalties_conceded}</td>
     <td>${s.yellow_cards}/${s.red_cards}</td><td>${s.territory_pct}%</td>
-    <td>${s.injuries}</td><td>${s.substitutions}</td></tr>`).join("");
+    <td>${s.injuries}</td><td>${s.substitutions}</td>
+    <td>${s.carries ?? 0}</td><td>${s.metres_gained ?? 0}</td>
+    <td>${s.tackles_made ?? 0}/${s.tackles_missed ?? 0}</td><td>${s.rucks_won ?? 0}</td>
+    <td>${s.scrums_won ?? 0}</td><td>${s.lineouts_won ?? 0}</td></tr>`).join("");
   const pomLine = data.player_of_the_match
     ? `<p><strong>Player of the Match:</strong> ${data.player_of_the_match.name} (${data.player_of_the_match.nation}, ${data.player_of_the_match.natural_position})</p>`
+    : "";
+  // A team's natural kick-vs-carry tendency, purely derived from its own
+  // starting lineup's kicking/handling sub-ratings (`team_tactical_identity`
+  // in match_engine.py) - a real, attribute-driven label, not flavor text.
+  const tacticalLine = data.tactical_identity
+    ? `<p class="muted">` + Object.entries(data.tactical_identity)
+        .map(([team, label]) => `${team}: ${label}`).join(" · ") + `</p>`
     : "";
   // A knockout fixture (`decide_winner`/Classic Match `must_have_winner`)
   // that was still level after extra time + sudden death - decided by a
@@ -1631,10 +1641,11 @@ function renderReport(data, targetId, startRevealed) {
     <div id="scoreline">${data.scoreline}</div>
     ${shootoutLine}
     ${pomLine}
+    ${tacticalLine}
     <div id="events">${fullEventsHtml}</div>
     <table class="stats">
       <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
-      <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th></tr>
+      <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th><th>Carries</th><th>Metres</th><th>Tackles made/missed</th><th>Rucks won</th><th>Scrums won</th><th>Lineouts won</th></tr>
       ${statRows}
     </table>
     ${scorerRows ? `<h3>Top scorers</h3><table class="stats">
@@ -1659,9 +1670,10 @@ function renderReport(data, targetId, startRevealed) {
       <div id="scoreline">${data.scoreline}</div>
       ${shootoutLine}
       ${pomLine}
+      ${tacticalLine}
       <table class="stats">
         <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
-        <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th></tr>
+        <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th><th>Carries</th><th>Metres</th><th>Tackles made/missed</th><th>Rucks won</th><th>Scrums won</th><th>Lineouts won</th></tr>
         ${statRows}
       </table>
       ${scorerRows ? `<h3>Top scorers</h3><table class="stats">

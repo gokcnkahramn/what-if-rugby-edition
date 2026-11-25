@@ -13,33 +13,238 @@ to reverse-engineer `match_engine.py` from scratch to find out.
 ## What kind of simulation this is
 
 **`MatchEngine` is a drive-by-drive, attribute-weighted-dice-roll
-abstraction. It is NOT a phase-by-phase physical simulation of individual
-rucks, mauls, scrums, lineouts or tackles with explicit ball-carrier-vs-
-defender resolution.** There is no ball, no field position beyond a coarse
-territory-percentage counter, no phase count, no distinct "attacking shape"
-or "defensive line." A whole possession - from first carry to its eventual
-try/penalty/turnover/nothing outcome - is resolved as **one single weighted
-random roll per drive** (`_resolve_drive`), across a fixed menu of mutually
-exclusive outcomes, each with a probability built from real team attributes.
-The module's own docstring calls this "detailed phase-by-phase," which is a
-misleading description left over from an earlier, less precise naming
-choice - what's actually detailed is the *attribute wiring into each
-outcome's probability*, not the number of simulated rugby phases (there is
-exactly one resolution point per drive, regardless of how many real-world
-phases a possession like that would take). Readers should discount that
-phrase in the docstring; this document is the accurate account.
+abstraction - but, since match-engine-depth Phase 4, each drive is now a
+bounded sequence of explicit phases (one ruck/tackle/carry exchange each),
+not one single roll for the whole possession.** It is still NOT a full
+physical simulation with continuous player positions, individual ball-
+carrier-vs-defender contact resolution, or a tracked ball/field beyond the
+5-zone/3-side model (see "Field position" below). What changed: a drive
+used to be decided by **one single weighted random roll** regardless of how
+long a real possession like that would take; now `_resolve_drive` resolves
+a few once-per-drive events (whether a card is shown; then, since
+match-engine-depth Phase 5, an explicit "possession origin" roll decides
+whether this drive is really a scrum, a lineout, or open play - see "Set
+piece" below for why this replaced the old "every drive gets a scrum-
+penalty/lineout-turnover check" behavior), then hands off to
+`_resolve_phase`, called in a loop up to `MAX_PHASES_PER_DRIVE` (6) times,
+each one its own independent weighted roll across the SAME outcome menu as
+before (try / drop goal / penalty conceded / breakdown turnover / handling
+error / continue). A phase that "continues" doesn't end the drive - the
+loop keeps going, and the zone/side position keeps advancing one step per
+phase (not once for the whole drive, as before) - so a longer, multi-phase
+drive now genuinely covers more ground than a one-phase drive, and a try's
+probability on the very first phase is deliberately damped
+(`PHASE_TRY_RAMP`, reaching full strength by phase 3) UNLESS the zone is
+already right on the defending team's line - letting a quick, high-"edge"
+attack still score in very few phases (a real "quick pass, 1-on-1 overlap"
+try) while a grinding, low-edge attack takes longer, which the old single-
+roll model had no way to express at all. Each "continue" phase also credits
+real carry/metres-gained/tackle/ruck-won stats (see "New per-phase stats"
+below) - a genuine simulated byproduct, not separately invented numbers.
+
+The module's own docstring used to call this "detailed phase-by-phase,"
+which WAS a misleading description before this change (there was exactly
+one resolution point per drive) - it's now an accurate one.
 
 What IS genuine and attribute-driven: which team attacks on a given drive,
-and the relative odds of try / penalty / turnover / card for that drive, are
+and the relative odds of try / penalty / turnover / card for each phase, are
 all real functions of the two lineups' actual sub-ratings (which are in turn
 built from real player attributes, fit-at-position, stamina, and card
 penalties). Swap in a team of locks at scrum-half and the engine's
-probabilities really do move. What is NOT genuine: there's no resolution of
-*why* a try happened beyond "the dice roll landed in the try slice" - no
-explicit breakout, no last-tackle-buster, no which-defender-missed detail.
-The commentary text ("crosses the whitewash after a well-worked move") is
-flavour text generated after the outcome is already decided, not a
-description of a sub-simulation that produced it.
+probabilities really do move. What is NOT genuine: there's still no
+resolution of *why* a phase went the way it did beyond "the dice roll landed
+in that slice" - no explicit breakout, no last-tackle-buster, no which-
+defender-missed detail (the new per-phase tackle/carry stats name a
+carrier/tackler for the stat line, picked by the same weighted-pick/uniform-
+pick conventions the try-scorer/card-recipient picks already used - not a
+contact-by-contact physical resolution). The commentary text ("crosses the
+whitewash after a well-worked move") is flavour text generated after the
+outcome is already decided, not a description of a sub-simulation that
+produced it; a "continuing" phase deliberately gets NO commentary line of
+its own (only the drive's eventual decisive outcome does), so the event log
+still reads as one line per meaningful moment, not one line per phase roll.
+
+### New per-phase stats (carries, metres gained, tackles, rucks won)
+
+`TeamMatchStats`/`PlayerMatchStats` gained `carries`, `metres_gained`,
+`tackles_made`, `tackles_missed` (plus team-level `rucks_won` - no single
+real "who won the ruck" player attribution exists in this model, so that
+one stays team-only, same honesty convention as everywhere else). Credited
+ONLY on a "continue" phase (`_credit_phase_continue`): the ball-carrier is
+picked the same attack-weighted-plus-`Side`-bonus way `_pick_try_scorer`
+already picks a try scorer (reused as-is, not reinvented), `metres_gained`
+is a direct, documented function of the same attack-vs-tackling `edge`
+every other probability in the drive is built from
+(`round(clamp(4 + edge*8, 1, 15))`), and the tackling defender is picked
+uniformly among the defending team's on-field slots - same convention
+`_issue_card` already used for picking a carded player, since this model
+has no real per-defender skill differentiation to weight that pick by yet.
+A broken-tackle phase (the breakdown-turnover outcome) credits
+`tackles_missed` the same way. These are a real, simulated-from-within-the-
+model byproduct of the phase loop, not a separately invented "stats layer"
+bolted on afterward.
+
+### Set piece (match-engine-depth Phase 5)
+
+Before this pass, EVERY drive ran the same scrum-penalty/lineout-turnover
+check, unconditionally - meaning a match's ~32 drives (see "How many
+drives" below) were all implicitly treated as a contested set piece, when
+a real Test match only has a fraction of that many actual scrums and
+lineouts. `_resolve_drive` now rolls an explicit "possession origin" once
+per drive (`DRIVE_ORIGIN_SCRUM_PROB = 0.35`, `DRIVE_ORIGIN_LINEOUT_PROB =
+0.40`, remainder `"open_play"`) - tuned by running many seeds and counting
+realized `scrums_won`/`lineouts_won` per match (landed around ~5 scrums and
+~6 lineouts per team on average, verified live). **Honest caveat**: this
+engine's drive count (~32/match) is itself lower than a real match's
+combined scrum+lineout count (which can be 25-35 on its own), so these
+probabilities can't literally reproduce real per-match set-piece counts
+one-for-one without crowding out open play entirely - the chosen values
+land in a modest, plausible single-digit-to-low-teens range per team
+rather than forcing an exact real-world number this model's drive
+granularity can't actually support. `"open_play"` skips the set-piece
+check entirely and goes straight to the phase loop, unchanged from a
+normal drive.
+
+A scrum-origin drive calls `_resolve_scrum`, which reuses the EXISTING
+`scrum_atk`/`scrum_def` sub-ratings (already individually scoped to the
+front row + locks via `CATEGORY_POSITION_GROUPS` - not a flat whole-squad
+average) for the same scrum-penalty probability the old unconditional
+version used, plus a new, small chance of a clean turnover "against the
+head" (`p = clamp(0.01 - edge*0.02, 0.002, 0.05)`) - naming the SPECIFIC
+attacking front-row player with the lowest `scrummaging` attribute
+(`_weakest_scrum_player`) and the defending player with the highest
+(`_strongest_scrum_player`) in the commentary, not just the team name. A
+clean win (the common case) credits `scrums_won` and falls through to the
+normal phase loop.
+
+A lineout-origin drive calls `_resolve_lineout`, which - unlike the old
+team-sub-rating-average version - picks TWO named individuals per side:
+the attacking team's HOOKER specifically (`lineout_throwing`, the real
+thrower) plus each side's best jumper (`_best_lineout_jumper`, max
+`lineout_jumping` among the real lineout-contesting positions - hooker,
+locks, back row). A steal names the specific jumper who won it. A clean
+take credits `lineouts_won` and falls through to the phase loop.
+
+### Set-piece sub-scenarios: pick-and-go and the driving maul (match-engine-depth Phase 10)
+
+A clean scrum/lineout win close to the defending team's line (`"attacking_
+tryline"`/`"attacking_22"`) is no longer ALWAYS a generic fall-through to
+the phase loop - it can now become one of two real, recognizable rugby
+patterns, each driven by one specific player's own attributes:
+- `_resolve_scrum`'s clean-win branch: the attacking NUMBER 8 can pick up
+  from the base and drive over himself - `p = clamp((skill-65)/300, 0.0,
+  0.06)`, `skill = (strength + game_intelligence)/2` for that exact
+  player.
+- `_resolve_lineout`'s clean-take branch: the attacking HOOKER (the same
+  one who just threw it in) can peel off the back of a driving maul to
+  finish it - same formula, same two attributes, this player instead.
+Both reuse `_score_try`'s `forced_scorer`/`individual_flavor` parameters
+(no new scoring machinery). Verified live: an elite number 8 (strength/
+game_intelligence both 99) scored 9 pick-and-go tries across 60 simulated
+matches vs. 0 for an average one; an elite hooker scored 6 driving-maul
+tries vs. 0 for an average one. New `tests/test_set_piece_sub_scenarios.py`
+(4 tests).
+
+### Player-specific decision behavior (match-engine-depth Phase 6)
+
+An external review's ask: "Dupont and an average scrum-half shouldn't make
+the same decisions." Every outcome up to this point is still a TEAM-level
+probability (team sub-ratings, not one player's own numbers) with
+individual players only picked AFTER a team-level outcome is already
+decided (who scored, who tackled). This phase adds the first outcome
+that's driven by one specific player's OWN attributes, not a team average,
+from the start: `_resolve_phase` computes a small "snipe try" chance
+(`p_snipe`) whenever the zone is close to the defending team's line
+(`"attacking_tryline"`/`"attacking_22"`), built from the ATTACKING team's
+own scrum-half's `pace`/`game_intelligence`
+(`p = clamp((skill-60)/400, 0.0, 0.05)`, `skill = (pace +
+game_intelligence)/2`) - a sharp, fast 9 sniping over themselves from close
+range, not a team-wide swing. Rolled as its own slice in the same
+cumulative `take(p)` menu, right after the main try check - if it fires,
+`_score_try(..., forced_scorer=scrum_half, snipe=True)` credits that exact
+player (not `_pick_try_scorer`'s usual weighted pick) with distinct
+commentary ("sniffs out a gap and snipes over... a sharp individual read,
+not a team move"). Verified live: an elite scrum-half (pace/
+game_intelligence both 99) produced 28 snipe tries across 60 simulated
+matches; an average one (both 50) produced 0, with every other attribute
+on both squads held identical - a genuinely individual, not team-level,
+effect. Deliberately scoped to ONE position/decision for this pass (the
+scrum-half's break near the line is a real, recognizable rugby moment,
+and the position already has a clean "individual decision-making"
+attribute pairing to draw on) - extending this same pattern to other
+positions/decisions (a fly-half's individual kicking choice, a back-row's
+individual jackal timing, etc.) is a natural later increment, not
+attempted here, to keep this pass's surface area small and its effect
+independently verifiable.
+
+### Per-phase involvement stamina (match-engine-depth Phase 7)
+
+`_decay_stamina` (see "Stamina/fatigue" below) already runs once per
+DRIVE, scaled by `drive_minutes` - but `drive_minutes` is itself an
+unrelated random roll (1-4, no attribute input at all), so a drive that
+grinds through all `MAX_PHASES_PER_DRIVE` phases (lots of real carries/
+tackles/rucks) could cost the exact same team-wide stamina as a drive that
+scores clean on phase 1, as long as both happened to roll the same
+`drive_minutes`. This adds a small, SEPARATE extra cost
+(`PHASE_INVOLVEMENT_STAMINA_COST = 0.4`) on top of that unchanged
+team-wide decay: only the specific player actually credited with a carry
+or a tackle that phase (`_credit_phase_continue`/
+`_credit_defensive_phase_win`, via the new `_apply_phase_involvement_
+stamina`) pays it - so a team's go-to ball-carrier/go-to tackler genuinely
+tires faster over a match than a teammate who's rarely involved, which the
+old once-per-drive-only model had no way to express. Deliberately small
+(a single phase's involvement costs far less than a whole drive's
+team-wide decay) so it doesn't require re-tuning the existing
+`STAMINA_DECAY_PER_MINUTE` calibration. Adds no new RNG consumption (no
+extra `rng` calls - purely a deterministic bookkeeping addition), so
+unlike every other pass in this arc, this one carries no RNG-shift risk to
+existing fixed-seed tests. Verified via a controlled comparison
+(`tests/test_phase_involvement_stamina.py`): running the SAME seed/squads
+twice, forcing one specific player to receive every single phase's
+carry/tackle credit in one run but not the other, shows that player's
+final condition is measurably lower in the "forced busy" run - isolating
+the mechanism directly, since nothing else differs between the two runs.
+
+### A second player-specific decision behavior: the openside flanker's jackal threat (match-engine-depth Phase 8)
+
+Extends Phase 6's scrum-half snipe-try pattern to a second position.
+`p_breakdown_turnover` (computed once per drive, same as before) now gets
+a small extra term built from the DEFENDING team's openside flanker's own
+`tackle_technique`/`game_intelligence` (not the team-wide `breakdown_def`
+average that formula already used) - `jackal_bonus = clamp((fetcher_skill
+- 60)/300, 0.0, 0.04)`, added on top of the existing team-wide probability.
+A standout individual fetcher should create more breakdown turnovers than
+their team's average breakdown rating alone suggests, the same real-world
+distinction the scrum-half snipe was about, applied to a second position.
+When a breakdown turnover fires, the commentary now names that specific
+flanker ("<name> jackals over the ball...") instead of just the team, and
+they pay the same `_apply_phase_involvement_stamina` cost the ball-carrier/
+tackler already do (a jackal effort is real physical involvement too).
+Verified live: an elite fetcher (tackle_technique/game_intelligence both
+99) produced 138 jackal turnovers across 60 simulated matches vs. 105 for
+an average one (both 50), every other attribute on both squads held
+identical. New `tests/test_player_specific_decisions_flanker.py` (2
+tests, same pattern as the scrum-half's own test file).
+
+### A third player-specific decision behavior: the near wing's footwork (match-engine-depth Phase 9)
+
+Extends the same pattern to a third position. `_resolve_phase` computes a
+small "wing break" try chance (`p_wing_break`) whenever the zone is close
+to the line, built from the NEAR wing's (the real winger matching the
+ball's current `Side` - see `Side`'s own docstring) own `footwork`/`pace`:
+`p = clamp((skill-60)/350, 0.0, 0.05)`. `_score_try` gained a general
+`individual_flavor` string parameter (the scrum-half's `snipe=True` stays
+as a thin, backward-compatible alias for its own specific text) so each
+player-specific outcome can carry its own distinct commentary without
+growing a new boolean flag per position - a wing break reads "steps the
+last defender and goes over in the corner - a brilliant individual
+finish." Verified live: an elite-footwork/pace wing produced 21 such
+tries across 60 simulated matches vs. 9 for an average one, every other
+attribute held identical. New `tests/test_player_specific_decisions_wing.py`
+(2 tests) - note the test had to check BOTH real wings by name, not just
+the one whose attributes were boosted, since the mechanism correctly
+fires for whichever wing matches `Side` that phase, not always the same
+physical player.
 
 ## Per-drive flow (`_advance_one_drive`)
 
@@ -52,8 +257,12 @@ description of a sub-simulation that produced it.
    opportunities) occur over 80 minutes; it has no bearing on which team
    is attacking or what the drive's outcome is.
 3. Cards expire if their window has passed; stamina decays for both teams
-   over the `drive_minutes` just elapsed (see Stamina section).
-4. `_resolve_drive` rolls the single weighted outcome for this drive.
+   over the `drive_minutes` just elapsed (see Stamina section) - still once
+   per DRIVE, not once per phase (see "Known limitations" below).
+4. `_resolve_drive` checks the once-per-drive card/set-piece events, then
+   loops `_resolve_phase` (up to `MAX_PHASES_PER_DRIVE` times) for the
+   open-play part of the possession - see "What kind of simulation this is"
+   above for the full phase-loop account.
 5. `_maybe_personnel_change` separately rolls for an injury and (in a
    fixed minute window) a tactical substitution, each team, each drive.
 6. `_update_knockout_stage` advances the knockout tiebreak state machine if
@@ -82,27 +291,36 @@ of "momentum" or "previous drive's result" feeding into the next one - each
 drive's attacking-team roll is independent given the two teams' current
 (stamina/card-adjusted) sub-ratings.
 
-## Per-outcome breakdown (`_resolve_drive`)
+## Per-outcome breakdown (`_resolve_drive`/`_resolve_phase`)
 
-All of the probabilities below are computed once per drive and then rolled
-against via one single `roll = rng.random()` walked through a cumulative
-sum (`take(p)` helper) in this fixed priority order: try, drop goal,
-penalty-by-defense (open play), penalty-by-defense (scrum), lineout
-turnover, breakdown turnover, card (against defense), penalty-by-attack,
-handling error, else "no outcome" (defense holds). Because `take(p)` only
-ever consumes from whatever probability mass is still unclaimed by the
-time it runs, inserting the new drop-goal branch did not shrink any other
-outcome's own probability - it only shrinks the catch-all "no outcome"
-slice by exactly `p_drop_goal` (the one outcome with no formula of its own,
-defined as "whatever's left"). No other outcome's formula changed.
+Since match-engine-depth Phases 4-5, this is no longer one single roll for
+the whole drive. `_resolve_drive` checks a few once-per-drive events first
+(card; then the possession-origin roll, which may hand off to
+`_resolve_scrum`/`_resolve_lineout` - see "Set piece" above), then the
+open-play part of the drive loops `_resolve_phase` (up to
+`MAX_PHASES_PER_DRIVE` times), each call rolling ONE `roll = rng.random()`
+walked through a cumulative sum (`take(p)` helper) in this fixed priority
+order: try, drop goal, penalty-by-defense (open play), breakdown turnover,
+penalty-by-attack, handling error, else "continue" (the drive stays alive,
+credits carry/tackle/ruck stats - see "New per-phase stats" above). The
+scrum-penalty and lineout-turnover outcomes that used to sit in this same
+per-drive menu are now resolved separately, once per drive, only on a
+scrum-/lineout-origin drive (see "Set piece" above) - they no longer
+compete for probability mass against try/penalty/error on every phase.
+Because `take(p)` only ever consumes from whatever probability mass is
+still unclaimed by the time it runs, each new branch added over this
+engine's history only ever shrunk the catch-all "continue" slice (the one
+outcome with no formula of its own, defined as "whatever's left"), never
+another outcome's own formula.
 
 | Outcome | Formula (edge = attacking-relevant rating(s) − defending-relevant rating(s), /100) | Attributes/sub-ratings involved |
 |---|---|---|
 | **Try** | `p = clamp(0.11 + edge*0.10, 0.02, 0.45)`, `edge = (attack_rating − tackling_def)/100` | attacking team's `attack` sub-rating vs defending team's `tackling` sub-rating |
 | **Drop goal** | `p = clamp(0.004 + (dg_skill − 55)/1500, 0.001, 0.01)`, `dg_skill = (place_kicking_range + game_intelligence)/2` for the attacking side's designated kicker (`_best_kicker`, same player used for conversions/penalties) | the attacking kicker's own `place_kicking_range` (execution/range) and `game_intelligence` (decision to go for it) attributes - a per-player read, like the conversion/penalty-goal rolls, not a team sub-rating average |
 | **Penalty conceded by defense** (open play) | `p = clamp(0.14 + edge*0.12, 0.03, 0.35)`, `edge = (70 − discipline_def)/100` | defending team's `discipline` sub-rating only (not fit-scaled - see `ATTRIBUTE_MAPPING.md`/module docstring: discipline isn't treated as position-dependent) |
-| **Scrum penalty** | `p = clamp(0.04 + edge*0.05, 0.0, 0.12)`, `edge = (scrum_atk − scrum_def)/100` | both teams' `scrum` sub-rating (front row + locks only, via `CATEGORY_POSITION_GROUPS`) |
-| **Lineout turnover** | `p = clamp(0.05 − edge*0.06, 0.01, 0.14)`, `edge = (lineout_quality_atk − lineout_def)/100`, `lineout_quality_atk = (lineout + lineout_throw)/2` for the attacking side | attacking team's `lineout` + `lineout_throw` (hooker) sub-ratings vs defending team's `lineout` sub-rating |
+| **Scrum penalty** (`_resolve_scrum`, scrum-origin drives only) | `p = clamp(0.04 + edge*0.05, 0.0, 0.12)`, `edge = (scrum_atk − scrum_def)/100` | both teams' `scrum` sub-rating (front row + locks only, via `CATEGORY_POSITION_GROUPS`) |
+| **Scrum turnover ("against the head")** (`_resolve_scrum`) | `p = clamp(0.01 − edge*0.02, 0.002, 0.05)`, same `edge` as the scrum penalty above | same scrum sub-ratings; names the specific weakest attacking front-row player and strongest defending one in commentary |
+| **Lineout turnover** (`_resolve_lineout`, lineout-origin drives only) | `p = clamp(0.05 − edge*0.06, 0.01, 0.14)`, `edge = ((thrower_throwing + attacking_jumping)/2 − defending_jumping)/100` | the attacking HOOKER's `lineout_throwing` + each side's best jumper's `lineout_jumping` (`_best_lineout_jumper`) - two NAMED individuals per side, not a team-sub-rating average |
 | **Breakdown turnover** | `p = clamp(0.06 + edge*0.08, 0.01, 0.18)`, `edge = (breakdown_def − breakdown_atk)/100` | defending team's `tackle_technique` sub-rating (dominant hits + jackal threat) vs attacking team's `handling` sub-rating - a deliberately separate swing term from both the scrum and lineout ones, so a jackal-heavy back row creates turnovers independent of set-piece strength |
 | **Card (against the defending team)** | `p = 0.015 * clamp(1.4 − discipline_def/70, 0.3, 2.0)` | **fixed**: this now reads the *defending* team's discipline sub-rating, as the outcome name always said it should (a less-disciplined defense gives away more cards) - previously this line read `discipline_atk` (the attacking team's discipline) instead, a confirmed bug; see "Fixed in this pass" below |
 | **Penalty conceded by attack** | `p = clamp(0.08 + edge*0.10, 0.02, 0.30)`, `edge = (70 − discipline_atk)/100` | attacking team's `discipline` sub-rating only |
@@ -291,12 +509,27 @@ to find out who actually advances.
 
 ## Known limitations
 
-1. No individual player-vs-player tackle, carry, or ruck resolution of any
-   kind - every drive resolves as one team-level weighted dice roll, never a
-   ball-carrier-vs-specific-defender contest.
-2. No explicit possession-chain or phase count within a drive - a drive is
+1. ~~No individual player-vs-player tackle, carry, or ruck resolution of
+   any kind - every drive resolves as one team-level weighted dice roll,
+   never a ball-carrier-vs-specific-defender contest.~~ **Partially fixed
+   (match-engine-depth Phase 4)**: a drive is now a bounded loop of
+   per-phase team-level rolls (`_resolve_phase`), each one crediting a
+   named carrier and a named tackler - still not a true, independent
+   player-skill-vs-player-skill contest (the carrier/tackler are picked by
+   weighted/uniform selection AFTER the phase's team-level outcome is
+   already decided, same as the existing try-scorer/card-recipient picks),
+   but no longer a single opaque team-level roll for the whole possession
+   either.
+2. ~~No explicit possession-chain or phase count within a drive - a drive is
    an opaque unit; the engine has no notion of "3 phases into this
-   possession."
+   possession."~~ **Fixed (match-engine-depth Phase 4)**: `_resolve_drive`
+   now loops `_resolve_phase` up to `MAX_PHASES_PER_DRIVE` (6) times per
+   possession, with the zone/side advancing once per phase (not once per
+   drive) and try probability ramped up over the first few phases
+   (`PHASE_TRY_RAMP`) rather than being phase-count-blind. Still a bounded,
+   discrete loop (a simulation safety valve, not a claimed real rugby
+   limit on how many phases a possession can run), not a continuous or
+   unbounded phase count.
 3. ~~No "attacking shape" or "defensive line" concept, no field position
    beyond the coarse territory-percentage tally (`_territory_ticks`), and no
    distance-to-try-line or distance-to-posts modeling at all (acknowledged

@@ -41,7 +41,7 @@ from .data.sources.pool_builder import DEFAULT_SEASON, NATION_DISPLAY, NATION_TO
 from .data.sources.venues import VENUES
 from .data.squad_repository import team_from_dict, team_to_dict
 from .engine import MatchEngine
-from .engine.match_engine import MatchResult
+from .engine.match_engine import MatchResult, team_tactical_identity
 from .models import Lineup, Player, Position, Team
 from .tournament import (
     ALL_TEAMS_2027,
@@ -533,6 +533,10 @@ def _match_json(result: MatchResult) -> dict:
                 "yellow_cards": s.yellow_cards, "red_cards": s.red_cards,
                 "territory_pct": round(s.territory_pct, 1),
                 "injuries": s.injuries, "substitutions": s.substitutions,
+                "carries": s.carries, "metres_gained": s.metres_gained,
+                "tackles_made": s.tackles_made, "tackles_missed": s.tackles_missed,
+                "rucks_won": s.rucks_won,
+                "scrums_won": s.scrums_won, "lineouts_won": s.lineouts_won,
             }
             for name, s in result.stats.items()
         },
@@ -554,6 +558,10 @@ def _match_json(result: MatchResult) -> dict:
             for pos, slot in result.away.lineup.starters.items()
         ],
         "home_name": result.home.name, "away_name": result.away.name,
+        "tactical_identity": {
+            result.home.name: team_tactical_identity(result.home.lineup),
+            result.away.name: team_tactical_identity(result.away.lineup),
+        },
     }
 
 

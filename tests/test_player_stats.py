@@ -13,7 +13,11 @@ def _team(name):
 
 def test_try_events_name_a_real_on_field_scorer():
     home, away = _team("Home"), _team("Away")
-    result = MatchEngine(home, away, seed=3).run()
+    # Re-picked from 3 to 4 after the set-piece origin roll (match-engine-
+    # depth Phase 5) shifted downstream RNG consumption - seed 3 stopped
+    # producing any try this match. Same class of reseed this file's own
+    # history already documents below for seed 3 itself.
+    result = MatchEngine(home, away, seed=4).run()
     on_field_names = {p.name for p in ENGLAND_SAMPLE}
     try_events = [e for e in result.events if e.text.startswith("TRY!")]
     assert try_events
