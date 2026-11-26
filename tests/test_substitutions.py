@@ -92,7 +92,13 @@ def test_run_interactive_allows_a_manual_substitution_at_a_checkpoint():
     home = _team_with_bench("Home")
     away = _team_with_bench("Away")
     home.lineup.add_bench(ENGLAND_SAMPLE[0])
-    engine = MatchEngine(home, away, seed=7)
+    # Reseeded (7 -> 1): a later engine addition this session (grubber/chip
+    # kick types, the period-caution strategy tier) shifted this seed's RNG
+    # consumption enough that an auto (injury/tactical) substitution now
+    # uses up the small bench before this test's own manual-substitution
+    # checkpoint - same documented reseed convention this file's own
+    # history already uses for every prior per-drive-roll addition.
+    engine = MatchEngine(home, away, seed=1)
 
     checkpoints_seen = []
 

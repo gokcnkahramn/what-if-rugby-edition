@@ -231,6 +231,11 @@ def test_live_match_start_substitute_continue_until_finished():
     }).get_json()
     assert start["finished"] is False
     assert start["minute"] >= 20
+    # Live match stats (previously only computed at full time) are now
+    # available mid-match so a manager can read running totals while paused.
+    assert set(start["stats"].keys()) == {"England", "France"}
+    some_team_stats = next(iter(start["stats"].values()))
+    assert "tries" in some_team_stats and "possession_pct" in some_team_stats
     session_id = start["session_id"]
 
     bench_player_id = start["home"]["bench"][0]["id"]
@@ -261,11 +266,21 @@ def test_live_match_substitute_rejects_unknown_session():
 
 def _play_out_live_match(client, live_state):
     """Drives a `live_match` (or single-friendly live match state) through
-    `.../continue` until finished, returns the final state."""
+    `.../continue` until finished, returns the final state. A pending
+    penalty decision (manager-controls pass - see
+    `test_manager_penalty_decision_endpoint_end_to_end` for a focused test
+    of the decision itself) is resolved with a fixed "touch" choice here,
+    same as a manager who always kicks for the corner - this helper exists
+    to drive OTHER tests' live matches to completion, not to exercise the
+    decision mechanism itself."""
     state = live_state
     guard = 0
-    while not state["finished"] and guard < 20:
-        state = client.post(f"/api/match/live/{state['session_id']}/continue", json={}).get_json()
+    while not state["finished"] and guard < 40:
+        session_id = state["session_id"]
+        if state.get("pending_penalty") is not None:
+            state = client.post(f"/api/match/live/{session_id}/decide_penalty", json={"choice": "touch"}).get_json()
+        else:
+            state = client.post(f"/api/match/live/{session_id}/continue", json={}).get_json()
         guard += 1
     assert state["finished"] is True
     return state
@@ -461,3 +476,35 @@ def test_tournament_report_and_session_state_include_injury_report():
         "type": "custom", "team_ids": team_ids, "format": "round_robin", "seed": 4,
     }).get_json()
     assert "injury_report" in start
+
+
+def test_manager_penalty_decision_endpoint_end_to_end():
+    # Manager-controls pass: starting a live match with `decision_teams`
+    # pauses for a real in-match choice on that team's own penalties -
+    # verified here via the actual HTTP endpoints a frontend would call.
+    client = _client()
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+
+    state = None
+    for seed in range(1, 200):
+        state = client.post("/api/match/live/start", json={
+            "home_team_id": home["team_id"], "away_team_id": away["team_id"], "seed": seed,
+            "decision_teams": ["England"],
+        }).get_json()
+        guard = 0
+        while not state["finished"] and state.get("pending_penalty") is None and guard < 50:
+            state = client.post(f"/api/match/live/{state['session_id']}/continue", json={}).get_json()
+            guard += 1
+        if state.get("pending_penalty") is not None:
+            break
+    assert state["pending_penalty"] is not None
+    assert state["pending_penalty"]["team"] == "England"
+    session_id = state["session_id"]
+
+    # An invalid choice is rejected, not silently accepted.
+    bad = client.post(f"/api/match/live/{session_id}/decide_penalty", json={"choice": "nonsense"})
+    assert bad.status_code == 400
+
+    decided = client.post(f"/api/match/live/{session_id}/decide_penalty", json={"choice": "touch"}).get_json()
+    assert decided.get("pending_penalty") is None or decided["pending_penalty"]["team"] == "England"

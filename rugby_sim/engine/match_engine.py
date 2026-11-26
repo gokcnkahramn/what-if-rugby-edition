@@ -90,10 +90,10 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from ..models.team import Team, Lineup, SquadSlot
-from ..models.position import Position, BACKS, CATEGORY_POSITION_GROUPS, POSITION_PROFILES
+from ..models.position import Position, BACKS, FORWARDS, CATEGORY_POSITION_GROUPS, POSITION_PROFILES
 from ..models.player import Player
 from .commentary import CommentaryEvent
 
@@ -239,6 +239,13 @@ HOME_ADVANTAGE_BONUS = 3.0
 
 # Per-drive probabilities for the two kinds of in-match personnel change.
 P_INJURY_PER_DRIVE = 0.012
+# How much a fully exhausted team's injury risk multiplies by, on top of
+# the baseline above (match-engine-depth Phase 14 - see
+# `MatchEngine._team_fatigue_factor`) - 1.5 means a team at full tracked
+# fatigue carries 2.5x the baseline per-drive injury risk; a fully fresh
+# team is unaffected (multiplier of 1.0). Modest and bounded, same
+# philosophy as every other fatigue-linked constant in this file.
+INJURY_FATIGUE_MULTIPLIER = 1.5
 P_TACTICAL_SUB_PER_DRIVE = 0.02
 TACTICAL_SUB_WINDOW = (50, 75)  # minute range tactical subs are allowed in
 
@@ -327,6 +334,22 @@ STAMINA_RATE_MAX = 2.2
 # re-tuning the whole `STAMINA_DECAY_PER_MINUTE` calibration above.
 PHASE_INVOLVEMENT_STAMINA_COST = 0.4
 
+# -- Match stats/analysis system (match-engine-depth Phase 16) -------------
+# `_credit_phase_continue`'s own `metres` roll (4 + edge*8, clamped 1-15)
+# is already a real, simulated-from-the-edge number - this just names the
+# threshold above which that same carry also counts as "beating a
+# defender" (a real rugby stats category), not a new invented roll.
+# Verified live (not guessed): even a strongly attack-favoured matchup's
+# realistic edge range rarely pushes `metres` much past 5, so a threshold
+# of 8 (the original draft) would have NEVER fired in practice - 5 is the
+# value this engine's own real edge distribution actually reaches.
+DEFENDERS_BEATEN_METRES_THRESHOLD = 5
+# How many real metres one zone-step (`_advance_zone`) represents, for
+# `kicking_metres` - the 5-zone model spans roughly 100m of real pitch
+# across 4 steps (tryline to tryline), so ~22m per step is the honest,
+# already-implied real distance, not a separately invented number.
+KICKING_METRES_PER_ZONE_STEP = 22
+
 # Position "physical workload" signal for stamina decay, derived from
 # `POSITION_PROFILES` rather than a new table: the share of each position's
 # total attribute weight that sits on fitness/strength/scrummaging - the
@@ -344,6 +367,42 @@ def _compute_position_workload() -> Dict[Position, float]:
 
 
 POSITION_WORKLOAD: Dict[Position, float] = _compute_position_workload()
+
+# Manager-selectable tactics (match-engine-depth, manager-controls pass):
+# real, named choices a user can pick for their own team before/during a
+# live match, each resolving to the same [-1, 1] scale the three tendency
+# methods already compute from real attributes - a chosen value REPLACES
+# the derived one for that axis, it isn't blended with it. "balanced" is a
+# genuine explicit choice (force a neutral 0.0), distinct from leaving the
+# axis unset entirely (which keeps the attribute-derived default).
+TACTIC_CHOICES: Dict[str, Dict[str, float]] = {
+    "attack_shape": {"forward_heavy": 0.8, "balanced": 0.0, "backs_heavy": -0.8},
+    "defensive_style": {"blitz": 0.8, "balanced": 0.0, "drift": -0.8},
+    "kick_tendency": {"kick_heavy": 0.8, "balanced": 0.0, "ball_in_hand": -0.8},
+}
+
+# A manager's preferred kick TYPE - a strategic, pre-match preference (not
+# a per-phase pop-up, which would mean interrupting a live match dozens of
+# times a game - unrealistic for a "pick your gameplan" control). Reusing
+# `_tactics_override`'s own per-team dict (a new, separate key,
+# `"kick_style"`, not one of `TACTIC_CHOICES`'s [-1,1] overrides - this one
+# is a label, not a number) so it rides the exact same `tactics={team:
+# {...}}` request shape the other three axes already use. "auto"/missing
+# means no preference (every kick type keeps its existing attribute-driven
+# odds); any other value gives that ONE kick type's probability a real,
+# bounded boost (see `KICK_STYLE_BOOST` at each kick type's own `take(...)`
+# call) - never a 100% guarantee (the underlying skill/zone/defensive-style
+# gates described at each kick type still apply; a manager can't make a
+# fly-half with poor `kicking_game` land a grubber just by picking it).
+KICK_STYLE_CHOICES = ("grubber", "chip", "cross_field", "box_kick")
+KICK_STYLE_BOOST = 1.6
+
+# The real choices a decision-team manager can make for a just-awarded
+# penalty (see `MatchEngine.resolve_pending_decision`). "posts" is only
+# ever a valid choice when `_pending_penalty["can_go_for_posts"]` is True
+# (own-22/own-tryline penalties stay realism-gated, see
+# `_apply_penalty_decision`) - webapp.py validates against this list.
+PENALTY_CHOICES = ("posts", "touch", "quick_tap")
 
 # Thresholds for `team_tactical_identity` below - same [-1, 1] scale
 # `MatchEngine._kick_tendency` already uses live, mid-match (see that
@@ -372,6 +431,23 @@ def team_tactical_identity(lineup: Lineup) -> str:
         return "Ball-in-hand / expansive"
     return "Balanced"
 
+
+def team_defensive_identity(lineup: Lineup) -> str:
+    """Labels a team's natural defensive organization - blitz/rush vs.
+    drift vs. balanced - purely from the STARTING lineup's own
+    `tackle_technique`/`positioning` sub-ratings. Same formula
+    `MatchEngine._defensive_style` already applies live, mid-match (see
+    its own docstring and match-engine-depth Phase 12) - this is the same
+    signal, computed from the pre-match team sheet."""
+    technique = lineup.team_sub_rating("tackle_technique")
+    positioning = lineup.team_sub_rating("positioning")
+    style = max(-1.0, min(1.0, (technique - positioning) / 40))
+    if style >= TACTICAL_IDENTITY_THRESHOLD:
+        return "Blitz / rush defence"
+    if style <= -TACTICAL_IDENTITY_THRESHOLD:
+        return "Drift defence"
+    return "Balanced"
+
 # -- Injury severity (heuristic, documented honestly - not a medical model) -
 # When an injury happens (see `_apply_injury`), one of these tiers is rolled
 # (weighted, not uniform) to decide how many of that player's team's FUTURE
@@ -388,6 +464,25 @@ INJURY_SEVERITY_TIERS: Tuple[Tuple[str, float, int], ...] = (
     ("muscle strain", 0.30, 1),
     ("significant injury", 0.18, 2),
     ("serious injury", 0.07, 3),
+)
+
+# Named injury TYPE (match-engine-depth Phase 14) - a separate axis from
+# severity above: "what got hurt", not "how bad". (name, selection weight).
+# Rolled independently of severity (an ankle can be a minor knock or a
+# serious injury) with ONE honest, well-known real-rugby exception:
+# `_apply_injury` forces a concussion's severity to at least "muscle
+# strain" (never a same-match "knock" with zero lay-off), reflecting the
+# real graduated return-to-play/HIA protocol every major union actually
+# follows - concussions are never waved off as a same-match non-issue.
+INJURY_TYPES: Tuple[Tuple[str, float], ...] = (
+    ("hamstring strain", 0.20),
+    ("ankle sprain", 0.18),
+    ("shoulder injury", 0.15),
+    ("knee injury", 0.12),
+    ("calf strain", 0.12),
+    ("rib injury", 0.10),
+    ("concussion", 0.08),
+    ("groin strain", 0.05),
 )
 
 
@@ -426,6 +521,42 @@ class TeamMatchStats:
     # counting stat just doesn't).
     scrums_won: int = 0
     lineouts_won: int = 0
+    # Match stats/analysis system (match-engine-depth Phase 16): every
+    # field below is credited at the EXACT SAME points the engine already
+    # resolves these real outcomes - no new rolls, no new probabilities,
+    # purely additional bookkeeping on events that already happen.
+    # `scrums_contested`/`lineouts_contested` (every scrum-/lineout-origin
+    # drive, win or lose) are what make a real success RATE possible
+    # (`scrums_won/scrums_contested`), not just a raw count.
+    scrums_contested: int = 0
+    lineouts_contested: int = 0
+    # Credited on the SAME "continue" phase as `carries`/`metres_gained` -
+    # a carry that gains a real, meaningful chunk of ground (see
+    # `_credit_phase_continue`'s own threshold comment) counts as beating
+    # a defender, the same honest "derived from the real simulated edge,
+    # not invented" convention every other phase-loop stat already uses.
+    defenders_beaten: int = 0
+    # The mirror of `turnovers_won`/`rucks_won`: credited to the ATTACKING
+    # team on the exact same breakdown-turnover/handling-error outcomes
+    # that already credit the defending team's `turnovers_won` - two sides
+    # of the same real event, not a separately invented stat.
+    turnovers_conceded: int = 0
+    rucks_lost: int = 0
+    # Territorial box kicks only (`_resolve_phase`'s kicking-system part 2 -
+    # a cross-field kick is a try-scoring play, not a territorial exchange,
+    # so it's deliberately NOT counted here). `kicking_metres` estimates
+    # real distance from the actual simulated zone step gained (see
+    # `KICKING_METRES_PER_ZONE_STEP`), not an invented number.
+    kicks_attempted: int = 0
+    kicks_successful: int = 0
+    kicking_metres: int = 0
+    # A drive that reached the defending team's 22/tryline at least once
+    # (the real rugby "red zone") vs. one that also finished with a try -
+    # tracked at drive granularity (see `_resolve_drive`'s own flag), the
+    # natural level "red zone efficiency" is actually talked about at in
+    # real rugby (entries, not every individual phase already inside it).
+    red_zone_possessions: int = 0
+    red_zone_tries: int = 0
 
 
 @dataclass
@@ -443,6 +574,24 @@ class PlayerMatchStats:
     metres_gained: int = 0
     tackles_made: int = 0
     tackles_missed: int = 0
+    defenders_beaten: int = 0
+    turnovers_won: int = 0
+
+    @property
+    def performance_score(self) -> float:
+        """A single, documented "match performance" number (match stats
+        system, item 14) - a weighted blend of every REAL per-player stat
+        already collected above, not a separate invented metric. Scoring
+        is weighted heaviest (same relative weights as `pom_score`'s own
+        tries/kicks split), with carrying/tackling/turnover involvement
+        contributing a smaller, genuine amount - so a non-scoring prop who
+        put in a heavy shift can still post a real, non-zero number,
+        instead of "performance" meaning only "did you score"."""
+        return (
+            self.tries * 10 + self.conversions * 3 + self.penalty_goals * 5 + self.drop_goals * 5
+            + self.carries * 0.5 + self.metres_gained * 0.2 + self.defenders_beaten * 1.0
+            + self.tackles_made * 1.0 - self.tackles_missed * 0.5 + self.turnovers_won * 2.0
+        )
 
     @property
     def points(self) -> int:
@@ -556,8 +705,34 @@ class MatchResult:
 class MatchEngine:
     def __init__(self, home: Team, away: Team, seed: Optional[int] = None,
                  weather: str = "dry", initial_condition: Optional[Dict[int, float]] = None,
-                 home_advantage: bool = False, decide_winner: bool = False):
-        """`initial_condition`, if given, maps `id(player)` -> starting
+                 home_advantage: bool = False, decide_winner: bool = False,
+                 tactics: Optional[Dict[str, Dict[str, str]]] = None,
+                 decision_teams: Optional[Iterable[str]] = None):
+        """`tactics`, if given, lets a manager pick a real tactical stance
+        for one or both sides instead of leaving it purely attribute-
+        derived - keyed by team NAME, each a dict with up to 3 keys
+        (`"attack_shape"`, `"defensive_style"`, `"kick_tendency"`), each a
+        string from `TACTIC_CHOICES` (see that constant). A team/axis not
+        present keeps today's exact behavior: the tendency stays fully
+        derived live from the real lineup's own attributes
+        (`_attack_shape_tendency`/`_defensive_style`/`_kick_tendency`), a
+        substitution/injury still shifts it mid-match. A chosen tactic is a
+        real override (not a nudge on top of the derived value) - the
+        manager's explicit call replaces the auto-derived number for that
+        axis for the rest of the match, same as a human coach's real
+        pre-match gameplan overriding what the squad "naturally" would do.
+
+        `decision_teams`, if given, names which team(s) (by real team NAME)
+        get a genuine in-match decision point instead of the AI's usual
+        auto-pick, for the one outcome this currently covers: what to do
+        with a just-awarded penalty (kick for posts / kick to touch / a
+        quick tap) - see `_pending_penalty`/`resolve_pending_decision`. A
+        team not listed here (the default: no team at all) is completely
+        unaffected, auto-deciding exactly as before this existed. This is
+        the SAME single mechanism a live/pausable match's checkpoint system
+        already uses to stop and wait for the caller - `advance_to`'s loop
+        also stops the instant a decision is pending, even mid-checkpoint.
+        `initial_condition`, if given, maps `id(player)` -> starting
         stamina (0-100) for any player who should NOT start this match at a
         fresh 100 - the hook tournament squads mode uses to carry a
         short-rest penalty into a player's next match (see
@@ -610,6 +785,14 @@ class MatchEngine:
         # further card - they're off the field, not just "down a player".
         self._yellow_history: Dict[str, set] = {home.name: set(), away.name: set()}
         self._sent_off: Dict[str, set] = {home.name: set(), away.name: set()}
+        # Match-engine depth, phase 14: which POSITIONS are currently
+        # missing a real body (a genuine send-off, or an injury with no
+        # bench cover left) - used by `_team_sub_rating` to apply an extra,
+        # category-specific penalty (losing a prop hurts scrum/lineout
+        # more than it hurts kicking) on top of the existing flat
+        # `_active_card_penalty`, instead of one uniform team-wide number
+        # regardless of which position actually left the field.
+        self._sent_off_positions: Dict[str, List[Position]] = {home.name: [], away.name: []}
         self._active: Dict[str, Dict[Position, SquadSlot]] = {}
         self._bench: Dict[str, List] = {}
         self._subs_used: Dict[str, int] = {home.name: 0, away.name: 0}
@@ -621,6 +804,34 @@ class MatchEngine:
         self._finalized = False
         self._initial_condition = initial_condition or {}
         self._stamina: Dict[int, float] = {}  # keyed by id(player) - see STAMINA_* above
+        # Resolve the manager's chosen tactics (if any) to numeric overrides
+        # once, up front - `TACTIC_CHOICES` maps each real label to the same
+        # [-1, 1] scale `_attack_shape_tendency`/`_defensive_style`/
+        # `_kick_tendency` already use, so a chosen value slots in exactly
+        # where a derived one would. An unrecognized/missing axis is simply
+        # left out (falls through to the derived value), never an error -
+        # a manager picking tactics for only one of the two teams, or only
+        # one of the three axes, is a normal, fully-supported case.
+        self._tactics_override: Dict[str, Dict[str, float]] = {}
+        self._kick_style_preference: Dict[str, str] = {}
+        for team_name, axes in (tactics or {}).items():
+            resolved = {}
+            for axis, choice in (axes or {}).items():
+                if axis == "kick_style":
+                    if choice in KICK_STYLE_CHOICES:
+                        self._kick_style_preference[team_name] = choice
+                    continue
+                value = TACTIC_CHOICES.get(axis, {}).get(choice)
+                if value is not None:
+                    resolved[axis] = value
+            if resolved:
+                self._tactics_override[team_name] = resolved
+        self._decision_teams = set(decision_teams or [])
+        # Set only while a decision-team penalty is awaiting the manager's
+        # choice (see `_score_penalty_chance`/`resolve_pending_decision`);
+        # `advance_to`/`_advance_one_drive` stop the instant this is set,
+        # even mid-checkpoint, exactly like reaching a normal pause point.
+        self._pending_penalty: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -766,6 +977,13 @@ class MatchEngine:
         self._decay_stamina(defending, attacking, drive_minutes)
 
         self._resolve_drive(attacking, defending, self._minute, self.result)
+        if self._pending_penalty is not None:
+            # A decision-team penalty just paused resolution mid-drive -
+            # don't run anything else (an injury/sub roll, the knockout
+            # state check) until the manager's choice comes back via
+            # `resolve_pending_decision`; those still happen normally once
+            # this drive's outcome is actually finalized.
+            return
         self._maybe_personnel_change(self._minute, self.result)
         self._update_knockout_stage()
 
@@ -844,7 +1062,7 @@ class MatchEngine:
         version of this same machinery."""
         if not self._started:
             self.start()
-        while self._minute < minute and not self.is_finished():
+        while self._minute < minute and not self.is_finished() and self._pending_penalty is None:
             self._advance_one_drive()
         return self.result
 
@@ -869,8 +1087,16 @@ class MatchEngine:
         more than once - finalizing only happens the first time."""
         if not self._started:
             self.start()
-        while not self.is_finished():
+        while not self.is_finished() and self._pending_penalty is None:
             self._advance_one_drive()
+
+        if self._pending_penalty is not None:
+            # A decision-team penalty is awaiting the manager's choice -
+            # don't finalize (Player of the Match, territory %) on a match
+            # that isn't actually over yet; the caller resumes via
+            # `resolve_pending_decision` and calls `finish()`/`advance_to`
+            # again afterwards.
+            return self.result
 
         if not self._finalized:
             total_ticks = sum(self._territory_ticks.values()) or 1
@@ -1018,13 +1244,47 @@ class MatchEngine:
             slot.player.sub_ratings(slot.position).get(category, 50) * self._stamina_factor(slot.player)
             for slot in slots
         ]
-        return sum(values) / len(values) if values else 50.0
+        base = sum(values) / len(values) if values else 50.0
+
+        # Position-specific card/injury impact (match-engine-depth Phase
+        # 14): a flat team-wide `_active_card_penalty` already applies
+        # everywhere a man is down, but losing a specific position hurts
+        # the categories THAT position actually contributes to more than
+        # it hurts an unrelated one (losing a prop should hurt scrum/
+        # lineout harder than it hurts kicking) - an extra, targeted
+        # penalty layered on top, only for the category group(s) a
+        # genuinely missing position belongs to.
+        if group and any(pos in group for pos in self._sent_off_positions.get(team.name, [])):
+            base *= 0.85
+        return base
+
+    def _team_fatigue_factor(self, team: Team) -> float:
+        """0 (fully fresh) to 1 (exhausted) - the team's current starting
+        XV's average REAL tracked condition (`_stamina`), not a separate
+        invented number. Feeds `_maybe_personnel_change`'s injury-risk
+        scaling (match-engine-depth Phase 14) - a genuinely tired team
+        should get hurt more often, which the old flat-probability model
+        had no way to express at all."""
+        slots = list(self._active[team.name].values())
+        if not slots:
+            return 0.0
+        avg_condition = sum(self._stamina.get(id(s.player), 100.0) for s in slots) / len(slots)
+        return self._clamp((100.0 - avg_condition) / 80.0, 0.0, 1.0)
 
     def _maybe_personnel_change(self, minute: int, result: MatchResult) -> None:
         """Rolls for an injury (any time) and, inside a mid-match window,
         a tactical/fatigue substitution - for each team, once per drive."""
         for team in (self.home, self.away):
-            if self.rng.random() < P_INJURY_PER_DRIVE:
+            # Injury risk scaled by real match fatigue (match-engine-depth
+            # Phase 14): `P_INJURY_PER_DRIVE` is still the baseline, but a
+            # team playing at genuine fatigue (low average `_stamina`) now
+            # carries up to `INJURY_FATIGUE_MULTIPLIER`x that baseline risk -
+            # a real, modest, bounded link between tiredness and injury,
+            # not a flat per-drive constant blind to how the match has
+            # actually gone.
+            fatigue = self._team_fatigue_factor(team)
+            injury_prob = P_INJURY_PER_DRIVE * (1.0 + fatigue * INJURY_FATIGUE_MULTIPLIER)
+            if self.rng.random() < injury_prob:
                 self._apply_injury(team, minute, result)
             elif (
                 TACTICAL_SUB_WINDOW[0] <= minute <= TACTICAL_SUB_WINDOW[1]
@@ -1038,16 +1298,36 @@ class MatchEngine:
         slots = list(self._active[team.name].items())
         if not slots:
             return
-        position, slot = self.rng.choice(slots)
+        # Fatigue-weighted victim pick (match-engine-depth Phase 14): a
+        # more tired player is more likely to be the one who gets hurt,
+        # not a uniform coin-flip among all 15 - reuses the SAME tracked
+        # `_stamina` condition `_team_fatigue_factor` already reads, no new
+        # signal invented. Floored at 1.0 so even a fully fresh player
+        # keeps some (just much smaller) chance.
+        weights = [max(1.0, 100.0 - self._stamina.get(id(slot.player), 100.0)) for _, slot in slots]
+        position, slot = self.rng.choices(slots, weights=weights, k=1)[0]
         injured = slot.player
         result.stats[team.name].injuries += 1
         result.injured_players.append((team.name, injured))
         severity, _weight, layoff_matches = self.rng.choices(
             INJURY_SEVERITY_TIERS, weights=[t[1] for t in INJURY_SEVERITY_TIERS],
         )[0]
+        injury_type = self.rng.choices(
+            INJURY_TYPES, weights=[t[1] for t in INJURY_TYPES],
+        )[0][0]
+        if injury_type == "concussion" and layoff_matches == 0:
+            # Real graduated return-to-play protocol - see `INJURY_TYPES`'
+            # own comment. Re-roll severity from the tiers that actually
+            # carry a lay-off, rather than hand-picking one tier (keeps
+            # the real relative weights between "muscle strain"/
+            # "significant"/"serious" intact).
+            non_zero_tiers = [t for t in INJURY_SEVERITY_TIERS if t[2] > 0]
+            severity, _weight, layoff_matches = self.rng.choices(
+                non_zero_tiers, weights=[t[1] for t in non_zero_tiers],
+            )[0]
         result.injury_details.append({
             "minute": minute, "team": team.name, "player": injured.name,
-            "position": position.value,
+            "position": position.value, "type": injury_type,
             # See `INJURY_SEVERITY_TIERS` above - `layoff_matches` is this
             # specific injury's roll, read by `availability.record_match`
             # instead of a single flat constant.
@@ -1064,7 +1344,7 @@ class MatchEngine:
             result.stats[team.name].substitutions += 1
             result.events.append(self._event(
                 minute, team,
-                f"Injury: {injured.name} ({team.name}) goes off at {position.value} - "
+                f"Injury: {injured.name} ({team.name}) goes off at {position.value} with a {injury_type} - "
                 f"{replacement.name} comes on.",
                 result,
             ))
@@ -1072,9 +1352,10 @@ class MatchEngine:
             # No cover left - the team plays the rest of the match a player
             # short, using the same rating-penalty machinery as a red card.
             self._carded[team.name].append(MATCH_MINUTES)
+            self._sent_off_positions[team.name].append(position)
             result.events.append(self._event(
                 minute, team,
-                f"Injury: {injured.name} ({team.name}) goes off at {position.value} - "
+                f"Injury: {injured.name} ({team.name}) goes off at {position.value} with a {injury_type} - "
                 f"no replacements left, {team.name} continue a player short.",
                 result,
             ))
@@ -1142,6 +1423,16 @@ class MatchEngine:
             + self._team_sub_rating(team, "handling") * 0.2
         )
 
+    def _kick_style_boost(self, team: Team, style: str) -> float:
+        """A manager's pre-match `"kick_style"` preference (see
+        `KICK_STYLE_CHOICES`/`KICK_STYLE_BOOST`) applied as a real, bounded
+        probability multiplier - `KICK_STYLE_BOOST` for whichever kick type
+        the manager actually picked, `1.0` (unchanged) for every other kick
+        type and for a team with no preference at all. Never overrides the
+        underlying skill/zone/defensive-style gates each kick type already
+        has - a preference nudges the odds, it can't force an outcome."""
+        return KICK_STYLE_BOOST if self._kick_style_preference.get(team.name) == style else 1.0
+
     def _kick_tendency(self, team: Team) -> float:
         """How much a team favours territorial kicking over ball-in-hand
         play, derived purely from the lineup's own existing attribute
@@ -1154,10 +1445,111 @@ class MatchEngine:
         purpose use of this number, NOT a full tactical model (it doesn't
         yet model the extra turnover/counterattack risk a loose territorial
         kick concedes in real rugby - a natural candidate for a later pass,
-        not bundled into this one)."""
+        not bundled into this one). A manager-chosen "kick_tendency" tactic
+        (see `TACTIC_CHOICES`) overrides this entirely for the rest of the
+        match, same as a real coach's pre-match gameplan would."""
+        override = self._tactics_override.get(team.name, {}).get("kick_tendency")
+        if override is not None:
+            return override
         kicking = self._team_sub_rating(team, "kicking")
         handling = self._team_sub_rating(team, "handling")
         return self._clamp((kicking - handling) / 40, -1.0, 1.0)
+
+    def _defensive_style(self, team: Team) -> float:
+        """Defensive organization (match-engine-depth Phase 12): [-1, 1],
+        positive = blitz-leaning (a fast, aggressive rush defence - real
+        rugby's "hard and fast" line that meets each attacker 1-on-1,
+        strong against an overlap but risks a missed tackle/infringement
+        if a defender mistimes the rush), negative = drift-leaning (a
+        patient line that shifts across to cover the ball once it's
+        passed, rarely beaten wide but gives up some central ground) - see
+        rugbyslate.com's own "the drift defence"/"the blitz defence"
+        articles, cross-checked earlier in this project's research.
+        Derived purely from the team's own `tackle_technique` (aggressive
+        technique) vs `positioning` (patient, structured defense)
+        sub-ratings - no new manual per-team setting, same convention as
+        `_kick_tendency`. Read live every drive, so a substitution shifts
+        it naturally. A manager-chosen "defensive_style" tactic (see
+        `TACTIC_CHOICES`) overrides this entirely for the rest of the
+        match."""
+        override = self._tactics_override.get(team.name, {}).get("defensive_style")
+        if override is not None:
+            return override
+        technique = self._team_sub_rating(team, "tackle_technique")
+        positioning = self._team_sub_rating(team, "positioning")
+        return self._clamp((technique - positioning) / 40, -1.0, 1.0)
+
+    def _attack_shape_tendency(self, team: Team) -> float:
+        """Tactics/strategy system (match-engine-depth Phase 15): [-1, 1],
+        positive = forward-heavy (favors going through the pack - the
+        pick-and-go/driving-maul sub-scenarios), negative = backs-heavy
+        (favors spreading it wide - the wing-break/cross-field/snipe
+        individual tries). Derived purely from comparing the current
+        starting XV's forwards' own `attack` sub-rating average against
+        the backs' own (reusing `models.position.FORWARDS`/`BACKS`, no new
+        manual per-team setting) - two squads with the same OVERALL
+        strength but a different shape (a dominant pack vs. a dangerous
+        backline) genuinely produce different, measurable tactical
+        outcomes, which a single flat team-wide rating couldn't express.
+        Read live every drive, so an injury/substitution shifts it
+        naturally (e.g. losing a back for a forward on the bench pushes a
+        team more forward-heavy for the rest of the match). A manager-
+        chosen "attack_shape" tactic (see `TACTIC_CHOICES`) overrides this
+        entirely for the rest of the match."""
+        override = self._tactics_override.get(team.name, {}).get("attack_shape")
+        if override is not None:
+            return override
+        slots = list(self._active[team.name].values())
+        fwd_vals = [s.player.sub_ratings(s.position).get("attack", 50) for s in slots if s.position in FORWARDS]
+        back_vals = [s.player.sub_ratings(s.position).get("attack", 50) for s in slots if s.position in BACKS]
+        fwd_rating = sum(fwd_vals) / len(fwd_vals) if fwd_vals else 50.0
+        back_rating = sum(back_vals) / len(back_vals) if back_vals else 50.0
+        return self._clamp((fwd_rating - back_rating) / 25, -1.0, 1.0)
+
+    def _score_pressure(self, team: Team, minute: int, result: MatchResult) -> float:
+        """Tactics/strategy system, part 2: [-1, 1], positive = this team
+        is chasing the game (behind on the scoreboard, genuinely more
+        incentive to play attacking rugby and keep the ball alive -
+        "backs to the wall"), negative = this team is closing it out
+        (ahead late, genuinely more incentive to play conservative,
+        territorial rugby and not gift the ball back). Derived purely
+        from the REAL live scoreline (`result.score_home`/`score_away`)
+        and `minute` - no new manual setting, and deliberately only
+        meaningful in the second half (a 7-point gap at minute 10 means
+        little; the same gap at minute 70 is a real in-game factor) - a
+        flat `0.0` for the whole first half and for a close scoreline at
+        any point, by design."""
+        if minute < 40:
+            return 0.0
+        own_score = result.score_home if team is self.home else result.score_away
+        opp_score = result.score_away if team is self.home else result.score_home
+        diff = own_score - opp_score
+        # Scaled so a 2-score game (14 points) at full time is close to the
+        # extreme (+/-1), a one-score game (7) is a modest nudge - real
+        # "game state" rugby commentary already talks about in these terms.
+        # `urgency` itself rises through the second half (a given gap
+        # matters more with 5 minutes left than with 35 left).
+        urgency = self._clamp((minute - 40) / 40, 0.3, 1.0)
+        return self._clamp(-diff / 14.0, -1.0, 1.0) * urgency
+
+    # Opening-minutes "cagey start" window for each half - a real, if
+    # informal, rugby convention rather than a law; chosen to be a small,
+    # honest band, not tuned to hit a target number.
+    PERIOD_CAUTION_WINDOW = 8
+    PERIOD_CAUTION_FLOOR = 0.6
+
+    def _period_caution_factor(self, minute: int) -> float:
+        """1.0 (no change) outside the opening `PERIOD_CAUTION_WINDOW`
+        minutes of either half; ramps down to `PERIOD_CAUTION_FLOOR` right
+        at kickoff/the second-half restart, linearly back up to 1.0 by the
+        end of the window - independent of the scoreline (see
+        `_score_pressure` for the scoreline-driven tier; this is the purely
+        clock-driven one)."""
+        minute_in_half = minute if minute < 40 else minute - 40
+        if minute_in_half >= self.PERIOD_CAUTION_WINDOW:
+            return 1.0
+        progress = minute_in_half / self.PERIOD_CAUTION_WINDOW
+        return self.PERIOD_CAUTION_FLOOR + (1.0 - self.PERIOD_CAUTION_FLOOR) * progress
 
     # Fixed left-to-right ordering of the 5 zones (index 0 = home's own
     # line, index 4 = away's own line) - the single place every zone/index
@@ -1177,7 +1569,14 @@ class MatchEngine:
         tryline zone than the original 3-zone version did - a deliberate,
         more realistic side effect, not an oversight."""
         tendency = self._kick_tendency(attacking)
-        p_advance = self._clamp(0.35 + edge * 0.15 + tendency * 0.05, 0.1, 0.65)
+        # A blitz-leaning defence compresses the attacking team's space
+        # (real rugby: a fast, aggressive rush line shuts down an overlap
+        # before it can develop) - reduces the advance chance; a
+        # drift-leaning defence doesn't get this bonus (drift's own
+        # strength shows up elsewhere, in the individual break
+        # probabilities below, not in raw territory).
+        defensive_style = self._defensive_style(defending)
+        p_advance = self._clamp(0.35 + edge * 0.15 + tendency * 0.05 - max(0.0, defensive_style) * 0.06, 0.1, 0.65)
         p_retreat = self._clamp(0.15 - edge * 0.10, 0.05, 0.3)
         toward_away = attacking is self.home  # home attacking -> ball moves toward AWAY_TRYLINE
         roll = self.rng.random()
@@ -1276,7 +1675,13 @@ class MatchEngine:
         discipline_edge_atk = (70 - discipline_atk) / 100
         p_pen_conceded_by_atk = self._clamp(0.08 + discipline_edge_atk * 0.10, 0.02, 0.30)
 
-        p_card = 0.015 * self._clamp(1.4 - discipline_def / 70, 0.3, 2.0)
+        # A blitz-leaning defence rushes up fast and risks mistiming it -
+        # a real, modest extra card risk (see `_defensive_style`'s own
+        # docstring); a drift-leaning defence gets no such penalty (its
+        # own risk/reward shows up in the individual break probabilities
+        # instead, not in cards).
+        defensive_style_card = self._defensive_style(defending)
+        p_card = 0.015 * self._clamp(1.4 - discipline_def / 70, 0.3, 2.0) * (1 + max(0.0, defensive_style_card) * 0.3)
 
         # Card check: once per DRIVE, not per phase (a cynical/foul-based
         # card is a whole-possession event, not something re-rolled on
@@ -1330,6 +1735,18 @@ class MatchEngine:
         breakdown_edge = (breakdown_def - breakdown_atk) / 100
         p_breakdown_turnover = self._clamp(0.06 + breakdown_edge * 0.08, 0.01, 0.18)
 
+        # Defensive organization (match-engine-depth Phase 12): a
+        # blitz-leaning defence's aggressive, fast line creates MORE
+        # breakdown pressure than its raw tackle_technique rating alone
+        # suggests (real rugby: rushing up fast wins more jackal contests,
+        # at the cost of the extra card risk added above) - a drift-leaning
+        # defence gets no such bonus here (its strength shows up in the
+        # individual break probabilities in `_resolve_phase` instead).
+        defensive_style_breakdown = self._defensive_style(defending)
+        p_breakdown_turnover = self._clamp(
+            p_breakdown_turnover + max(0.0, defensive_style_breakdown) * 0.03, 0.01, 0.20
+        )
+
         # Second player-specific decision behavior (match-engine-depth
         # Phase 8, same pattern as the scrum-half snipe try above): a
         # standout openside flanker's OWN `tackle_technique`/
@@ -1348,6 +1765,16 @@ class MatchEngine:
             jackal_bonus = self._clamp((fetcher_skill - 60) / 300, 0.0, 0.04)
         p_breakdown_turnover = self._clamp(p_breakdown_turnover + jackal_bonus, 0.01, 0.22)
 
+        # Red zone tracking (match stats system - item 12): "did this
+        # drive ever reach the defending team's 22/tryline" (a real rugby
+        # "red zone possession"), checked after each phase's own zone
+        # advance. A scoped simplification, documented honestly: this
+        # covers the common open-play phase loop (and the two zone-gated
+        # set-piece-try sub-scenarios, credited directly where they
+        # happen) - an early drive exit before reaching here (a card, a
+        # scrum/lineout penalty/turnover) doesn't update it, since those
+        # aren't really "red zone" possessions in the usual rugby sense.
+        reached_red_zone = False
         for phase_num in range(1, MAX_PHASES_PER_DRIVE + 1):
             outcome = self._resolve_phase(
                 attacking, defending, phase_num, minute, result,
@@ -1357,8 +1784,17 @@ class MatchEngine:
                 p_breakdown_turnover=p_breakdown_turnover, jackal_flanker=jackal_flanker,
                 dg_kicker=dg_kicker, p_drop_goal=p_drop_goal,
             )
+            if self._zone_relative_to(attacking) in ("attacking_tryline", "attacking_22"):
+                reached_red_zone = True
             if outcome != "continue":
+                if reached_red_zone:
+                    stats_a.red_zone_possessions += 1
+                    if outcome == "try":
+                        stats_a.red_zone_tries += 1
                 return
+
+        if reached_red_zone:
+            stats_a.red_zone_possessions += 1
 
         # Reached MAX_PHASES_PER_DRIVE still "continuing" - the attack
         # couldn't finish what it started; the defense eventually resets
@@ -1379,6 +1815,42 @@ class MatchEngine:
         attack retains clean, usable ball (the loop keeps going), or a
         short tag naming whatever decisive outcome ended the drive."""
         stats_a = result.stats[attacking.name]
+
+        # Defensive organization (match-engine-depth Phase 12): a
+        # drift-leaning defence's own strength is specifically shutting
+        # down individual breaks out wide/through a gap (real rugby: the
+        # whole line shifts across to cover the ball, rarely beaten by one
+        # player's own skill) - so it damps the individual break
+        # probabilities below (snipe/wing-break/cross-field), never the
+        # team-wide ones. A blitz-leaning defence gets no bonus here (its
+        # own edge already showed up in `_advance_zone`/breakdown turnover/
+        # cards above) - drift_factor is 1.0 (no change) for a blitz or
+        # balanced defence, down to 0.5 at full drift.
+        drift_factor = 1.0 - max(0.0, -self._defensive_style(defending)) * 0.5
+
+        # Tactics/strategy system (match-engine-depth Phase 15): a
+        # backs-heavy team's individual break probabilities (snipe/
+        # wing-break/cross-field, all below) get a real boost from their
+        # own `_attack_shape_tendency`; a forward-heavy team gets none here
+        # (its own edge shows up in the pick-and-go/driving-maul
+        # sub-scenarios instead - see `_resolve_scrum`/`_resolve_lineout`).
+        # A team chasing the game (`_score_pressure` > 0, genuinely behind
+        # late) also gets a boost here - real "backs to the wall" rugby;
+        # a team closing out a lead gets a reduction instead (plays it
+        # safer, doesn't force a risky individual play it doesn't need).
+        backs_heavy_factor = 1.0 + max(0.0, -self._attack_shape_tendency(attacking)) * 0.4
+        score_pressure = self._score_pressure(attacking, minute, result)
+        pressure_factor = 1.0 + score_pressure * 0.3
+        # Period-based strategy tier, independent of the scoreline: real
+        # rugby's opening minutes of EITHER half are genuinely more
+        # cautious - both sides are "feeling each other out," reluctant to
+        # force a high-risk individual play before settling into the game
+        # (commentary clichés like "a cagey start" reflect this). Damps the
+        # same individual-break probabilities `_score_pressure` already
+        # nudges, purely by match clock - a flat 1.0 (no change) once past
+        # the opening stretch of each half.
+        period_factor = self._period_caution_factor(minute)
+        individual_break_factor = backs_heavy_factor * pressure_factor * period_factor
 
         p_try = self._clamp(0.11 + edge * 0.10, 0.02, 0.45) * PHASE_TRY_RAMP.get(phase_num, 1.0)
 
@@ -1410,7 +1882,7 @@ class MatchEngine:
             if sh_slot is not None:
                 snipe_scrum_half = sh_slot.player
                 skill = (snipe_scrum_half.attributes.pace + snipe_scrum_half.attributes.game_intelligence) / 2
-                p_snipe = self._clamp((skill - 60) / 400, 0.0, 0.05)
+                p_snipe = self._clamp((skill - 60) / 400, 0.0, 0.05) * drift_factor * individual_break_factor
 
         # A third player-specific decision behavior (match-engine-depth
         # Phase 9, same pattern as the scrum-half snipe and the openside
@@ -1429,7 +1901,106 @@ class MatchEngine:
                 if wing_slot is not None:
                     wing_breaker = wing_slot.player
                     wing_skill = (wing_breaker.attributes.footwork + wing_breaker.attributes.pace) / 2
-                    p_wing_break = self._clamp((wing_skill - 60) / 350, 0.0, 0.05)
+                    p_wing_break = self._clamp((wing_skill - 60) / 350, 0.0, 0.05) * drift_factor * individual_break_factor
+
+        # Kicking system detail, part 1 (match-engine-depth Phase 11): a
+        # cross-field kick, a real named tactical option distinct from
+        # ball-in-hand phases - the FLY-HALF's own `kicking_game`/
+        # `game_intelligence` decides to put it up for the FAR wing (the
+        # blindside one, opposite `self._side` - same "far wing stays
+        # wide" convention the pitch-diagram formation already uses), who
+        # finishes it on their OWN `aerial`/`pace`. Two named individuals
+        # combining for one outcome, not a team-wide average either side.
+        p_cross_field = 0.0
+        cross_field_wing = None
+        cross_field_flyhalf = None
+        if zone_rel in ("attacking_tryline", "attacking_22") and self._side in (Side.LEFT, Side.RIGHT):
+            fh_slot = self._active[attacking.name].get(Position.FLY_HALF)
+            far_wing_position = {Side.LEFT: Position.RIGHT_WING, Side.RIGHT: Position.LEFT_WING}[self._side]
+            far_wing_slot = self._active[attacking.name].get(far_wing_position)
+            if fh_slot is not None and far_wing_slot is not None:
+                cross_field_flyhalf = fh_slot.player
+                cross_field_wing = far_wing_slot.player
+                kick_skill = (cross_field_flyhalf.attributes.kicking_game + cross_field_flyhalf.attributes.game_intelligence) / 2
+                catch_skill = (cross_field_wing.attributes.aerial + cross_field_wing.attributes.pace) / 2
+                combined_skill = (kick_skill + catch_skill) / 2
+                # Tactical reaction to the opponent's defensive style
+                # (match-engine-depth Phase 15): real rugby's own "attacking
+                # the drift" counter is exactly this - a cross-field ball
+                # goes OVER a drifting line rather than through it, so a
+                # drift defence's general `drift_factor` damping (which
+                # correctly suppresses ground-level individual breaks like
+                # the snipe/wing-break above) is partly offset here, unlike
+                # for those other two.
+                drift_counter_bonus = 1.0 + max(0.0, -self._defensive_style(defending)) * 0.6
+                p_cross_field = (
+                    self._clamp((combined_skill - 62) / 320, 0.0, 0.045)
+                    * drift_factor * individual_break_factor * drift_counter_bonus
+                    * self._kick_style_boost(attacking, "cross_field")
+                )
+
+        # Kicking system detail, follow-up: two more REAL, distinct kick
+        # types (the "grubber/chip kick" gap left open in
+        # `MATCH_ENGINE_MODEL.md`'s kicking-system section), each gated to
+        # its own real rugby situation rather than being generic flavor
+        # text on the existing box/cross-field kicks:
+        #
+        # Grubber kick - a low kick ALONG THE GROUND, only realistic right
+        # on the defending team's line (`"attacking_tryline"` only, tighter
+        # than cross-field's two-zone gate) - driven by the SCRUM-HALF's
+        # own `kicking_game`/`game_intelligence` (a real scrum-half's grubber
+        # through a forwards-heavy defensive line is the classic case, not
+        # the fly-half's long cross-field ball above), finished by the
+        # chasing NEAR wing (matching `self._side`, not the far one - a
+        # grubber is chased on the SAME side it's kicked, unlike the
+        # cross-field ball which deliberately goes to the blind side).
+        p_grubber = 0.0
+        grubber_scrum_half = None
+        grubber_wing = None
+        if zone_rel == "attacking_tryline" and self._side in (Side.LEFT, Side.RIGHT):
+            sh_slot_grub = self._active[attacking.name].get(Position.SCRUM_HALF)
+            near_wing_position = {Side.LEFT: Position.LEFT_WING, Side.RIGHT: Position.RIGHT_WING}[self._side]
+            near_wing_slot = self._active[attacking.name].get(near_wing_position)
+            if sh_slot_grub is not None and near_wing_slot is not None:
+                grubber_scrum_half = sh_slot_grub.player
+                grubber_wing = near_wing_slot.player
+                kick_skill = (grubber_scrum_half.attributes.kicking_game + grubber_scrum_half.attributes.game_intelligence) / 2
+                chase_skill = (grubber_wing.attributes.pace + grubber_wing.attributes.footwork) / 2
+                combined_skill = (kick_skill + chase_skill) / 2
+                p_grubber = (
+                    self._clamp((combined_skill - 62) / 340, 0.0, 0.04)
+                    * individual_break_factor * self._kick_style_boost(attacking, "grubber")
+                )
+
+        # Chip kick - over an ONRUSHING defensive line, the real counter to
+        # a blitz defence (the fast, flat rush line that "negates the
+        # overlap" - see `_defensive_style`'s own docstring): only a live
+        # option while facing a genuinely blitz-leaning defence, in
+        # midfield/the attacking 22 (not right on the line, where there's
+        # no onrushing line left to chip over). Driven by the FLY-HALF's
+        # `kicking_game`/`game_intelligence` (the decision + execution),
+        # finished by the chasing near wing's `pace`/`footwork` - same
+        # named-individual convention as every other kick type here.
+        p_chip = 0.0
+        chip_flyhalf = None
+        chip_wing = None
+        blitz_level = self._defensive_style(defending)
+        if zone_rel in ("attacking_22", "midfield") and blitz_level > 0.15 and self._side in (Side.LEFT, Side.RIGHT):
+            fh_slot_chip = self._active[attacking.name].get(Position.FLY_HALF)
+            near_wing_position_chip = {Side.LEFT: Position.LEFT_WING, Side.RIGHT: Position.RIGHT_WING}[self._side]
+            near_wing_slot_chip = self._active[attacking.name].get(near_wing_position_chip)
+            if fh_slot_chip is not None and near_wing_slot_chip is not None:
+                chip_flyhalf = fh_slot_chip.player
+                chip_wing = near_wing_slot_chip.player
+                kick_skill = (chip_flyhalf.attributes.kicking_game + chip_flyhalf.attributes.game_intelligence) / 2
+                chase_skill = (chip_wing.attributes.pace + chip_wing.attributes.footwork) / 2
+                combined_skill = (kick_skill + chase_skill) / 2
+                blitz_counter_bonus = 1.0 + blitz_level * 0.6
+                p_chip = (
+                    self._clamp((combined_skill - 64) / 360, 0.0, 0.035)
+                    * individual_break_factor * blitz_counter_bonus
+                    * self._kick_style_boost(attacking, "chip")
+                )
 
         handling_edge = (handling_rating - 60) / 100
         p_error = self._clamp(0.16 - handling_edge * 0.10, 0.04, 0.35)
@@ -1462,6 +2033,33 @@ class MatchEngine:
                 individual_flavor="steps the last defender and goes over in the corner - a brilliant individual finish.",
             )
             return "try"
+        if take(p_cross_field):
+            self._score_try(
+                attacking, minute, result, forced_scorer=cross_field_wing,
+                individual_flavor=(
+                    f"gathers a raking cross-field kick from {cross_field_flyhalf.name} "
+                    "and dives in at the corner."
+                ),
+            )
+            return "try"
+        if take(p_grubber):
+            self._score_try(
+                attacking, minute, result, forced_scorer=grubber_wing,
+                individual_flavor=(
+                    f"{grubber_scrum_half.name} grubbers it through the defensive line and "
+                    f"{grubber_wing.name} wins the race to touch down."
+                ),
+            )
+            return "try"
+        if take(p_chip):
+            self._score_try(
+                attacking, minute, result, forced_scorer=chip_wing,
+                individual_flavor=(
+                    f"{chip_flyhalf.name} chips over the onrushing defence and {chip_wing.name} "
+                    "regathers in space to score."
+                ),
+            )
+            return "try"
         if take(p_drop_goal):
             stats_a.drop_goals += 1
             self._credit(attacking, dg_kicker, drop_goals=1)
@@ -1472,12 +2070,36 @@ class MatchEngine:
             ))
             return "drop_goal"
         if take(p_pen_conceded_by_def):
-            self._score_penalty_chance(attacking, defending, minute, result)
+            # Referee system, part 1 (match-engine-depth Phase 13): named,
+            # distinct infringement reasons instead of one generic
+            # "at the breakdown" text for every general-play penalty -
+            # picked from WHERE the already-rolled `roll` landed within
+            # this outcome's own probability slice (no new RNG call, a
+            # free byproduct of the existing cumulative-roll menu).
+            slice_position = (roll - (cumulative - p_pen_conceded_by_def)) / p_pen_conceded_by_def
+            via = "offside" if slice_position < 0.5 else "not_releasing"
+            # Referee system, part 2: advantage. The referee doesn't blow
+            # immediately - if the attack was ALREADY in a position to
+            # score anyway (this phase's own zone-gated `p_try`, rolled
+            # fresh), advantage is played and the try stands instead of
+            # the penalty - a real, named rugby concept, not just
+            # commentary flavor: it genuinely changes which outcome this
+            # phase resolves to.
+            if self.rng.random() < p_try:
+                self._score_try(
+                    attacking, minute, result,
+                    individual_flavor="plays advantage and goes over - no need to bring it back for the penalty.",
+                )
+                return "try"
+            self._score_penalty_chance(attacking, defending, minute, result, via=via)
             return "penalty"
         if take(p_breakdown_turnover):
             result.stats[defending.name].turnovers_won += 1
+            result.stats[attacking.name].turnovers_conceded += 1
+            result.stats[attacking.name].rucks_lost += 1
             if jackal_flanker is not None:
                 self._apply_phase_involvement_stamina(jackal_flanker)
+                self._credit(defending, jackal_flanker, turnovers_won=1)
                 jackal_text = f"{jackal_flanker.name} jackals over the ball"
             else:
                 jackal_text = f"{defending.name} jackal over the ball"
@@ -1489,13 +2111,100 @@ class MatchEngine:
             self._credit_defensive_phase_win(defending, missed=True)
             return "turnover"
         if take(p_pen_conceded_by_atk):
-            self._score_penalty_chance(defending, attacking, minute, result)
+            slice_position = (roll - (cumulative - p_pen_conceded_by_atk)) / p_pen_conceded_by_atk
+            via = "offside" if slice_position < 0.5 else "not_releasing"
+            self._score_penalty_chance(defending, attacking, minute, result, via=via)
             return "penalty"
         if take(p_error):
+            # Referee system, part 3: a handling error isn't always the
+            # same infringement - a knock-on (dropped forward off the
+            # hands/arms, the common case) and a forward pass (thrown
+            # forward, genuinely different) are both real, named law
+            # breaches with the same practical result (scrum to the
+            # defense) - picked the same free, no-extra-roll way as the
+            # penalty reasons above.
+            slice_position = (roll - (cumulative - p_error)) / p_error
+            error_kind = "knock-on" if slice_position < 0.7 else "forward pass"
             stats_a.handling_errors += 1
-            result.events.append(self._event(minute, attacking, f"{attacking.name} lose the ball - handling error, scrum to {defending.name}.", result))
+            result.events.append(self._event(
+                minute, attacking,
+                f"{attacking.name} lose the ball - {error_kind}, scrum to {defending.name}.",
+                result,
+            ))
             result.stats[defending.name].turnovers_won += 1
+            stats_a.turnovers_conceded += 1
             return "error"
+
+        # Kicking system detail, part 2 (match-engine-depth Phase 11): a
+        # territorial box kick, a real tactical choice distinct from
+        # carrying it up - only available deep/midfield (not yet close
+        # enough to carry for the line), driven by the SCRUM-HALF/FLY-HALF's
+        # own `kicking_game` (not a team-wide average). A real trade,
+        # possession for territory - it ends this team's drive outright
+        # (a good box kick is deliberately given up to be chased/
+        # contested), with zone advancing one extra step on a clean kick,
+        # or a charge-down turnover if the defending fullback reads it
+        # well. Checked AFTER the main outcome menu (only reached once the
+        # phase would otherwise just "continue" as a carry) - a separate
+        # decision tier, not competing with try/penalty/turnover odds.
+        if zone_rel in ("own_tryline", "own_22", "midfield"):
+            sh_slot_kick = self._active[attacking.name].get(Position.SCRUM_HALF)
+            fh_slot_kick = self._active[attacking.name].get(Position.FLY_HALF)
+            if sh_slot_kick is not None and fh_slot_kick is not None:
+                box_kicker = (
+                    fh_slot_kick.player if fh_slot_kick.player.attributes.kicking_game >= sh_slot_kick.player.attributes.kicking_game
+                    else sh_slot_kick.player
+                )
+                kick_skill = (sh_slot_kick.player.attributes.kicking_game + fh_slot_kick.player.attributes.kicking_game) / 2
+                # Tactics/strategy system (match-engine-depth Phase 15): a
+                # team chasing the game (`_score_pressure` > 0) is LESS
+                # willing to give up the ball on a territorial kick (real
+                # "backs to the wall" rugby - keep it and attack); a team
+                # closing out a lead is MORE willing (control territory,
+                # don't gift a turnover chance). Facing a blitz-leaning
+                # defence also raises this - the real counter to a fast
+                # rush line is kicking in behind it, not carrying into it.
+                # Player-role/tactic link, strengthened: a team's real
+                # `kick_tendency` (attribute-derived, or a manager's own
+                # "kick_heavy"/"ball_in_hand" choice - see
+                # `TACTIC_CHOICES`) previously only nudged `_advance_zone`'s
+                # abstract territory roll; it now ALSO raises or lowers
+                # this specific scrum-half/fly-half decision's own odds -
+                # so picking "kick_heavy" genuinely means more real box
+                # kicks (and the matching `kicks_attempted` stat credit to
+                # those two named players), not just a faster zone climb.
+                kick_tendency_factor = 1.0 + max(0.0, self._kick_tendency(attacking)) * 0.5
+                score_pressure = self._score_pressure(attacking, minute, result)
+                pressure_factor = 1.0 - score_pressure * 0.35
+                blitz_counter_bonus = 1.0 + max(0.0, self._defensive_style(defending)) * 0.4
+                p_box_kick = self._clamp((kick_skill - 55) / 250, 0.0, 0.30) * pressure_factor * blitz_counter_bonus * kick_tendency_factor
+                p_box_kick = self._clamp(p_box_kick, 0.0, 0.40) * self._kick_style_boost(attacking, "box_kick")
+                if self.rng.random() < p_box_kick:
+                    stats_a.kicks_attempted += 1
+                    defender_slot = self._active[defending.name].get(Position.FULLBACK)
+                    catcher_skill = defender_slot.player.attributes.aerial if defender_slot else 50.0
+                    p_charge_down = self._clamp((catcher_skill - kick_skill) / 400 + 0.03, 0.01, 0.12)
+                    if self.rng.random() < p_charge_down:
+                        result.stats[defending.name].turnovers_won += 1
+                        stats_a.turnovers_conceded += 1
+                        result.events.append(self._event(
+                            minute, attacking,
+                            f"{box_kicker.name}'s box kick is charged down - loose ball recovered by {defending.name}.",
+                            result,
+                        ))
+                        return "charge_down"
+                    toward_away = attacking is self.home
+                    step = 1 if toward_away else -1
+                    new_index = self._clamp(self._ZONES.index(self._zone) + step, 0, len(self._ZONES) - 1)
+                    self._zone = self._ZONES[int(new_index)]
+                    stats_a.kicks_successful += 1
+                    stats_a.kicking_metres += KICKING_METRES_PER_ZONE_STEP
+                    result.events.append(self._event(
+                        minute, attacking,
+                        f"{box_kicker.name} pins {defending.name} back with a smart territorial kick.",
+                        result,
+                    ))
+                    return "box_kick"
 
         # Clean continuation - no commentary line of its own (reserved for
         # the drive's eventual decisive outcome, same "one line per
@@ -1530,6 +2239,15 @@ class MatchEngine:
         stats_a.rucks_won += 1
         self._credit(attacking, carrier, carries=1, metres_gained=metres)
         self._apply_phase_involvement_stamina(carrier)
+
+        # A carry that gains real, meaningful ground - DEFENDERS_BEATEN_METRES_THRESHOLD
+        # (8 units) or more - counts as beating a defender, the same
+        # documented-threshold convention this file already uses elsewhere
+        # (e.g. the concussion severity re-roll) rather than a separate
+        # invented roll.
+        if metres >= DEFENDERS_BEATEN_METRES_THRESHOLD:
+            stats_a.defenders_beaten += 1
+            self._credit(attacking, carrier, defenders_beaten=1)
 
         stats_d.tackles_made += 1
         tackler = self._pick_defender(defending)
@@ -1608,6 +2326,12 @@ class MatchEngine:
         p_scrum_penalty = self._clamp(0.04 + scrum_edge * 0.05, 0.0, 0.12)
         p_scrum_turnover = self._clamp(0.01 - scrum_edge * 0.02, 0.002, 0.05)
 
+        # Credited once per scrum-origin drive regardless of outcome -
+        # this is the attacking team's OWN put-in, so `scrums_contested`
+        # (alongside `scrums_won`) is what makes a real success rate
+        # possible: `scrums_won / scrums_contested`.
+        result.stats[attacking.name].scrums_contested += 1
+
         roll = self.rng.random()
         if roll < p_scrum_penalty:
             self._score_penalty_chance(attacking, defending, minute, result, via="scrum")
@@ -1615,6 +2339,7 @@ class MatchEngine:
         if roll < p_scrum_penalty + p_scrum_turnover:
             result.stats[defending.name].scrums_won += 1
             result.stats[defending.name].turnovers_won += 1
+            result.stats[attacking.name].turnovers_conceded += 1
             loser = self._weakest_scrum_player(attacking)
             winner = self._strongest_scrum_player(defending)
             loser_text = f" - {loser.name} outscrummaged" if loser else ""
@@ -1640,12 +2365,18 @@ class MatchEngine:
             if no8_slot is not None:
                 no8 = no8_slot.player
                 skill = (no8.attributes.strength + no8.attributes.game_intelligence) / 2
-                p_pick_and_go = self._clamp((skill - 65) / 300, 0.0, 0.06)
+                # A forward-heavy team's own tactical identity (match-
+                # engine-depth Phase 15) leans on exactly this pattern more
+                # - real rugby's "go through the pack" game plan.
+                forward_heavy_bonus = 1.0 + max(0.0, self._attack_shape_tendency(attacking)) * 0.5
+                p_pick_and_go = self._clamp((skill - 65) / 300, 0.0, 0.06) * forward_heavy_bonus
                 if self.rng.random() < p_pick_and_go:
                     self._score_try(
                         attacking, minute, result, forced_scorer=no8,
                         individual_flavor="picks up from the base and drives over himself - a real number 8's try.",
                     )
+                    result.stats[attacking.name].red_zone_possessions += 1
+                    result.stats[attacking.name].red_zone_tries += 1
                     return "try"
 
         return "continue"
@@ -1673,9 +2404,15 @@ class MatchEngine:
         ) / 100
         p_lineout_turnover = self._clamp(0.05 - lineout_edge * 0.06, 0.01, 0.14)
 
+        # Same "contested regardless of outcome" convention as the scrum's
+        # own `scrums_contested` - makes a real `lineouts_won/
+        # lineouts_contested` success rate possible.
+        result.stats[attacking.name].lineouts_contested += 1
+
         if self.rng.random() < p_lineout_turnover:
             result.stats[defending.name].lineouts_won += 1
             result.stats[defending.name].turnovers_won += 1
+            result.stats[attacking.name].turnovers_conceded += 1
             jumper_text = f" - {defending_jumper.name} climbs above everyone" if defending_jumper else ""
             result.events.append(self._event(
                 minute, defending,
@@ -1696,12 +2433,15 @@ class MatchEngine:
         if zone_rel in ("attacking_tryline", "attacking_22") and thrower_slot is not None:
             hooker = thrower_slot.player
             skill = (hooker.attributes.strength + hooker.attributes.game_intelligence) / 2
-            p_maul_try = self._clamp((skill - 65) / 300, 0.0, 0.06)
+            forward_heavy_bonus = 1.0 + max(0.0, self._attack_shape_tendency(attacking)) * 0.5
+            p_maul_try = self._clamp((skill - 65) / 300, 0.0, 0.06) * forward_heavy_bonus
             if self.rng.random() < p_maul_try:
                 self._score_try(
                     attacking, minute, result, forced_scorer=hooker,
                     individual_flavor="peels off the back of a driving maul to finish it - a real catch-and-drive try.",
                 )
+                result.stats[attacking.name].red_zone_possessions += 1
+                result.stats[attacking.name].red_zone_tries += 1
                 return "try"
 
         return "continue"
@@ -1711,10 +2451,13 @@ class MatchEngine:
         # off the field, not merely "a player down" (same reasoning as an
         # injured-off player not being eligible for the next injury roll).
         slots = [
-            s for s in self._active[team.name].values()
+            (pos, s) for pos, s in self._active[team.name].items()
             if id(s.player) not in self._sent_off[team.name]
         ]
-        carded_player = self.rng.choice(slots).player if slots else None
+        carded_position, carded_player = (None, None)
+        if slots:
+            carded_position, carded_slot = self.rng.choice(slots)
+            carded_player = carded_slot.player
 
         is_red = self.rng.random() < 0.12
         escalated = False
@@ -1741,6 +2484,8 @@ class MatchEngine:
             if carded_player is not None:
                 result.carded_players.append((team.name, carded_player, "red"))
                 self._sent_off[team.name].add(id(carded_player))
+                if carded_position is not None:
+                    self._sent_off_positions[team.name].append(carded_position)
                 result.card_details.append({
                     "minute": minute, "team": team.name, "player": carded_player.name,
                     "card_type": "red", "escalated_second_yellow": escalated,
@@ -1883,10 +2628,45 @@ class MatchEngine:
         conceded_by = defending
         stats_conceded = result.stats[conceded_by.name]
         stats_conceded.penalties_conceded += 1
-        reason = "at the scrum" if via == "scrum" else "at the breakdown"
+        # Referee system (match-engine-depth Phase 13): named, distinct
+        # infringement reasons - not every general-play penalty is the
+        # same vague "at the breakdown" foul.
+        reason = {
+            "scrum": "at the scrum",
+            "offside": "for offside",
+            "not_releasing": "for not releasing the ball",
+        }.get(via, "at the breakdown")
         result.events.append(self._event(minute, conceded_by, f"Penalty against {conceded_by.name} {reason}.", result))
 
+        zone_rel = self._zone_relative_to(attacking)
+        # Manager-controls pass: a decision-team's own penalty is a real
+        # in-match choice (kick for posts / kick to touch / a quick tap),
+        # not an auto-pick - pause resolution right here and let the
+        # caller (`webapp.py`'s live-match flow) show the choice, instead
+        # of rolling `go_for_posts` below. The penalty itself (and its
+        # "Penalty against..." event, above) already happened - only what
+        # to DO with it is deferred. See `resolve_pending_decision`.
+        if attacking.name in self._decision_teams:
+            self._pending_penalty = {
+                "team": attacking.name, "minute": minute,
+                "zone": zone_rel, "can_go_for_posts": zone_rel not in ("own_22", "own_tryline"),
+            }
+            return
+        self._apply_penalty_decision(attacking, minute, result, zone_rel, choice=None)
+
+    def _apply_penalty_decision(self, attacking: Team, minute: int, result: MatchResult, zone_rel: str, choice: Optional[str]):
+        """Resolves what happens with an already-awarded penalty - either
+        the AI's own auto-pick (`choice=None`, the exact pre-existing
+        behavior) or a decision-team manager's explicit choice
+        (`"posts"`/`"touch"`/`"quick_tap"`, see `TACTIC_CHOICES`'s sibling
+        constant `PENALTY_CHOICES` and `resolve_pending_decision`)."""
         kicker = self._best_kicker(attacking)
+        if choice == "quick_tap":
+            result.events.append(self._event(
+                minute, attacking,
+                f"{attacking.name} take a quick tap penalty and keep the ball alive instead of kicking.", result,
+            ))
+            return
         # Zone-gated now (closes `MATCH_ENGINE_MODEL.md` item 3's previously
         # open "deep territory heuristics omitted for simplicity" gap, same
         # zone concept Phase 1 added for try probability): pinned in their
@@ -1894,9 +2674,15 @@ class MatchEngine:
         # for posts at all, whatever the kicker's skill - real rugby
         # essentially never attempts this range. In the defending team's
         # 22/tryline zone a side almost always takes the points; midfield
-        # keeps the original baseline.
-        zone_rel = self._zone_relative_to(attacking)
+        # keeps the original baseline. A decision-team manager's explicit
+        # "posts"/"touch" choice overrides the roll entirely (still subject
+        # to the same own-22/own-tryline realism gate - "posts" isn't
+        # offered as a choice there at all, see `can_go_for_posts` above).
         if zone_rel in ("own_22", "own_tryline"):
+            go_for_posts = False
+        elif choice == "posts":
+            go_for_posts = True
+        elif choice == "touch":
             go_for_posts = False
         else:
             go_for_posts = self.rng.random() < ZONE_GO_FOR_POSTS_BASE[zone_rel] or kicker.attributes.goal_kicking > 70
@@ -1914,6 +2700,24 @@ class MatchEngine:
             result.events.append(self._event(minute, attacking, f"{kicker.name} kicks the penalty.", result, add_score=(attacking, 3)))
         else:
             result.events.append(self._event(minute, attacking, f"{kicker.name}'s penalty attempt is off target.", result))
+
+    def resolve_pending_decision(self, choice: str) -> None:
+        """Applies a decision-team manager's choice for the currently
+        pending penalty (`"posts"`/`"touch"`/`"quick_tap"` - see
+        `_pending_penalty`/`_apply_penalty_decision`), then finishes this
+        drive's remaining bookkeeping (injury/tactical-sub roll, the
+        knockout-tiebreak check) exactly as an auto-decided drive already
+        would have - deferred, not skipped, by `_advance_one_drive` while
+        the decision was pending. No-op if nothing is actually pending (a
+        defensive guard, not an expected call pattern)."""
+        if self._pending_penalty is None or self.result is None:
+            return
+        pending = self._pending_penalty
+        self._pending_penalty = None
+        attacking = self.home if pending["team"] == self.home.name else self.away
+        self._apply_penalty_decision(attacking, pending["minute"], self.result, pending["zone"], choice)
+        self._maybe_personnel_change(self._minute, self.result)
+        self._update_knockout_stage()
 
     def _event(self, minute, team, text, result, add_score=None) -> CommentaryEvent:
         if add_score:

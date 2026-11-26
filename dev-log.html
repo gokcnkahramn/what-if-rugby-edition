@@ -1,0 +1,332 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>Motor Geliştirme Günlüğü</title>
+<style>
+  /* Layout: tek sütun rapor, sol kenarlıklı zaman çizelgesi kartları */
+  :root {
+    --bg: #faf9f7; --panel: #ffffff; --ink: #1b2420; --muted: #5c6a63;
+    --border: #e4e0d8; --accent: #2f6f4f; --accent-soft: #e4efe8;
+    --done: #2f6f4f; --wip: #b2742a; --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11160f; --panel: #171f1a; --ink: #eef0ec; --muted: #9aa69d;
+      --border: #273229; --accent: #6fcf97; --accent-soft: #1d2e22;
+      --done: #6fcf97; --wip: #e0a94f; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11160f; --panel: #171f1a; --ink: #eef0ec; --muted: #9aa69d;
+    --border: #273229; --accent: #6fcf97; --accent-soft: #1d2e22;
+    --done: #6fcf97; --wip: #e0a94f; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--font-body);
+    margin: 0; padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px)); line-height: 1.55;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding-block: 48px 80px; }
+  h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(1.7rem, 4vw, 2.3rem); letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); margin-top: 10px; font-size: 1rem; }
+  header.hero { margin-bottom: 44px; }
+  .stat-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 16px; min-width: 120px;
+  }
+  .stat .num { font-family: var(--font-display); font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+  .stat .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  section { margin-top: 40px; }
+  section > h2 { font-size: 1.25rem; margin-bottom: 4px; }
+  section > .section-note { color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
+
+  .timeline { display: flex; flex-direction: column; gap: 10px; }
+  .entry {
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--done);
+    border-radius: 10px; padding: 14px 18px; display: grid; gap: 4px; min-width: 0;
+  }
+  .entry.wip { border-left-color: var(--wip); }
+  .entry-top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .entry-title { font-weight: 600; }
+  .badge {
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--done); white-space: nowrap;
+  }
+  .badge.wip { color: var(--wip); background: color-mix(in srgb, var(--wip) 16%, transparent); }
+  .entry-desc { color: var(--muted); font-size: 0.92rem; }
+
+  .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; min-width: 0;
+  }
+  .card h3 { font-size: 1.02rem; margin-bottom: 8px; }
+  .card ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 0.9rem; display: grid; gap: 4px; }
+  .card .status-pill { display: inline-block; margin-top: 12px; font-size: 0.78rem; color: var(--wip); font-weight: 600; }
+
+  footer { margin-top: 56px; color: var(--muted); font-size: 0.82rem; border-top: 1px solid var(--border); padding-top: 18px; }
+</style>
+
+<div class="wrap">
+  <header class="hero">
+    <h1>Motor Geliştirme Günlüğü</h1>
+    <p class="subtitle">What-If Rugby Edition - maç motoru derinleştirme çalışmalarının tam listesi: tamamlananlar ve şu an üzerinde çalışılanlar.</p>
+    <div class="stat-row">
+      <div class="stat"><div class="num">346</div><div class="label">Geçen test</div></div>
+      <div class="stat"><div class="num">16</div><div class="label">Motor derinliği fazı</div></div>
+      <div class="stat"><div class="num">5</div><div class="label">Bireysel oyuncu etkisi</div></div>
+      <div class="stat"><div class="num">1</div><div class="label">Yan ürün: gerçek hata düzeltmesi</div></div>
+    </div>
+  </header>
+
+  <section>
+    <h2>Son tamamlanan üç sistem</h2>
+    <p class="section-note">Kullanıcının motor kontrol listesinden geriye kalan üç ana madde - hepsi tamamlandı, doğrulandı.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Kicking sistemi detayı</h3>
+        <ul>
+          <li>Cross-field kick: fly-half + karşı kanadın bireysel try'ı (60 maçta 26 vs 4)</li>
+          <li>Territorial box kick: 9/10'un kicking_game'ine bağlı gerçek top devretme tercihi</li>
+          <li>Charge-down riski: rakip fullback'in aerial'ı gerçekten cirolayabiliyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Savunma organizasyonu</h3>
+        <ul>
+          <li>Blitz: daha fazla kart + ciro riski, hücum alanını sıkıştırıyor</li>
+          <li>Drift: rakibin bireysel try'larını (snipe/kanat/cross-field) belirgin şekilde bastırıyor</li>
+          <li>Yan ürün: tackle_technique'in hiç gerçek veri okumadığı gerçek bir hata bulunup düzeltildi</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Hakem sistemi</h3>
+        <ul>
+          <li>Knock-on vs forward pass artık ayrı isimlendirilmiş olaylar</li>
+          <li>Offside vs "top bırakmama" ayrı penaltı sebepleri</li>
+          <li>Gerçek avantaj mekaniği: hücum zaten sayı atacaksa düdük çalınmıyor (60 maçta 10 kez)</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Oyuncu rating ve attribute sistemi</h2>
+    <p class="section-note">Kullanıcının ikinci kontrol listesi - pozisyona özel attribute sistemi ve forvet/back ayrımı zaten bu oturumda (motor tarafında) karşılanmıştı; gerçekten eksik olan üç madde bunlardı.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Rakip kalitesine göre normalizasyon</h3>
+        <ul>
+          <li>Gerçek maçlardaki rakip (team_vs) artık istatistik ağırlığını belirliyor</li>
+          <li>Yeni Zelanda'ya karşı 10 carry, Namibya'ya karşı 10 carry'den daha değerli sayılıyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Çoklu sezon birleştirme</h3>
+        <ul>
+          <li>build_union_pool_multi_season: birden fazla sezonun istatistiği, yeni sezona daha fazla ağırlık verilerek birleştiriliyor</li>
+          <li>Tek sezonun küçük örneklem sorununu çözüyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Eksik veri tahmini (incelendi)</h3>
+        <ul>
+          <li>Mevcut archetype/proxy sistemi zaten caps nudge + birlik gücü ölçeklemesi uyguluyor</li>
+          <li>Gerçek veriye dayanmayan ek bir tahmin eklemek "veri uydurmama" ilkesine aykırı olacağı için yapılmadı - dürüstçe raporlandı</li>
+        </ul>
+        <div class="status-pill" style="color: var(--muted)">● incelendi, zaten yeterli</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Kondisyon, sakatlık ve disiplin sistemi</h2>
+    <p class="section-note">Üçüncü kontrol listesi - 80 dakika boyunca oyuncuların aynı performansı göstermemesi hedefi.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Yorgunluğa bağlı sakatlık riski</h3>
+        <ul>
+          <li>Yorgun takımın sakatlık riski 2.5 kata kadar artıyor</li>
+          <li>Sakatlanan oyuncu artık en yorgun olana ağırlıklı seçiliyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>İsimlendirilmiş sakatlık türleri</h3>
+        <ul>
+          <li>Hamstring, ankle, omuz, diz, calf, rib, sarsıntı, kasık - ayrı tür</li>
+          <li>Gerçek kural: sarsıntı hiçbir zaman "sıyrık" (0 maç ceza) olamıyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Pozisyona özel kart/sakatlık etkisi</h3>
+        <ul>
+          <li>Prop kaybı scrum/lineout'u vuruyor, kicking'i etkilemiyor</li>
+          <li>Düz takım-geneli cezanın üstüne hedefli ekstra ceza</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Sakatlık sonrası geri dönüş</h3>
+        <ul>
+          <li>Gerçek sakatlıktan dönen oyuncu ilk maça daha düşük kondisyonla başlıyor</li>
+          <li>Kırmızı kart cezası bu etkiyi tetiklemiyor (disiplin, kondisyon değil)</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tamamlanan: Motor derinliği serisi (bölüm 26-32)</h2>
+    <p class="section-note">Harici bir değerlendirmenin "maç motoru sadece skor üretiyor, rugby'yi gerçekten simüle etmiyor" eleştirisine yanıt olarak yapılan, adım adım on geçişlik seri.</p>
+    <div class="timeline">
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">1. Faz-bazlı drive çözümleme</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Bir hücum artık tek bir zar değil; en fazla 6 faza (carry/tackle/ruck) bölünen bir döngü. Zone/Side her fazda ilerliyor, try olasılığı ilk fazlarda bastırılıyor.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">2. Gerçek set-piece çözümü</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Scrum/lineout artık her hücumda değil, gerçekçi bir olasılıkla (hücum başına bir kez) tetikleniyor ve isimlendirilmiş gerçek oyunculara (atan hooker, en iyi sıçrayıcı, en zayıf/güçlü ön sıra) dayanıyor.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">3. Taktik kimlik etiketi</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Her takım, kendi kicking/handling atributlerinden türetilen "Kick-heavy / Ball-in-hand / Balanced" etiketi alıyor.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">4. Gerçek maç istatistikleri</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Carries, metres gained, tackles made/missed, rucks won, scrums won, lineouts won - hepsi simülasyonun kendisinden çıkıyor, sonradan uydurulmuyor.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">5. Bireysel karar davranışı - scrum-half</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">"Dupont farkı": elit bir scrum-half'in kendi pace/game_intelligence'ı, takım ortalamasının üstünde gerçek bir "snipe try" yaratıyor (60 maçta 28 vs 0).</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">6. Faz başına stamina düşüşü</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Takımın asıl topu taşıyan/en çok tackle yapan oyuncusu artık diğerlerinden daha hızlı yoruluyor - sadece pozisyon ortalamasına göre değil.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">7. Bireysel karar davranışı - açık flanker</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Elit bir fetcher'ın kendi tackle_technique/game_intelligence'ı gerçek, ölçülebilir fazla ciro yaratıyor (60 maçta 138 vs 105).</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">8. Bireysel karar davranışı - kanat</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Elit footwork/pace'li bir kanat, son savunmacıyı geçip bireysel try atabiliyor (60 maçta 21 vs 9).</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">9. Set-piece alt senaryoları</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Temiz bir scrum/lineout kazanımından sonra, saha sonuna yakınsa artık gerçek "pick-and-go" (8 numara) ve "driving maul" (hooker) sahneleri oluşabiliyor.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">10. Tarihsel Klasik Maçlar (2018 öncesi)</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Kontrol edildiğinde zaten tamamlanmış bulundu: 23 Six/Five Nations (1995-2017) + 23 Rugby Championship/Tri Nations maçı, gerçek Wikipedia kaynaklı kadrolarla - 47/47 test geçiyor.</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Taktik ve strateji sistemi</h2>
+    <p class="section-note">Dördüncü kontrol listesi - aynı kadroya sahip iki takımın farklı taktiklerle farklı sonuçlar alabilmesi hedefi. Bu motor kullanıcı seçimi yerine gerçek atributlerden taktik türetiyor (kick_tendency/defensive_style ile aynı felsefe) - "farklı taktik" burada "farklı şekle/oyun durumuna sahip iki kadronun ölçülebilir farklı sonuç alması" anlamına geliyor.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Forward-heavy / backs-heavy kimlik</h3>
+        <ul>
+          <li>Forvet ağırlıklı takım pick-and-go/driving maul'u daha çok kullanıyor</li>
+          <li>Back ağırlıklı takım snipe/kanat/cross-field bireysel try'ları daha çok kullanıyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Skora göre strateji</h3>
+        <ul>
+          <li>Geriden gelen takım daha riskli/bireysel oynuyor, topu daha az kolay elden çıkarıyor</li>
+          <li>Önde olup kapatan takım daha konservatif, box kick'e daha yatkın</li>
+          <li>Sadece ikinci yarıda ve anlamlı skor farkında devreye giriyor</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Rakip stiline taktiksel tepki</h3>
+        <ul>
+          <li>Drift savunmasına karşı cross-field kick daha az bastırılıyor ("drift'e saldırma")</li>
+          <li>Blitz savunmasına karşı box kick artıyor (hızlı hattın arkasına tekme - gerçek karşı taktik)</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Antrenör/teknik direktör etkisi (incelendi)</h3>
+        <ul>
+          <li>Gerçek veriye dayanmayan bir "antrenör" kavramı icat etmek "veri uydurmama" ilkesine aykırı olacağı için yapılmadı</li>
+        </ul>
+        <div class="status-pill" style="color: var(--muted)">● kapsam dışı, dürüstçe raporlandı</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Maç istatistikleri ve analiz sistemi</h2>
+    <p class="section-note">Beşinci kontrol listesi - istatistiklerin maç motorundaki gerçek olaylardan üretilmesi ve birbirleriyle tutarlı olması hedefi.</p>
+    <div class="grid-cards">
+      <div class="card">
+        <h3>Yeni ham sayaçlar</h3>
+        <ul>
+          <li>Defenders beaten, turnovers conceded, rucks lost</li>
+          <li>Scrums/lineouts contested (başarı oranı için)</li>
+          <li>Kicking metres/accuracy, red zone possessions/tries</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Türetilmiş yüzdeler</h3>
+        <ul>
+          <li>Possession %, scrum/lineout başarı oranı, kicking accuracy</li>
+          <li>Try conversion rate, red zone efficiency</li>
+          <li>Payda sıfırsa "-" gösteriliyor, uydurma %0 değil</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+      <div class="card">
+        <h3>Oyuncu performans puanı</h3>
+        <ul>
+          <li>Sadece sayı değil; carry/tackle/ciro katkısı olan oyunculara da gerçek, pozitif bir puan</li>
+        </ul>
+        <div class="status-pill" style="color: var(--done)">● tamamlandı</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Daha önce tamamlanan ana bölümler (özet)</h2>
+    <p class="section-note">Projenin bu seansın başından önceki uzun geçmişi - veri boru hattı, turnuva motoru, görselleştirme ve arayüz çalışmaları.</p>
+    <div class="timeline">
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">Oyuncu verisi ve kadro sistemi</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Gerçek veri boru hattı (rugbydata), Tier 1/2 uluslar, Wikipedia destekli dolum, Efsane modu (190 Onur Listesi üyesi), 2027 Dünya Kupası gerçek kurası.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">Turnuva motoru</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Gerçek fikstür tekrarı, puan tablosu, ELO tarzı takım sıralaması, Sezon modu (tam interaktif, canlı maç duraklatma dahil), ev sahibi avantajı.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">Saha görselleştirmesi</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">5 bölgeli/3 yanlı alan modeli, gerçek saha diyagramı üzerinde 30 oyuncu, gerçek takım renkleri ve Gilbert tarzı top, saha+olay akışı yan yana düzen.</div>
+      </div>
+      <div class="entry">
+        <div class="entry-top"><span class="entry-title">Klasik Maçlar modu</span><span class="badge">tamam</span></div>
+        <div class="entry-desc">Gerçek venue + tarihsel hava durumu (Open-Meteo), 3-yıldız/5-yıldız hedef sistemi, knockout maçlarında uzatma/penaltı atışları.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Bu sayfa, oturum ilerledikçe güncellenir. Son güncelleme: maç istatistikleri ve analiz sistemi eklenip 346/346 test geçtikten hemen sonra - bu geçişte hiçbir mevcut test bozulmadı.
+  </footer>
+</div>

@@ -368,9 +368,22 @@ class Tournament:
                 home_advantage=(home_advantage_for == home_name), decide_winner=decide_winner,
             ).run()
         self.availability.record_match(result)
-        self.rankings.record_result(
+        # Team strength/ranking system: `record_result`'s own return value
+        # (the real per-match rating swing for each side) used to be
+        # discarded here - it's a direct, real "performance vs expectation"
+        # number (the swing IS `(actual_result - expected_result) * factor`
+        # by construction, see `rankings.update_after_match`), the exact
+        # statistic needed to explain WHY a match moved a team's rating the
+        # way it did. Attached directly onto `result` (a plain extra
+        # attribute, not a declared `MatchResult` field - keeps
+        # `engine/match_engine.py` decoupled from the tournament-layer
+        # ranking concept) so `webapp.py` can surface it per match without
+        # changing this method's or `on_match_played`'s own signature.
+        home_swing, away_swing = self.rankings.record_result(
             home_name, away_name, result.score_home, result.score_away, is_world_cup=self.is_world_cup,
         )
+        result.rating_swing_home = round(home_swing, 1)
+        result.rating_swing_away = round(away_swing, 1)
         if self.on_match_played is not None:
             self.on_match_played(home_name, away_name, result)
         return result

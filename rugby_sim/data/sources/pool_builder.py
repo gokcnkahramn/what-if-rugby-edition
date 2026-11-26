@@ -15,7 +15,7 @@ dataset covers (2022-2026, per the competition registry) can be requested.
 from __future__ import annotations
 
 from collections import Counter
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -111,6 +111,34 @@ def _collect_season_player_ids(team_id: str, season: str) -> List[str]:
     return sorted(ids)
 
 
+# Opponent-quality normalization (rating system, item 1): a counting stat
+# racked up against a weak minnow shouldn't weigh the same as the same raw
+# number against a Tier 1 nation. Reuses the EXISTING `UNION_STRENGTH` map
+# (already used to scale a whole union's players toward 50 - see
+# `scale_to_union_strength`) for the OPPOSITE direction: here it boosts or
+# dampens one specific match's contribution to a player's aggregated stats,
+# based on who that match was actually against (the dataset's own
+# `team_vs` column - real nation names, confirmed live to match
+# `NATION_DISPLAY`'s own spelling for Tier 1 opposition). 0.5 at the
+# weakest mapped union, 1.5 at full Tier-1 strength, 1.0 (neutral) for an
+# opponent this project doesn't track a strength for (a club side on a
+# mixed history row, or a union outside `UNION_STRENGTH`) - a modest,
+# bounded multiplier: never zeroes out a performance, never doubles it.
+_OPPONENT_WEIGHTED_STAT_COLUMNS = (
+    "tackles_made", "tackles_missed", "dominant_tackles", "carries",
+    "metres_carried", "line_breaks", "clean_breaks", "defenders_beaten",
+    "offloads", "offload", "passes", "turnovers_lost", "turnovers_won",
+    "kicks_from_hand", "lineouts_won", "total_lineouts", "rucks_won",
+)
+
+
+def _opponent_quality_weight(opponent_name) -> float:
+    code = NATION_TO_CODE.get(str(opponent_name).strip())
+    if code is None:
+        return 1.0
+    return 0.5 + UNION_STRENGTH.get(code, DEFAULT_UNION_STRENGTH)
+
+
 def _aggregate_caps(history: pd.DataFrame, nation: str, season: str) -> Optional[tuple]:
     caps = history[
         (history["team"] == nation)
@@ -119,6 +147,13 @@ def _aggregate_caps(history: pd.DataFrame, nation: str, season: str) -> Optional
     ]
     if caps.empty:
         return None
+
+    if "team_vs" in caps.columns:
+        caps = caps.copy()
+        weight = caps["team_vs"].map(_opponent_quality_weight)
+        for col in _OPPONENT_WEIGHTED_STAT_COLUMNS:
+            if col in caps.columns:
+                caps[col] = caps[col] * weight
 
     numeric_cols = [
         c for c in caps.columns
@@ -325,6 +360,105 @@ def build_union_pool(short_code: str, season: str = DEFAULT_SEASON, _allow_fallb
             p.era = era
         pool.extend(extra)
 
+    return pool
+
+
+def _collect_raw_entries_multi_season(
+    short_code: str, seasons: List[str], season_weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, tuple]:
+    """Combines raw per-player stats across MULTIPLE seasons (rating
+    system, item 2) into one `{name: (real_caps, weighted_stats,
+    weighted_caps, position)}` dict - a more reliable profile than a
+    single season's often-small sample (a player's form/role can genuinely
+    vary season to season, and a thin-pool union's single-season sample
+    can be tiny). `season_weights` defaults to a linear recency weighting
+    (the most recent season in `seasons` weighted highest, the oldest
+    weighted 1x) - a real, if simple, "recent form matters more" choice,
+    not an unweighted blend that treats a player's form from 4 years ago
+    the same as last season's.
+
+    Dividing `weighted_stats` by `weighted_caps` (not `real_caps`) in
+    `attribute_mapping._compute_proxies` still produces a correct
+    per-cap-rate weighted average across seasons, since both the numerator
+    and denominator carry the same per-season weight - `real_caps` is kept
+    separately, purely for an honest "N real caps across M seasons" note,
+    never fed into the rate math itself."""
+    if season_weights is None:
+        season_weights = {season: float(i + 1) for i, season in enumerate(seasons)}
+
+    combined: Dict[str, dict] = {}
+    for season in seasons:
+        weight = season_weights.get(season, 1.0)
+        entries = _collect_raw_entries(short_code, season, _allow_fallback=False)
+        for name, (caps, stats, position) in entries.items():
+            existing = combined.get(name)
+            if existing is None:
+                combined[name] = {
+                    "real_caps": caps, "weighted_caps": caps * weight,
+                    "weighted_stats": stats * weight, "position": position,
+                }
+            else:
+                existing["real_caps"] += caps
+                existing["weighted_caps"] += caps * weight
+                existing["weighted_stats"] = existing["weighted_stats"].add(stats * weight, fill_value=0)
+                # Most recent season's primary position wins (seasons is
+                # expected oldest-to-newest) - a player's role can shift
+                # over a career, and the latest one is the more relevant
+                # "what if" starting position.
+                existing["position"] = position
+
+    return {
+        name: (v["real_caps"], v["weighted_stats"], v["weighted_caps"], v["position"])
+        for name, v in combined.items()
+    }
+
+
+def build_union_pool_multi_season(
+    short_code: str, seasons: List[str], season_weights: Optional[Dict[str, float]] = None,
+) -> List[Player]:
+    """Like `build_union_pool`, but blends real rugbydata stats across
+    MULTIPLE real seasons (rating system, item 2 - see
+    `_collect_raw_entries_multi_season`'s own docstring for the weighting
+    rationale) into one profile per player, instead of a single season's
+    sample. `era` is set to the LAST season in `seasons` (the most recent
+    one requested) - this pool represents that player's blended, multi-
+    season form as of that point, same "what if" framing every other pool
+    already uses. Percentile scaling still uses the single most-recent
+    season's cross-union reference pool (building a true multi-season
+    reference pool for every union would be a much larger, separate
+    undertaking - not needed here, since percentile ranking only needs a
+    broadly representative peer set, not an exactly form-matched one)."""
+    if short_code not in ALL_TEAM_IDS:
+        raise ValueError(f"Unknown union short code: {short_code}")
+    _team_id, _dataset_name, nation = ALL_TEAM_IDS[short_code]
+    if _team_id is None:
+        raise ValueError(f"{short_code} has no rugbydata coverage - multi-season blending needs real per-season stats.")
+
+    combined = _collect_raw_entries_multi_season(short_code, seasons, season_weights)
+    era = _era_suffix(seasons[-1])
+    peer_proxies_by_position = _global_reference_peer_proxies(seasons[-1])
+    strength = UNION_STRENGTH.get(short_code, DEFAULT_UNION_STRENGTH)
+
+    pool: List[Player] = []
+    for name, (real_caps, weighted_stats, weighted_caps, position) in combined.items():
+        attrs = map_stats_to_attributes(
+            weighted_stats, weighted_caps, peer_proxies=peer_proxies_by_position.get(position),
+        )
+        attrs = scale_to_union_strength(attrs, strength)
+        pool.append(
+            Player(
+                name=name,
+                nation=nation,
+                natural_position=position,
+                attributes=attrs,
+                era=era,
+                notes=(
+                    f"{real_caps} real cap(s) for {nation} across {seasons[0]}-{seasons[-1]} "
+                    "(rugbydata-derived ratings, blended across multiple seasons - approximate)."
+                ),
+                data_source="rugbydata",
+            )
+        )
     return pool
 
 

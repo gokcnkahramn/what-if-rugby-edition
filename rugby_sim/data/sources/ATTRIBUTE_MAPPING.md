@@ -111,6 +111,32 @@ tier-union player is ultimately shrunk toward 50 by a number with no
 statistical backing of its own, just an editorial judgment call documented
 in the module's own comment block.
 
+## Opponent-quality normalization (per-match, before aggregation)
+
+Before `scale_to_union_strength`'s whole-union pass above, `pool_builder.
+_aggregate_caps` now applies a PER-MATCH weight to the counting stats
+(tackles, carries, metres, line breaks, offloads, etc. - see
+`_OPPONENT_WEIGHTED_STAT_COLUMNS`) based on the real opponent that match
+was actually against (`team_vs`, confirmed live to match `NATION_DISPLAY`'s
+own spelling for Tier 1 opposition): `weight = 0.5 + UNION_STRENGTH[opponent]`,
+1.0 (neutral) for an opponent this project doesn't track a strength for.
+A performance against New Zealand now genuinely counts for more than the
+same raw numbers against a real minnow, before any of the union-strength
+or percentile-scaling steps run. Both the stat sum and the cap count used
+to normalize it are weighted together, so the ratio (what actually feeds
+`_compute_proxies`) stays a correct weighted average, not an inflated
+total.
+
+## Multi-season blending (`build_union_pool_multi_season`)
+
+A single season's stat sample can be small, especially for a squad player
+or a thin-pool union. `build_union_pool_multi_season(code, seasons)`
+(opt-in, doesn't change any existing caller's behavior) combines a
+player's raw stats across several real seasons with a linear recency
+weighting (the newest season counts most) before converting to
+`Attributes` once - a genuine "more reliable with more real data," not an
+unweighted blend that treats five-year-old form the same as last season's.
+
 ---
 
 ## Summary counts (real-data path, 23 attributes total)

@@ -556,6 +556,8 @@ async function enterFriendlyMode() {
   friendlyInitialized = true;
   homeBuilder = new TeamBuilder("home");
   awayBuilder = new TeamBuilder("away");
+  document.getElementById("friendly-tactics-row").innerHTML =
+    tacticsPickerHtml("home-tac", "Home") + tacticsPickerHtml("away-tac", "Away");
   updateRunButton();
 }
 
@@ -606,6 +608,45 @@ function randomizeBackground() {
   }
 }
 
+// Manager-selectable tactics (match-engine-depth, manager-controls pass):
+// lets the user pick a real pre-match gameplan for their own team instead
+// of the engine always deriving it live from the squad's own attributes
+// (`_attack_shape_tendency`/`_defensive_style`/`_kick_tendency` in
+// match_engine.py). "Auto (squad decides)" is the default and preserves
+// every prior match's exact behavior - nothing changes unless the manager
+// actually picks something. Keyed to TACTIC_CHOICES server-side.
+function tacticsPickerHtml(prefix, label) {
+  const axis = (id, title, options) => `
+    <label class="muted">${title}:
+      <select id="${prefix}-${id}">
+        <option value="">Auto (kadroya göre)</option>
+        ${options.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}
+      </select>
+    </label>`;
+  return `
+    <fieldset style="border:1px solid var(--border); border-radius:8px; padding:8px 12px; display:flex; gap:14px; flex-wrap:wrap; align-items:center;">
+      <legend class="muted">${label} taktikleri</legend>
+      ${axis("attack-shape", "Hücum", [["forward_heavy", "Forward-heavy"], ["balanced", "Dengeli"], ["backs_heavy", "Backs-heavy"]])}
+      ${axis("defensive-style", "Savunma", [["blitz", "Blitz"], ["balanced", "Dengeli"], ["drift", "Drift"]])}
+      ${axis("kick-tendency", "Oyun tarzı", [["kick_heavy", "Kick-heavy"], ["balanced", "Dengeli"], ["ball_in_hand", "Ball-in-hand"]])}
+      ${axis("kick-style", "Tercih edilen kick türü", [["grubber", "Grubber"], ["chip", "Chip"], ["cross_field", "Cross-field"], ["box_kick", "Box kick"]])}
+    </fieldset>`;
+}
+
+function readTactics(prefix) {
+  const read = (id, axis, out) => {
+    const el = document.getElementById(`${prefix}-${id}`);
+    const v = el ? el.value : "";
+    if (v) out[axis] = v;
+  };
+  const out = {};
+  read("attack-shape", "attack_shape", out);
+  read("defensive-style", "defensive_style", out);
+  read("kick-tendency", "kick_tendency", out);
+  read("kick-style", "kick_style", out);
+  return out;
+}
+
 async function boot() {
   POSITIONS = await api("/api/positions");
   UNIONS = await api("/api/unions");
@@ -633,16 +674,23 @@ async function boot() {
     const seed = seedRaw ? parseInt(seedRaw, 10) : null;
     const isLive = document.getElementById("live-match-toggle").checked;
     setStatus(status, "simulating...");
+    const tactics = {
+      [homeBuilder.name]: readTactics("home-tac"),
+      [awayBuilder.name]: readTactics("away-tac"),
+    };
     try {
       if (isLive) {
         document.getElementById("report").innerHTML = "";
-        await startLiveMatch(homeBuilder.teamId, awayBuilder.teamId, seed, "live-match-area", null);
+        await startLiveMatch(
+          homeBuilder.teamId, awayBuilder.teamId, seed, "live-match-area", null, undefined, tactics,
+          [homeBuilder.name, awayBuilder.name],
+        );
         setStatus(status, "");
       } else {
         document.getElementById("live-match-area").innerHTML = "";
         const data = await api("/api/match", {
           method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({home_team_id: homeBuilder.teamId, away_team_id: awayBuilder.teamId, seed}),
+          body: JSON.stringify({home_team_id: homeBuilder.teamId, away_team_id: awayBuilder.teamId, seed, tactics}),
         });
         renderReport(data);
         setStatus(status, "");
@@ -655,10 +703,10 @@ async function boot() {
 
 // ===================== Live (pausable) single match =====================
 
-async function startLiveMatch(homeTeamId, awayTeamId, seed, boxId, allowSubsFor, reportTargetId) {
+async function startLiveMatch(homeTeamId, awayTeamId, seed, boxId, allowSubsFor, reportTargetId, tactics, decisionTeams) {
   const state = await api("/api/match/live/start", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({home_team_id: homeTeamId, away_team_id: awayTeamId, seed}),
+    body: JSON.stringify({home_team_id: homeTeamId, away_team_id: awayTeamId, seed, tactics, decision_teams: decisionTeams}),
   });
   renderLiveMatchState(state, undefined, boxId, allowSubsFor, reportTargetId);
 }
@@ -724,6 +772,57 @@ function startPacedReveal(key, ...args) {
 // event up to the current pause point, not just new ones).
 const liveRevealProgress = {};
 
+// Live match stats table: a smaller subset of `renderReport`'s own box
+// score, built from the SAME `_team_stats_json` shape the backend now
+// also includes on the in-progress `_live_match_state_json` response
+// (previously only computed at full time) - so a manager can read real
+// running totals (possession/territory/carries/tackles/set-piece/kicking)
+// while a live match is paused, not just after the final whistle.
+function liveStatsTableHtml(stats) {
+  const entries = Object.entries(stats || {});
+  if (!entries.length) return "";
+  const pct = v => (v === null || v === undefined) ? "-" : `${v}%`;
+  const rows = entries.map(([name, s]) => `
+    <tr><td>${name}</td><td>${s.tries}</td><td>${s.penalty_goals}</td><td>${s.drop_goals}</td>
+    <td>${s.possession_pct ?? "-"}%</td><td>${s.territory_pct}%</td>
+    <td>${s.carries ?? 0}</td><td>${s.metres_gained ?? 0}</td>
+    <td>${s.tackles_made ?? 0}/${s.tackles_missed ?? 0}</td>
+    <td>${s.turnovers_won ?? 0}/${s.turnovers_conceded ?? 0}</td>
+    <td>${s.scrums_won ?? 0}/${s.scrums_contested ?? 0} (${pct(s.scrum_success_rate)})</td>
+    <td>${s.lineouts_won ?? 0}/${s.lineouts_contested ?? 0} (${pct(s.lineout_success_rate)})</td>
+    <td>${s.kicking_accuracy !== null && s.kicking_accuracy !== undefined ? pct(s.kicking_accuracy) : "-"}</td>
+    <td>${s.yellow_cards}/${s.red_cards}</td></tr>`).join("");
+  return `
+    <h4>Live stats</h4>
+    <table class="stats">
+      <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th>
+      <th>Poss</th><th>Territory</th><th>Carries</th><th>Metres</th>
+      <th>Tackles m/mi</th><th>Turnovers w/c</th>
+      <th>Scrums</th><th>Lineouts</th><th>Kick acc</th><th>Cards Y/R</th></tr>
+      ${rows}
+    </table>`;
+}
+
+// Manager-controls pass: a `pending_penalty` on the live state means a
+// decision-team's own penalty is awaiting a real choice instead of the AI
+// auto-picking - "Resume play"/skip is hidden (it's a no-op server-side
+// anyway while a decision is pending) and this panel takes its place.
+// "Kick for posts" is only offered when `can_go_for_posts` is true (own-22/
+// own-tryline penalties stay realism-gated, see `_apply_penalty_decision`
+// server-side) - never shown as a button the manager could pick and have
+// silently rejected.
+function penaltyDecisionHtml(pending) {
+  if (!pending) return "";
+  return `
+    <div class="row" id="penalty-decision" style="border:1px solid var(--border); border-radius:8px; padding:10px 14px; gap:10px;">
+      <strong>${pending.team} kazandığı penaltıda ne yapsın?</strong>
+      ${pending.can_go_for_posts ? `<button class="pen-decide-btn" data-choice="posts">Kalecik atışı dene</button>` : ""}
+      <button class="pen-decide-btn" data-choice="touch">Taca vur (köşe)</button>
+      <button class="pen-decide-btn" data-choice="quick_tap">Hızlı başlat (quick tap)</button>
+      <span class="muted" id="penalty-decision-status"></span>
+    </div>`;
+}
+
 function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId) {
   const boxKey = boxId || "live-match-area";
   const box = document.getElementById(boxKey);
@@ -769,11 +868,13 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
         <div id="${playbackId}-events" class="events"></div>
       </div>
     </div>
+    ${liveStatsTableHtml(state.stats)}
     <div class="row">
       <div style="flex:1"><h4>${state.home.name}</h4>${liveLineupTable("home", state.home.lineup, state.home.bench, homeSubsAllowed)}</div>
       <div style="flex:1"><h4>${state.away.name}</h4>${liveLineupTable("away", state.away.lineup, state.away.bench, awaySubsAllowed)}</div>
     </div>
-    <div class="row">
+    ${penaltyDecisionHtml(state.pending_penalty)}
+    <div class="row" ${state.pending_penalty ? 'style="display:none"' : ""}>
       <button id="live-continue">Resume play</button>
       <button id="live-auto-to-sub">Skip to next substitution point</button>
       <button id="live-skip-to-end">Skip to end of match</button>
@@ -801,6 +902,21 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   });
   box.querySelectorAll(".live-swap-btn").forEach(btn => {
     btn.onclick = () => handleSwapClick(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor, reportTargetId);
+  });
+  box.querySelectorAll(".pen-decide-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const status = document.getElementById("penalty-decision-status");
+      setStatus(status, "uygulanıyor...");
+      try {
+        const next = await api(`/api/match/live/${state.session_id}/decide_penalty`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({choice: btn.dataset.choice}),
+        });
+        renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+      } catch (e) {
+        showError(status, "Error: " + e.message);
+      }
+    };
   });
 
   const continueBtn = document.getElementById("live-continue");
@@ -1584,7 +1700,24 @@ function renderReport(data, targetId, startRevealed) {
   // in match_engine.py) - a real, attribute-driven label, not flavor text.
   const tacticalLine = data.tactical_identity
     ? `<p class="muted">` + Object.entries(data.tactical_identity)
-        .map(([team, label]) => `${team}: ${label}`).join(" · ") + `</p>`
+        .map(([team, label]) => {
+          const defLabel = data.defensive_identity?.[team];
+          return defLabel ? `${team}: ${label} · ${defLabel}` : `${team}: ${label}`;
+        }).join(" | ") + `</p>`
+    : "";
+  // Team strength/ranking system: squad quality (a snapshot of this
+  // lineup's own real player ratings) shown next to the rating swing this
+  // specific result produced (if a ranking tracker was in play - a plain
+  // friendly/draft match has neither) - deliberately kept as two separate
+  // numbers, not blended into one, so a team visibly over/under-performing
+  // its own squad quality is something the user can actually see.
+  const swingText = v => (v === null || v === undefined) ? "" : ` (${v > 0 ? "+" : ""}${v} ranking pts)`;
+  const squadQualityLine = data.squad_quality
+    ? `<p class="muted">` + Object.entries(data.squad_quality)
+        .map(([team, score]) => {
+          const swing = team === data.home_name ? data.rating_swing_home : data.rating_swing_away;
+          return `${team} squad quality: ${score}/100${swingText(swing)}`;
+        }).join(" | ") + `</p>`
     : "";
   // A knockout fixture (`decide_winner`/Classic Match `must_have_winner`)
   // that was still level after extra time + sudden death - decided by a
@@ -1600,17 +1733,38 @@ function renderReport(data, targetId, startRevealed) {
   const scorerRows = (data.top_scorers || []).slice(0, 6).map(s =>
     `<tr><td>${s.name}</td><td>${s.team}</td><td>${s.points}</td><td>${s.tries}</td><td>${s.conversions}</td><td>${s.penalty_goals}</td></tr>`
   ).join("");
+  // Match stats/analysis system (match-engine-depth Phase 16): a second,
+  // separate "advanced stats" table for the new DERIVED percentages
+  // (possession/success rates/kicking accuracy/red zone efficiency) - kept
+  // apart from the main box score above rather than cramming an already
+  // 17-column table even wider.
+  const pct = v => (v === null || v === undefined) ? "-" : `${v}%`;
+  const advancedStatRows = Object.entries(data.stats || {}).map(([name, s]) => `
+    <tr><td>${name}</td><td>${s.possession_pct ?? "-"}%</td>
+    <td>${s.defenders_beaten ?? 0}</td><td>${s.turnovers_conceded ?? 0}</td><td>${s.rucks_lost ?? 0}</td>
+    <td>${s.scrums_won ?? 0}/${s.scrums_contested ?? 0} (${pct(s.scrum_success_rate)})</td>
+    <td>${s.lineouts_won ?? 0}/${s.lineouts_contested ?? 0} (${pct(s.lineout_success_rate)})</td>
+    <td>${s.kicks_successful ?? 0}/${s.kicks_attempted ?? 0} (${pct(s.kicking_accuracy)})</td>
+    <td>${s.kicking_metres ?? 0}</td>
+    <td>${pct(s.try_conversion_rate)}</td>
+    <td>${s.red_zone_tries ?? 0}/${s.red_zone_possessions ?? 0} (${pct(s.red_zone_efficiency)})</td></tr>`
+  ).join("");
+  const performerRows = (data.top_performers || []).slice(0, 8).map(p => `
+    <tr><td>${p.name}</td><td>${p.team}</td><td>${p.performance_score}</td>
+    <td>${p.tries}</td><td>${p.carries}</td><td>${p.metres_gained}</td>
+    <td>${p.tackles_made}/${p.tackles_missed}</td><td>${p.turnovers_won}</td></tr>`
+  ).join("");
   // "Injuries this match" - a clear, standalone section (not just buried in
   // the commentary log, see task notes) built straight from `data.injuries`
   // (`MatchResult.injury_details` server-side - who, which team, which
   // position, at what minute).
   const injuryRows = (data.injuries || []).map(inj => `
     <tr><td>${inj.minute}'</td><td>${inj.team}</td><td>${inj.player}</td><td>${inj.position}</td>
-    <td>${inj.severity || ""}</td><td>${layoffText(inj.layoff_matches)}</td></tr>`
+    <td>${inj.type || ""}</td><td>${inj.severity || ""}</td><td>${layoffText(inj.layoff_matches)}</td></tr>`
   ).join("");
   const injuryHtml = injuryRows
     ? `<h3>Injuries this match</h3><table class="stats">
-        <tr><th>Minute</th><th>Team</th><th>Player</th><th>Position</th><th>Severity</th><th>Expected out</th></tr>
+        <tr><th>Minute</th><th>Team</th><th>Player</th><th>Position</th><th>Type</th><th>Severity</th><th>Expected out</th></tr>
         ${injuryRows}
       </table>`
     : "";
@@ -1642,6 +1796,7 @@ function renderReport(data, targetId, startRevealed) {
     ${shootoutLine}
     ${pomLine}
     ${tacticalLine}
+    ${squadQualityLine}
     <div id="events">${fullEventsHtml}</div>
     <table class="stats">
       <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
@@ -1651,6 +1806,17 @@ function renderReport(data, targetId, startRevealed) {
     ${scorerRows ? `<h3>Top scorers</h3><table class="stats">
       <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
       ${scorerRows}
+    </table>` : ""}
+    <h3>Advanced stats</h3>
+    <table class="stats">
+      <tr><th>Team</th><th>Possession</th><th>Defenders beaten</th><th>Turnovers conceded</th><th>Rucks lost</th>
+      <th>Scrum success</th><th>Lineout success</th><th>Kicking accuracy</th><th>Kicking metres</th>
+      <th>Try conversion</th><th>Red zone efficiency</th></tr>
+      ${advancedStatRows}
+    </table>
+    ${performerRows ? `<h3>Top performers (match performance score)</h3><table class="stats">
+      <tr><th>Player</th><th>Team</th><th>Score</th><th>Tries</th><th>Carries</th><th>Metres</th><th>Tackles made/missed</th><th>Turnovers won</th></tr>
+      ${performerRows}
     </table>` : ""}
     ${avgPitchHtml}
     ${injuryHtml}
@@ -1671,6 +1837,7 @@ function renderReport(data, targetId, startRevealed) {
       ${shootoutLine}
       ${pomLine}
       ${tacticalLine}
+      ${squadQualityLine}
       <table class="stats">
         <tr><th>Team</th><th>Tries</th><th>Pens</th><th>DGs</th><th>Turnovers</th><th>Errors</th>
         <th>Pens conceded</th><th>Cards Y/R</th><th>Territory</th><th>Injuries</th><th>Subs</th><th>Carries</th><th>Metres</th><th>Tackles made/missed</th><th>Rucks won</th><th>Scrums won</th><th>Lineouts won</th></tr>
@@ -1679,6 +1846,17 @@ function renderReport(data, targetId, startRevealed) {
       ${scorerRows ? `<h3>Top scorers</h3><table class="stats">
         <tr><th>Player</th><th>Team</th><th>Pts</th><th>Tries</th><th>Conv</th><th>Pens</th></tr>
         ${scorerRows}
+      </table>` : ""}
+      <h3>Advanced stats</h3>
+      <table class="stats">
+        <tr><th>Team</th><th>Possession</th><th>Defenders beaten</th><th>Turnovers conceded</th><th>Rucks lost</th>
+        <th>Scrum success</th><th>Lineout success</th><th>Kicking accuracy</th><th>Kicking metres</th>
+        <th>Try conversion</th><th>Red zone efficiency</th></tr>
+        ${advancedStatRows}
+      </table>
+      ${performerRows ? `<h3>Top performers (match performance score)</h3><table class="stats">
+        <tr><th>Player</th><th>Team</th><th>Score</th><th>Tries</th><th>Carries</th><th>Metres</th><th>Tackles made/missed</th><th>Turnovers won</th></tr>
+        ${performerRows}
       </table>` : ""}
       ${avgPitchHtml}
       ${injuryHtml}
@@ -2196,6 +2374,7 @@ function renderTournamentRunArea(params) {
       <span class="muted" id="t-run-hint"></span>
       <span class="muted" id="t-run-status"></span>
     </div>
+    <div id="tournament-tactics-row">${tacticsPickerHtml("t-tac", "Benim takımımın")}</div>
     <div id="tournament-stage-banner"></div>
     <div id="tournament-live-area"></div>
     <div id="tournament-progress"></div>`;
@@ -2235,6 +2414,7 @@ function renderTournamentRunArea(params) {
     }
     const myTeam = document.getElementById("t-my-team").value || null;
     body.my_team = myTeam;
+    if (myTeam) body.tactics = readTactics("t-tac");
     setStatus(status, "starting tournament...");
     try {
       const state = await api("/api/tournament/start", {
@@ -2304,11 +2484,11 @@ function injuryReportTable(injuryReport) {
       : (remaining > 0 ? `out for ${remaining} more match${remaining === 1 ? "" : "es"}` : "available now");
     return `
     <tr><td>${inj.minute}'</td><td>${inj.team}</td><td>${inj.player}</td><td>${inj.position}</td>
-    <td>${inj.severity || ""}</td><td>${statusText}</td>
+    <td>${inj.type || ""}</td><td>${inj.severity || ""}</td><td>${statusText}</td>
     <td>${matchLink({home: inj.home, away: inj.away, scoreline: inj.scoreline, match_id: inj.match_id})}</td></tr>`;
   }).join("");
   return `<table class="stats">
-    <tr><th>Minute</th><th>Team</th><th>Player</th><th>Position</th><th>Severity</th><th>Status</th><th>Match</th></tr>
+    <tr><th>Minute</th><th>Team</th><th>Player</th><th>Position</th><th>Type</th><th>Severity</th><th>Status</th><th>Match</th></tr>
     ${rows}</table>`;
 }
 
@@ -2894,6 +3074,11 @@ async function finishDraftIntoBuild(state) {
   draftHumanBuilder = new TeamBuilder("draft-human", {
     title: "Your drafted XV", fixedPool: finalized.human_roster,
   });
+  // Tactics picker only for YOUR OWN team - the AI's auto-drafted opponent
+  // keeps deciding its tactics purely from its own squad's attributes, same
+  // convention as the substitution control above only being offered for
+  // the human side.
+  document.getElementById("draft-tactics-row").innerHTML = tacticsPickerHtml("draft-tac", "Senin takımının");
   updateDraftRunButton();
   document.getElementById("draft-run-match").onclick = async () => {
     const seedRaw = document.getElementById("draft-match-seed").value;
@@ -2901,18 +3086,22 @@ async function finishDraftIntoBuild(state) {
     const status = document.getElementById("draft-run-status");
     const isLive = document.getElementById("draft-live-match-toggle").checked;
     setStatus(status, "simulating...");
+    const tactics = {[draftHumanBuilder.name]: readTactics("draft-tac")};
     try {
       if (isLive) {
         document.getElementById("draft-report").innerHTML = "";
         // Your drafted XV is always `home_team_id` here - only your side
         // gets a "Substitute..." control, never the AI's auto-drafted one
         // (same convention as the interactive tournament's own matches).
-        await startLiveMatch(draftHumanBuilder.teamId, draftAiTeamId, seed, "draft-live-match-area", "home", "draft-report");
+        await startLiveMatch(
+          draftHumanBuilder.teamId, draftAiTeamId, seed, "draft-live-match-area", "home", "draft-report", tactics,
+          [draftHumanBuilder.name],
+        );
       } else {
         document.getElementById("draft-live-match-area").innerHTML = "";
         const data = await api("/api/match", {
           method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({home_team_id: draftHumanBuilder.teamId, away_team_id: draftAiTeamId, seed}),
+          body: JSON.stringify({home_team_id: draftHumanBuilder.teamId, away_team_id: draftAiTeamId, seed, tactics}),
         });
         renderReport(data, "draft-report");
       }
@@ -3050,6 +3239,7 @@ function renderSeasonDraftArea(planData, nationCode, year) {
       ${seasonNation}'s matches this season (same "squad, not one fixed XV" mode Tournament
       mode's squads use), so pick broadly, not just one ideal matchday.</p>
     <div id="panel-season_builder"></div>
+    <div id="season-tactics-row">${tacticsPickerHtml("season-tac", seasonNation)}</div>
     <div class="row">
       <button id="season-confirm-draft-btn">Start season with this squad</button>
       <span class="muted" id="season-draft-status"></span>
@@ -3070,6 +3260,7 @@ function renderSeasonDraftArea(planData, nationCode, year) {
       const body = {
         nation_code: nationCode, year, my_team: seasonNation,
         squad_player_ids: {[seasonNation]: squadIds},
+        tactics: readTactics("season-tac"),
       };
       const state = await api("/api/season/start", {
         method: "POST", headers: {"Content-Type": "application/json"},

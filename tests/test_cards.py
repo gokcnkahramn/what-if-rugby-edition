@@ -76,7 +76,9 @@ def test_sent_off_player_cannot_be_carded_again():
     assert is_red is True
 
     # The now-excluded player would otherwise be slot 0 again - confirm the
-    # pool handed to `rng.choice` no longer contains them.
+    # pool handed to `rng.choice` no longer contains them. `_issue_card`'s
+    # candidate pool is now a list of (position, slot) pairs, not bare
+    # `SquadSlot`s - see its own comment.
     original_choice = engine.rng.choice
     seen_slots = []
 
@@ -86,7 +88,7 @@ def test_sent_off_player_cannot_be_carded_again():
 
     engine.rng.choice = spy_choice
     engine._issue_card(home, 15, result)
-    assert all(slot.player is not player for slot in seen_slots)
+    assert all(slot.player is not player for _pos, slot in seen_slots)
 
 
 def test_only_red_card_sidelines_for_next_tournament_match():
@@ -104,8 +106,10 @@ def test_only_red_card_sidelines_for_next_tournament_match():
 
     result2 = engine.result
     engine.rng = _FakeRng([0.01])  # a straight red for a different player
-    bench_free_player_slot = [s for s in engine._active["Home"].values() if s.player is not yellow_player][0]
-    engine.rng.choice = lambda seq: bench_free_player_slot
+    bench_free_position, bench_free_player_slot = next(
+        (pos, s) for pos, s in engine._active["Home"].items() if s.player is not yellow_player
+    )
+    engine.rng.choice = lambda seq: (bench_free_position, bench_free_player_slot)
     engine._issue_card(home, 20, result2)
     availability.record_match(result2)
     red_player = bench_free_player_slot.player
@@ -151,8 +155,10 @@ def test_card_report_json_shape_and_live_matches_remaining():
     # again, 2 -> 3, after the player-specific "scrum-half snipe try"
     # branch (match-engine-depth Phase 6) re-shuffled the same cumulative
     # per-phase roll's outcome boundaries. Re-picked again, 3 -> 6, after
-    # the wing-break try (Phase 9) re-shuffled it again.
-    engine.rng = _random.Random(6)
+    # the wing-break try (Phase 9) re-shuffled it again. Re-picked again,
+    # 6 -> 7, after the kicking/defensive-organization/referee passes
+    # (Phases 11-13) re-shuffled it once more.
+    engine.rng = _random.Random(7)
     engine.finish()
     availability.record_match(result)
 

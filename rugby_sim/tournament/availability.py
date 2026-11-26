@@ -52,6 +52,18 @@ RED_CARD_SUSPENSION_MATCHES = 1
 # than presented as a real travel/recovery model.
 REST_PENALTY_CONDITION_MIN = 85.0
 REST_PENALTY_CONDITION_MAX = 95.0
+
+# -- Return-from-injury conditioning deficit (match-engine-depth Phase 14) -
+# A player's first match back after sitting out a REAL injury layoff
+# (never a red-card suspension - that's discipline, not fitness) starts
+# more undercooked than an ordinary quick-turnaround player: a harsher
+# band than `REST_PENALTY_CONDITION_*` above, same fitness-modulated
+# spread convention (fitter players land closer to the top of the band).
+# Applies ONLY to that one return match - cleared immediately after
+# `starting_condition` reads it (see `_returning_from_injury`), so a
+# player isn't still "rusty" several matches after they're actually back.
+RETURN_FROM_INJURY_CONDITION_MIN = 70.0
+RETURN_FROM_INJURY_CONDITION_MAX = 88.0
 # Re-tuned (was a flat 90.0, before that a flat 70.0): a single fixed number
 # meant EVERY quick-turnaround player started their next match at exactly
 # the same condition, no variation at all - unrealistic, and a wasted
@@ -79,9 +91,20 @@ class TournamentAvailability:
     # (team_name, id(player)) -> matches still remaining they must sit out,
     # counting from (and not including) the match that caused it.
     _sidelined: Dict[Tuple[str, int], int] = field(default_factory=dict)
+    # (team_name, id(player)) -> "injury" | "suspension" - which kind of
+    # layoff this sidelining is, so `record_match` can tell a real injury
+    # recovery apart from a red-card suspension once the layoff expires
+    # (see `_returning_from_injury` below - only an injury gets the
+    # return-from-injury conditioning deficit, never a suspension).
+    _sidelined_reason: Dict[Tuple[str, int], str] = field(default_factory=dict)
     # team_name -> set of id(player) selected (started or benched) in that
     # team's most recently resolved match - see REST_PENALTY_CONDITION above.
     _last_squad: Dict[str, Set[int]] = field(default_factory=dict)
+    # team_name -> set of id(player) whose injury layoff just expired (as
+    # of the last `record_match` call) - consumed (popped) by the very
+    # next `starting_condition` call for that team, so the conditioning
+    # deficit applies to exactly one return match, never longer.
+    _returning_from_injury: Dict[str, Set[int]] = field(default_factory=dict)
 
     def mark_squad(self, team_name: str, player_ids: Set[int]) -> None:
         """Call right after building the lineup that's about to play this
@@ -92,17 +115,26 @@ class TournamentAvailability:
     def starting_condition(self, team_name: str, pool: List[Player]) -> Dict[int, float]:
         """`{id(player): starting condition}` for `MatchEngine`'s
         `initial_condition` - only players who need a penalty appear here;
-        anyone absent defaults to a fresh 100 (see `MatchEngine.start`)."""
+        anyone absent defaults to a fresh 100 (see `MatchEngine.start`).
+
+        A real injury return (see `RETURN_FROM_INJURY_CONDITION_*` above)
+        takes priority over the ordinary short-rest penalty below - a
+        player coming back from a genuine injury is undercooked regardless
+        of how long they've actually had to rest, which the short-rest
+        band alone wouldn't capture. `_returning_from_injury` is consumed
+        (popped) here, so this only ever applies to that one match."""
+        returning = self._returning_from_injury.pop(team_name, set())
         last = self._last_squad.get(team_name)
-        if not last:
-            return {}
-        span = REST_PENALTY_CONDITION_MAX - REST_PENALTY_CONDITION_MIN
-        result = {}
+        result: Dict[int, float] = {}
+        return_span = RETURN_FROM_INJURY_CONDITION_MAX - RETURN_FROM_INJURY_CONDITION_MIN
+        rest_span = REST_PENALTY_CONDITION_MAX - REST_PENALTY_CONDITION_MIN
         for p in pool:
-            if id(p) not in last:
-                continue
+            pid = id(p)
             fitness = max(0.0, min(100.0, p.attributes.fitness))
-            result[id(p)] = REST_PENALTY_CONDITION_MIN + span * (fitness / 100.0)
+            if pid in returning:
+                result[pid] = RETURN_FROM_INJURY_CONDITION_MIN + return_span * (fitness / 100.0)
+            elif last and pid in last:
+                result[pid] = REST_PENALTY_CONDITION_MIN + rest_span * (fitness / 100.0)
         return result
 
     def filter_available(self, team_name: str, pool: List[Player]) -> List[Player]:
@@ -130,7 +162,11 @@ class TournamentAvailability:
         for key in list(self._sidelined.keys()):
             self._sidelined[key] -= 1
             if self._sidelined[key] <= 0:
+                if self._sidelined_reason.get(key) == "injury":
+                    team_name, pid = key
+                    self._returning_from_injury.setdefault(team_name, set()).add(pid)
                 del self._sidelined[key]
+                self._sidelined_reason.pop(key, None)
 
         # `injury_details` is appended to in lockstep with `injured_players`
         # (one entry each, same call, same order - see
@@ -146,12 +182,14 @@ class TournamentAvailability:
                 continue  # e.g. a "knock" - no layoff for the next match
             key = (team_name, id(player))
             self._sidelined[key] = max(self._sidelined.get(key, 0), layoff)
+            self._sidelined_reason[key] = "injury"
 
         for team_name, player, card_type in result.carded_players:
             if card_type != "red":
                 continue
             key = (team_name, id(player))
             self._sidelined[key] = max(self._sidelined.get(key, 0), RED_CARD_SUSPENSION_MATCHES)
+            self._sidelined_reason[key] = "suspension"
 
     def sidelined_names(self, team_name: str, pool: List[Player]) -> List[str]:
         """For a status message: which of this team's pool players are

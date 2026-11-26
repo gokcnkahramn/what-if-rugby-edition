@@ -77,6 +77,26 @@ class Lineup:
         values = [slot.player.sub_ratings(slot.position).get(category, 50) for slot in slots]
         return sum(values) / len(values) if values else 50.0
 
+    def squad_quality_score(self) -> float:
+        """Team strength/ranking system: a single 0-100 "squad quality"
+        number - the average `rating_at` FIT of every starter at the
+        position they're actually playing (already real, position-aware,
+        out-of-position-penalized per-player math via `SquadSlot.fit_rating`
+        - no new attribute reads). Deliberately kept SEPARATE from
+        `tournament/rankings.py`'s `TeamRankingTracker` rating: this number
+        is a snapshot of how good the CURRENT lineup's players are on
+        paper, while the ranking tracks real recorded PERFORMANCE over
+        time - the whole point of keeping them apart is to let a team's
+        actual results diverge from (over- or under-perform) what its
+        squad quality alone would predict, which a single blended number
+        couldn't show. 0.0 for an empty/incomplete lineup (no starters at
+        all), same "no starters, no claim" honesty as `team_sub_rating`'s
+        own empty-group fallback."""
+        slots = list(self.starters.values())
+        if not slots:
+            return 0.0
+        return sum(slot.fit_rating for slot in slots) / len(slots)
+
     def pretty_print(self) -> str:
         lines = []
         for pos in Position:

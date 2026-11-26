@@ -41,7 +41,7 @@ from .data.sources.pool_builder import DEFAULT_SEASON, NATION_DISPLAY, NATION_TO
 from .data.sources.venues import VENUES
 from .data.squad_repository import team_from_dict, team_to_dict
 from .engine import MatchEngine
-from .engine.match_engine import MatchResult, team_tactical_identity
+from .engine.match_engine import MatchResult, PENALTY_CHOICES, team_tactical_identity, team_defensive_identity
 from .models import Lineup, Player, Position, Team
 from .tournament import (
     ALL_TEAMS_2027,
@@ -492,6 +492,48 @@ def api_team_auto_from_ids():
     })
 
 
+def _team_stats_json(result: MatchResult) -> dict:
+    """Per-team box score, including the match-stats/analysis system's new
+    DERIVED percentages (match stats system, item 16) - computed from the
+    real counting stats already collected above, never a separately
+    invented number. `possession_pct` needs BOTH teams' raw `possessions`
+    counts at once (one team's share of the total), so it's computed here
+    rather than per-team in isolation."""
+    total_possessions = sum(s.possessions for s in result.stats.values()) or 1
+
+    def rate(made: int, attempted: int) -> Optional[float]:
+        return round(100 * made / attempted, 1) if attempted else None
+
+    return {
+        name: {
+            "tries": s.tries, "conversions": s.conversions,
+            "penalty_goals": s.penalty_goals, "drop_goals": s.drop_goals,
+            "turnovers_won": s.turnovers_won, "turnovers_conceded": s.turnovers_conceded,
+            "handling_errors": s.handling_errors,
+            "penalties_conceded": s.penalties_conceded,
+            "yellow_cards": s.yellow_cards, "red_cards": s.red_cards,
+            "territory_pct": round(s.territory_pct, 1),
+            "possession_pct": round(100 * s.possessions / total_possessions, 1),
+            "injuries": s.injuries, "substitutions": s.substitutions,
+            "carries": s.carries, "metres_gained": s.metres_gained,
+            "defenders_beaten": s.defenders_beaten,
+            "tackles_made": s.tackles_made, "tackles_missed": s.tackles_missed,
+            "rucks_won": s.rucks_won, "rucks_lost": s.rucks_lost,
+            "scrums_won": s.scrums_won, "scrums_contested": s.scrums_contested,
+            "scrum_success_rate": rate(s.scrums_won, s.scrums_contested),
+            "lineouts_won": s.lineouts_won, "lineouts_contested": s.lineouts_contested,
+            "lineout_success_rate": rate(s.lineouts_won, s.lineouts_contested),
+            "kicks_attempted": s.kicks_attempted, "kicks_successful": s.kicks_successful,
+            "kicking_accuracy": rate(s.kicks_successful, s.kicks_attempted),
+            "kicking_metres": s.kicking_metres,
+            "try_conversion_rate": rate(s.conversions, s.tries),
+            "red_zone_possessions": s.red_zone_possessions, "red_zone_tries": s.red_zone_tries,
+            "red_zone_efficiency": rate(s.red_zone_tries, s.red_zone_possessions),
+        }
+        for name, s in result.stats.items()
+    }
+
+
 def _match_json(result: MatchResult) -> dict:
     pom = result.player_of_the_match
     pom_json = None
@@ -517,6 +559,23 @@ def _match_json(result: MatchResult) -> dict:
             for ps in sorted(result.player_stats, key=lambda p: p.points, reverse=True)
             if ps.points > 0
         ],
+        # Match stats/analysis system, item 14: a comprehensive "match
+        # performance" ranking (`PlayerMatchStats.performance_score`), not
+        # just scoring - a heavy-involvement non-scorer (carries, tackles,
+        # turnovers won) can show up here even with zero points, unlike
+        # `top_scorers` above.
+        "top_performers": [
+            {
+                "name": ps.player.name, "team": ps.team,
+                "performance_score": round(ps.performance_score, 1),
+                "tries": ps.tries, "carries": ps.carries, "metres_gained": ps.metres_gained,
+                "defenders_beaten": ps.defenders_beaten,
+                "tackles_made": ps.tackles_made, "tackles_missed": ps.tackles_missed,
+                "turnovers_won": ps.turnovers_won,
+            }
+            for ps in sorted(result.player_stats, key=lambda p: p.performance_score, reverse=True)
+            if ps.performance_score > 0
+        ][:10],
         "events": [
             {"minute": e.minute, "team": e.team, "text": e.text,
              "score_home": e.score_home, "score_away": e.score_away, "zone": e.zone, "side": e.side}
@@ -524,22 +583,7 @@ def _match_json(result: MatchResult) -> dict:
         ],
         "injuries": list(result.injury_details),
         "cards": list(result.card_details),
-        "stats": {
-            name: {
-                "tries": s.tries, "conversions": s.conversions,
-                "penalty_goals": s.penalty_goals, "drop_goals": s.drop_goals,
-                "turnovers_won": s.turnovers_won, "handling_errors": s.handling_errors,
-                "penalties_conceded": s.penalties_conceded,
-                "yellow_cards": s.yellow_cards, "red_cards": s.red_cards,
-                "territory_pct": round(s.territory_pct, 1),
-                "injuries": s.injuries, "substitutions": s.substitutions,
-                "carries": s.carries, "metres_gained": s.metres_gained,
-                "tackles_made": s.tackles_made, "tackles_missed": s.tackles_missed,
-                "rucks_won": s.rucks_won,
-                "scrums_won": s.scrums_won, "lineouts_won": s.lineouts_won,
-            }
-            for name, s in result.stats.items()
-        },
+        "stats": _team_stats_json(result),
         # The STARTING XV only (never mutated mid-match, unlike the live
         # engine's own working copy - see `Team.lineup`'s own docstring) -
         # exactly what the finished-report screen's average-position pitch
@@ -562,6 +606,23 @@ def _match_json(result: MatchResult) -> dict:
             result.home.name: team_tactical_identity(result.home.lineup),
             result.away.name: team_tactical_identity(result.away.lineup),
         },
+        "defensive_identity": {
+            result.home.name: team_defensive_identity(result.home.lineup),
+            result.away.name: team_defensive_identity(result.away.lineup),
+        },
+        # Team strength/ranking system: a snapshot "how good is this
+        # lineup on paper" number (`Lineup.squad_quality_score`),
+        # deliberately separate from the real-performance-based
+        # `TeamRankingTracker` rating (surfaced in `_team_form_json`/
+        # `_match_summary_json`'s `rating_swing_*` instead) - lets the UI
+        # show both side by side so a team visibly over/under-performing
+        # its own squad quality is something the user can actually see.
+        "squad_quality": {
+            result.home.name: round(result.home.lineup.squad_quality_score(), 1),
+            result.away.name: round(result.away.lineup.squad_quality_score(), 1),
+        },
+        "rating_swing_home": getattr(result, "rating_swing_home", None),
+        "rating_swing_away": getattr(result, "rating_swing_away", None),
     }
 
 
@@ -580,11 +641,17 @@ def _standings_json(standings: Standings) -> list:
 def _match_summary_json(result: MatchResult) -> dict:
     """One tournament match's scoreline + a `match_id` to drill into its
     full event-by-event detail via `/api/match/<id>` (same shape as a
-    single friendly's report)."""
+    single friendly's report). `rating_swing_home`/`rating_swing_away`
+    (team strength/ranking system) are plain extra attributes `Tournament.
+    _play` sets directly on `result` when a `TeamRankingTracker` is in
+    play - `None` for a friendly/draft-mode match with no ranking tracker
+    attached, never a fabricated 0.0."""
     return {
         "home": result.home.name, "away": result.away.name,
         "score_home": result.score_home, "score_away": result.score_away,
         "scoreline": result.scoreline(), "match_id": _register_match(result),
+        "rating_swing_home": getattr(result, "rating_swing_home", None),
+        "rating_swing_away": getattr(result, "rating_swing_away", None),
     }
 
 
@@ -1079,9 +1146,10 @@ def api_match():
     if home is None or away is None:
         return jsonify({"error": "unknown team_id - build both teams first"}), 400
     seed = body.get("seed")
+    tactics = body.get("tactics")
 
     try:
-        result = MatchEngine(home, away, seed=seed).run()
+        result = MatchEngine(home, away, seed=seed, tactics=tactics).run()
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1129,6 +1197,8 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
         "home_advantage_for": result.home_advantage_for if result else None,
         "shootout_winner": result.shootout_winner if result else None,
         "shootout_detail": result.shootout_detail if result else None,
+        "stats": _team_stats_json(result) if result else {},
+        "pending_penalty": engine._pending_penalty,
         "events": [
             {"minute": e.minute, "team": e.team, "text": e.text,
              "score_home": e.score_home, "score_away": e.score_away, "zone": e.zone, "side": e.side}
@@ -1146,7 +1216,9 @@ def _live_match_state_json(session_id: str, engine: MatchEngine) -> dict:
 
 
 def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condition: Optional[Dict[int, float]] = None,
-                       decide_winner: bool = False, weather: str = "dry") -> str:
+                       decide_winner: bool = False, weather: str = "dry",
+                       tactics: Optional[Dict[str, Dict[str, str]]] = None,
+                       decision_teams: Optional[list] = None) -> str:
     """Starts a pausable match (engine advanced to its first checkpoint) and
     registers it in `_LIVE_MATCHES`, returning its session id. Shared by the
     single-friendly `/api/match/live/start` endpoint and the interactive
@@ -1169,7 +1241,8 @@ def _start_live_match(home: Team, away: Team, seed: Optional[int], initial_condi
     global _next_live_match_id
     engine = MatchEngine(
         home, away, seed=seed, initial_condition=initial_condition,
-        decide_winner=decide_winner, weather=weather,
+        decide_winner=decide_winner, weather=weather, tactics=tactics,
+        decision_teams=decision_teams,
     )
     engine.start()
     if LIVE_MATCH_CHECKPOINTS:
@@ -1205,9 +1278,14 @@ def api_match_live_start():
     seed = body.get("seed")
     decide_winner = bool(body.get("decide_winner", False))
     weather = str(body.get("weather", "dry"))
+    tactics = body.get("tactics")
+    decision_teams = body.get("decision_teams")
 
     try:
-        session_id = _start_live_match(home, away, seed, decide_winner=decide_winner, weather=weather)
+        session_id = _start_live_match(
+            home, away, seed, decide_winner=decide_winner, weather=weather, tactics=tactics,
+            decision_teams=decision_teams,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1228,6 +1306,38 @@ def api_match_live_continue(session_id: str):
     if remaining:
         engine.advance_to(remaining[0])
     else:
+        engine.finish()
+
+    state = _live_match_state_json(session_id, engine)
+    if engine.is_finished():
+        state["result"] = _match_json(engine.result)
+    return jsonify(state)
+
+
+@app.post("/api/match/live/<session_id>/decide_penalty")
+def api_match_live_decide_penalty(session_id: str):
+    """Manager-controls pass: applies a decision-team's choice for the
+    currently pending penalty (`"posts"`/`"touch"`/`"quick_tap"` - see
+    `MatchEngine.resolve_pending_decision`/`PENALTY_CHOICES`), then
+    advances to the next checkpoint exactly like `.../continue` - the
+    frontend calls THIS instead of `.../continue` whenever the live state
+    it's showing has a non-null `pending_penalty`."""
+    engine = _LIVE_MATCHES.get(session_id)
+    if engine is None:
+        return jsonify({"error": f"unknown live match session {session_id}"}), 404
+    if engine._pending_penalty is None:
+        return jsonify({"error": "no penalty decision is currently pending"}), 400
+    body = request.get_json(force=True)
+    choice = body.get("choice")
+    can_go_for_posts = engine._pending_penalty.get("can_go_for_posts", True)
+    if choice not in PENALTY_CHOICES or (choice == "posts" and not can_go_for_posts):
+        return jsonify({"error": f"invalid choice {choice!r} for this penalty"}), 400
+    engine.resolve_pending_decision(choice)
+
+    remaining = [m for m in LIVE_MATCH_CHECKPOINTS if m > engine.minute]
+    if remaining and engine._pending_penalty is None:
+        engine.advance_to(remaining[0])
+    elif engine._pending_penalty is None:
         engine.finish()
 
     state = _live_match_state_json(session_id, engine)
@@ -1524,8 +1634,21 @@ def _build_tournament(kind: str, body: dict, teams: Dict[str, Team], squads: Dic
 
 def _run_tournament_session(session: TournamentSession, kind: str, body: dict,
                              teams: Dict[str, Team], squads: Dict[str, List[Player]], my_team: Optional[str]):
+    # Manager-controls pass applied to EVERY match mode, not just a single
+    # friendly: the user's own team gets the exact same selectable tactics
+    # (`tactics`, a one-time choice applied to every one of their fixtures
+    # across the whole tournament - real coaches don't re-pick a gameplan
+    # before every single match either) and in-match penalty decisions
+    # (`decision_teams=[my_team]`) here that Friendly/Draft mode already
+    # has - the opponent, whoever it is that match, keeps auto-deciding
+    # both exactly as before.
+    tactics = {my_team: body["tactics"]} if my_team and body.get("tactics") else None
+
     def pause_hook(home_name, away_name, home_team, away_team, seed, initial_condition=None, decide_winner=False):
-        live_session_id = _start_live_match(home_team, away_team, seed, initial_condition, decide_winner=decide_winner)
+        live_session_id = _start_live_match(
+            home_team, away_team, seed, initial_condition, decide_winner=decide_winner,
+            tactics=tactics, decision_teams=[my_team] if my_team else None,
+        )
         session.live_session_id = live_session_id
         session.home_name, session.away_name = home_name, away_name
         session.status = "paused"
@@ -1728,11 +1851,16 @@ def api_season_widest_pool():
     return jsonify({"pool": [_player_json(p) for p in pool]})
 
 
-def _run_season_session(session: SeasonSession, squad_player_ids: Dict[str, List[int]], seed: Optional[int]):
+def _run_season_session(session: SeasonSession, squad_player_ids: Dict[str, List[int]], seed: Optional[int],
+                         tactics: Optional[Dict[str, str]] = None):
     holder: dict = {}
+    my_team_tactics = {session.my_team: tactics} if session.my_team and tactics else None
 
     def pause_hook(home_name, away_name, home_team, away_team, match_seed, initial_condition=None, decide_winner=False):
-        live_session_id = _start_live_match(home_team, away_team, match_seed, initial_condition, decide_winner=decide_winner)
+        live_session_id = _start_live_match(
+            home_team, away_team, match_seed, initial_condition, decide_winner=decide_winner,
+            tactics=my_team_tactics, decision_teams=[session.my_team] if session.my_team else None,
+        )
         session.live_session_id = live_session_id
         session.home_name, session.away_name = home_name, away_name
         session.status = "paused"
@@ -1843,7 +1971,7 @@ def api_season_start():
         return jsonify(_season_state_json(session_id, session))
 
     thread = threading.Thread(
-        target=_run_season_session, args=(session, squad_player_ids, seed), daemon=True,
+        target=_run_season_session, args=(session, squad_player_ids, seed, body.get("tactics")), daemon=True,
     )
     session.thread = thread
     thread.start()

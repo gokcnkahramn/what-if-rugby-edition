@@ -69,6 +69,18 @@ class Player:
             "handling": attrs.handling * fit,
             "discipline": attrs.discipline,
             "aerial": attrs.aerial * fit,
+            # Added when a real bug was found (match-engine-depth Phase 12):
+            # `MatchEngine._resolve_drive`'s breakdown-turnover formula has
+            # read "tackle_technique" via this same dict since it was
+            # written (see `MATCH_ENGINE_MODEL.md`), but this key never
+            # existed here - every lookup silently fell back to the
+            # generic default (50) for every player, so the formula's
+            # "defense's tackle_technique" term never actually varied with
+            # real player attributes at all. "positioning" is added at the
+            # same time for the new defensive-organization feature
+            # (`_defensive_style`), which needs it for the same reason.
+            "tackle_technique": attrs.tackle_technique * fit,
+            "positioning": attrs.positioning * fit,
         }
 
     def __repr__(self) -> str:

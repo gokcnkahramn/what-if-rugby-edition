@@ -118,8 +118,17 @@ def _play_out_live_match(client, live_state):
         assert "error" not in sub
         state = sub
     guard = 0
-    while not state["finished"] and guard < 20:
-        state = client.post(f"/api/match/live/{session_id}/continue", json={}).get_json()
+    while not state["finished"] and guard < 40:
+        if state.get("pending_penalty") is not None:
+            # Manager-controls pass: `my_team`'s own penalties now pause for
+            # a real decision too - resolved here with a fixed "touch"
+            # choice, same convention `test_webapp.py`'s own helper uses,
+            # since this test is about Season mode's threading, not the
+            # penalty-decision mechanism itself (see
+            # `test_manager_penalty_decisions.py` for that).
+            state = client.post(f"/api/match/live/{session_id}/decide_penalty", json={"choice": "touch"}).get_json()
+        else:
+            state = client.post(f"/api/match/live/{session_id}/continue", json={}).get_json()
         guard += 1
     assert state["finished"] is True
     return state

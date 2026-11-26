@@ -246,6 +246,364 @@ the one whose attributes were boosted, since the mechanism correctly
 fires for whichever wing matches `Side` that phase, not always the same
 physical player.
 
+### Kicking system detail (match-engine-depth Phase 11)
+
+Before this pass, "kicking" existed only as `_kick_tendency` (a single
+team-wide number nudging `_advance_zone`'s odds) - no distinct kick TYPE,
+no named decision, no event of its own. Two real tactical kick options
+now exist, each a real risk/reward trade, not just flavor text:
+
+**Cross-field kick** (`_resolve_phase`, a try-scoring slice in the same
+cumulative menu as the snipe/jackal/wing-break tries): only reachable
+close to the line with the ball on one side (`self._side` LEFT/RIGHT, not
+MIDDLE). Combines TWO named individuals' own attributes, not team
+averages - the attacking FLY-HALF's own `kicking_game`/`game_intelligence`
+(the decision + execution) and the FAR wing's (opposite `self._side` - the
+blindside winger, same "far wing stays wide" convention the pitch-diagram
+formation tables already use) own `aerial`/`pace` (the finish):
+`p = clamp((combined_skill-62)/320, 0.0, 0.045)`. Commentary names both
+players ("gathers a raking cross-field kick from <fly-half> and dives in
+at the corner"). Verified live: an elite fly-half (kicking_game/
+game_intelligence both 99) set up 26 such tries across 60 simulated
+matches vs. 4 for an average one.
+
+**Territorial box kick** (`_resolve_phase`, checked AFTER the main
+outcome menu - only reached once a phase would otherwise just "continue"
+as a carry, and only deep/midfield, never close to the line): the
+SCRUM-HALF/FLY-HALF's own `kicking_game` (whichever of the two is higher -
+`box_kicker`) decides to trade possession for territory instead of
+carrying it up - `p_box_kick = clamp((kick_skill-55)/250, 0.0, 0.30)`. A
+real risk: the defending FULLBACK's own `aerial` can read it and force a
+charge-down turnover (`p_charge_down`, scaled by the gap between the
+kicker's and catcher's skill); otherwise the zone advances one extra step
+beyond this phase's normal movement, and the drive ends (a deliberate,
+honest trade - the ball is really given up to be chased/contested, not
+kept). Verified live: an elite kicking fly-half produced 34 such box
+kicks across 60 matches vs. 3 for an average one; a genuinely poor
+kicker (kicking_game 70) facing an elite-aerial fullback (aerial 99) had
+real, non-zero charge-downs across 60 seeds, confirming the risk side
+isn't just text. New `tests/test_kicking_system.py` (4 tests).
+
+### Manager controls: pre-match tactics, in-match penalty decisions, and two more real kick types
+
+User-facing follow-up ("we're the manager, we should be able to play the
+game"): every tendency this engine derives (attack shape, defensive style,
+kick tendency) used to be purely attribute-derived, with zero way for the
+person actually drafting a lineup to impose their own gameplan, and every
+in-match decision (what to do with a penalty) was a silent AI auto-pick.
+
+**Pre-match tactics** (`TACTIC_CHOICES`, `MatchEngine(tactics=...)`): a
+manager can pick, per team, a real stance on 3 existing axes -
+`attack_shape` (forward_heavy/balanced/backs_heavy), `defensive_style`
+(blitz/balanced/drift), `kick_tendency` (kick_heavy/balanced/ball_in_hand) -
+each a real REPLACEMENT of the attribute-derived number for that axis
+(`_attack_shape_tendency`/`_defensive_style`/`_kick_tendency` check
+`_tactics_override` first), not a blend. A team/axis left unset keeps
+today's exact derived behavior. `kick_tendency`'s real effect was also
+genuinely strengthened in this same pass - it used to only nudge
+`_advance_zone`'s territory roll; it now ALSO raises the real box-kick
+decision's own odds (`kick_tendency_factor` in the box-kick branch), so
+"kick_heavy" means more real box kicks, not just faster territory gain.
+
+**In-match penalty decision** (`decision_teams`, `_pending_penalty`,
+`resolve_pending_decision`, `PENALTY_CHOICES`): for a listed team, a
+just-awarded penalty pauses resolution (`advance_to`/`finish` stop the
+instant `_pending_penalty` is set, exactly like reaching a checkpoint)
+instead of auto-deciding `go_for_posts` - the manager picks `"posts"`
+(only offered when `can_go_for_posts`, i.e. not pinned in their own 22),
+`"touch"`, or `"quick_tap"` (keeps the ball alive immediately, no kick at
+all). Wired into every match mode (Friendly, Draft, Tournament, Season) via
+the same `_start_live_match`/pause-hook plumbing each mode already used for
+live substitutions.
+
+**Two more real kick types** (closing the "grubber/chip kick" gap the
+original kicking-system pass left open): a **grubber kick**
+(`attacking_tryline` only, the SCRUM-HALF's own `kicking_game`/
+`game_intelligence` driving a low kick through the line, chased by the
+NEAR wing - same side as `self._side`, unlike the cross-field kick's far
+wing) and a **chip kick** (only reachable while facing a genuinely
+blitz-leaning defence - the real counter to a fast rush line - the
+FLY-HALF's own `kicking_game`/`game_intelligence` chipping over it, chased
+by the near wing). A manager can also set a `kick_style` preference
+(`grubber`/`chip`/`cross_field`/`box_kick`, a label, not a [-1,1]
+override) giving that ONE kick type's own probability a real, bounded
+`KICK_STYLE_BOOST` (1.6x) - never a guarantee, the underlying skill/zone/
+defensive-style gates still apply.
+
+**A new, purely clock-driven strategy tier**, independent of the
+scoreline (`_score_pressure` already covers that): `_period_caution_factor`
+damps individual-break probabilities during the opening
+`PERIOD_CAUTION_WINDOW` (8) minutes of EACH half - a real "cagey start,"
+both sides feeling each other out before committing to high-risk
+individual plays, ramping linearly back to 1.0 (no change) by the end of
+the window.
+
+**Investigated, not changed - "antrenör etkisi" (coach influence)**: this
+pass's own `tactics`/`decision_teams` mechanism genuinely IS the honest
+version of a coach effect - a real human (or, for an AI-controlled team,
+the lineup's own real attributes) decides the gameplan; there is no
+separate, additional "coach" entity with its own invented skill number to
+model on top of that without violating this project's own "never invent
+data" stance (there is no real per-coach rating data anywhere in this
+project's pipeline). Reported honestly as already satisfied by the above,
+not left as a separate open item.
+
+Verified live: `kick_heavy` raises real box-kick counts over 150 seeds (a
+direct comparison against `ball_in_hand` is NOT clean, since a slower
+`_advance_zone` tendency means more time spent in the own-half zones a box
+kick is even possible from at all - documented in
+`test_tactics_system.py`'s own test, not papered over); a decision-team's
+penalty genuinely pauses `advance_to`/`finish` (confirmed: a quick-tap
+choice never scores and is named in the event text, a touch choice never
+attempts posts); grubber/chip kicks are each confirmed to exist (chip
+confirmed zero against a neutral defence, non-zero against a blitz-leaning
+one); `_period_caution_factor` confirmed monotonic and bounded. New
+`tests/test_manager_penalty_decisions.py` (6 tests), `tests/
+test_kicking_types.py` (5 tests), 3 new tests in `tests/
+test_tactics_system.py`. Full suite: 361/361 passing before this
+kicking-types/period-tier/role-link follow-up; re-verified green after.
+
+### A real pre-existing bug found and fixed: `tackle_technique`/`positioning` never worked
+
+While building defensive organization (next section), a real bug was
+found in `Player.sub_ratings()` (`models/player.py`): the breakdown-
+turnover formula has read `_team_sub_rating(defending, "tackle_technique")`
+since it was first written (`MATCH_ENGINE_MODEL.md` has described this as
+"driven by the defense's tackle_technique" the whole time), but
+`sub_ratings()`'s returned dict never actually had a `"tackle_technique"`
+key - every single lookup silently fell back to `_team_sub_rating`'s own
+generic default (50) for every player, meaning this term NEVER actually
+varied with real player attributes at all, for the entire time this
+feature existed. Fixed by adding real `"tackle_technique"`/`"positioning"`
+entries to `sub_ratings()` (the latter needed for the new defensive-
+organization feature below, for the same reason). This is a genuine
+correctness fix, not a tuning change - confirmed via
+`tests/test_defensive_organization.py`'s own regression guard.
+
+### Defensive organization: blitz vs. drift (match-engine-depth Phase 12)
+
+New `MatchEngine._defensive_style(team) -> float` ([-1, 1], positive =
+blitz-leaning, negative = drift-leaning), derived from the now-real
+`tackle_technique` (aggressive technique) vs `positioning` (patient,
+structured) sub-ratings - same `team_sub_rating`-based convention as
+`_kick_tendency`, cross-checked against rugbyslate.com's own "the drift
+defence"/"the blitz defence" articles (researched earlier in this
+project): blitz is a fast, aggressive line that meets each attacker
+1-on-1, strong against an overlap but risks a missed tackle/card if a
+defender mistimes the rush; drift shifts the whole line across to cover
+the ball, rarely beaten wide but gives up some central ground. Three real,
+distinct effects, not one shared bonus:
+- `_advance_zone`: a blitz-leaning DEFENDING team reduces the attacking
+  team's advance probability (compresses space) - drift gets no such
+  bonus here.
+- `_resolve_drive`: a blitz-leaning defence gets a modest extra card risk
+  AND a modest extra breakdown-turnover bonus (the real cost/benefit of
+  rushing up fast) - drift gets neither.
+- `_resolve_phase`: a drift-leaning defence specifically damps the
+  ATTACKING team's individual break probabilities (the scrum-half snipe,
+  wing break, and cross-field kick tries - Phases 6/9/11) via a shared
+  `drift_factor` (1.0 at blitz/balanced, down to 0.5 at full drift) - a
+  real defensive-organization distinction a flat team-wide rating alone
+  couldn't express, since drift's whole point in real rugby is shutting
+  down individual breaks specifically, not raw territory or cards.
+New `team_defensive_identity(lineup) -> str` ("Blitz / rush defence" /
+"Drift defence" / "Balanced"), same pre-match-team-sheet convention
+`team_tactical_identity` already established - threaded into `webapp.py`'s
+`_match_json` (new `defensive_identity` field) and shown in `app.js`
+alongside the existing tactical-identity line. Verified live: a
+blitz-leaning defence conceded more cards and forced more turnovers than
+a drift-leaning one over 60 seeds (both directionally correct, modest
+magnitudes); a drift-leaning defence suppressed the attacking team's
+individual break tries meaningfully more than a blitz-leaning one over
+150 seeds (136 vs 104 for this exact attribute pair - needed the larger
+sample to separate reliably from noise, a smaller 60-seed check showed
+the same direction but too close to call confidently on its own). New
+`tests/test_defensive_organization.py` (4 tests).
+
+### Referee system (match-engine-depth Phase 13)
+
+Before this pass, every general-play defensive penalty wrote the same
+generic "Penalty against X at the breakdown" text, and every handling
+error wrote the same generic "handling error" text - no distinct knock-on
+vs. forward pass, no offside, no advantage concept at all. Three real,
+named additions, in `_resolve_phase`/`_score_penalty_chance`:
+
+**Named infringements, at no extra RNG cost**: both the
+`p_pen_conceded_by_def`/`p_pen_conceded_by_atk` penalty branches and the
+`p_error` handling-error branch now pick a specific, real reason
+("offside" / "for not releasing the ball" for a penalty; "knock-on" /
+"forward pass" for an error) from WHERE the already-rolled `roll` landed
+within that outcome's own slice of the cumulative menu (`slice_position =
+(roll - slice_start) / slice_width`) - a free byproduct of the existing
+single-roll-per-phase menu, not a new probability or a new RNG call.
+Verified live over 60 seeds: both knock-on/forward-pass and offside/
+not-releasing occurred with plausible, non-zero counts for each (knock-on
+the more common of the two errors, as in real rugby).
+
+**Advantage**: a real rugby concept, not just a label - when a general-
+play defensive penalty fires, the referee doesn't blow immediately; if the
+attack was ALREADY in a position to score anyway that same phase (rolled
+fresh against this phase's own zone-gated `p_try`, already computed), the
+try stands instead of the penalty ("plays advantage and goes over - no
+need to bring it back for the penalty"). This genuinely changes which
+outcome the phase resolves to, not just flavor text. Verified live: 10
+advantage-tries occurred across 60 simulated matches - a real, non-zero,
+occasional mechanic, as advantage should be in real rugby (not the common
+case, but not never either). New `tests/test_referee_system.py` (4 tests).
+
+### Condition/injury/card depth (match-engine-depth Phase 14)
+
+Four real additions, closing the user's third checklist ("players
+shouldn't perform the same for all 80 minutes"):
+
+**Fatigue-linked injury risk**: new `MatchEngine._team_fatigue_factor(team)`
+(0 fresh, 1 exhausted - the team's current starting XV's real average
+tracked `_stamina` condition, no new signal) now scales
+`P_INJURY_PER_DRIVE` up to `INJURY_FATIGUE_MULTIPLIER` (1.5) - a fully
+exhausted team carries 2.5x the baseline per-drive injury risk, a fully
+fresh team is unaffected. The VICTIM is also now picked weighted by
+individual fatigue (`_apply_injury`'s `rng.choices` with a
+`max(1.0, 100 - condition)` weight) instead of a uniform coin-flip among
+all 15 - a more tired player is more likely to be the one who gets hurt.
+Verified live: a team forced to start every drive at condition 15 racked
+up more injuries over 60 seeds than one left at its normal fresh
+condition.
+
+**Named injury types**: new `INJURY_TYPES` table (hamstring strain, ankle
+sprain, shoulder injury, knee injury, calf strain, rib injury, concussion,
+groin strain) - a separate axis from the existing severity tiers ("what
+got hurt", not "how bad"), rolled independently, with ONE honest,
+well-known real-rugby exception: a concussion is re-rolled to a non-zero
+severity tier if it would otherwise land on a same-match "knock" (0
+lay-off) - reflecting the real graduated return-to-play/HIA protocol
+every major union actually follows, not an invented medical rule.
+
+**Position-specific card/injury impact**: `_team_sub_rating` now tracks
+`_sent_off_positions` (populated on a genuine send-off or a no-cover
+injury) and applies an EXTRA, targeted penalty (0.85x) only to the
+category group(s) that missing position actually contributes to (losing a
+prop hits `scrum`/`lineout`/`aerial` specifically, not `kicking`) - on top
+of, not instead of, the existing flat `_active_card_penalty` that already
+applies everywhere. Verified: a sent-off tighthead prop measurably lowers
+`scrum` but leaves an unrelated category (`kicking`) completely
+unaffected.
+
+**Return-from-injury conditioning deficit** (`tournament/availability.py`):
+a player's first match back after a REAL injury layoff (never a red-card
+suspension - tracked separately via `_sidelined_reason`) now starts at a
+harsher, fitness-modulated condition band
+(`RETURN_FROM_INJURY_CONDITION_MIN/MAX`, 70-88) than the existing
+quick-turnaround short-rest band (85-95) - consumed (popped) after exactly
+one match, so a returning player isn't still "rusty" several games later.
+Verified: the deficit applies to the match immediately after a tracked
+injury layoff expires, and only to that one match; a red-card suspension
+expiring the same way does NOT trigger it. New
+`tests/test_injury_and_card_depth.py` (6 tests).
+
+### Tactics/strategy system (match-engine-depth Phase 15)
+
+The user's fourth checklist, headline goal: "two teams with the same
+squad should get different results with different tactics." Since this
+engine derives every tactical signal from real attributes rather than a
+user-chosen setting (same philosophy as `_kick_tendency`/`_defensive_style`
+before it), "different tactics" here means two squads with a genuinely
+different SHAPE or GAME STATE produce measurably different outcomes - not
+a menu the user picks from.
+
+**`_attack_shape_tendency(team)`** ([-1, 1], positive = forward-heavy,
+negative = backs-heavy): compares the current starting XV's forwards' own
+`attack` sub-rating average against the backs' own
+(`models.position.FORWARDS`/`BACKS`). A forward-heavy team's pick-and-go
+(`_resolve_scrum`) and driving-maul (`_resolve_lineout`) probabilities get
+a real boost (`forward_heavy_bonus`); a backs-heavy team's individual
+break probabilities (snipe/wing-break/cross-field, all in `_resolve_phase`)
+get one instead (`individual_break_factor`'s `backs_heavy_factor` term).
+Verified live (direct formula calls, not full-match counts - see the test
+file's own docstring for why a full-match count turned out to be
+confounded by the generic `p_try` slice also shifting): boosting the
+forwards' or the backs' pace/footwork/offload moves `_attack_shape_tendency`
+in the correct direction and magnitude order.
+
+**`_score_pressure(team, minute, result)`** ([-1, 1], positive = chasing
+the game, negative = closing it out): built purely from the REAL live
+scoreline and `minute`, deliberately `0.0` for the whole first half and
+for any close scoreline (real "game state" only matters once there's
+something to react to). Feeds `individual_break_factor`'s
+`pressure_factor` (a chasing team takes more individual risks) and the
+box-kick decision's `pressure_factor` (a chasing team is less willing to
+give the ball away on a territorial kick; a team closing out a lead is
+more willing). Verified: `0.0` in the first half regardless of score;
+positive when down 14 at minute 70, negative when up 14; urgency rises
+through the second half (a given gap matters more with 5 minutes left
+than with 35).
+
+**Tactical reaction to the opponent's defensive style**: a drift-leaning
+defence's general `drift_factor` damping (section 12 - correctly
+suppresses ground-level individual breaks) is partly offset specifically
+for the cross-field kick (`drift_counter_bonus`) - real rugby's own
+"attacking the drift" counter goes OVER a drifting line, not through it,
+so this one mechanic shouldn't be damped the same way the snipe/wing-break
+are. A blitz-leaning defence raises the box-kick decision's probability
+(`blitz_counter_bonus`) - the real counter to a fast rush line is kicking
+in behind it, not carrying into it.
+
+New `tests/test_tactics_system.py` (4 tests, all deterministic formula
+checks rather than full-match statistical counts - explained in the test
+file's own docstring).
+
+### Match stats/analysis system (match-engine-depth Phase 16)
+
+The user's fifth checklist, closing note: "stats must be produced from
+real engine events and stay internally consistent." Every field below is
+credited at the EXACT point the engine already resolves that real
+outcome - no new rolls, no new probabilities, purely additional
+bookkeeping layered onto existing branches.
+
+**New `TeamMatchStats` fields**: `scrums_contested`/`lineouts_contested`
+(credited once per scrum-/lineout-origin drive regardless of outcome -
+what makes a real success RATE possible, not just a raw won count);
+`defenders_beaten` (a "continue" phase's own `metres` roll counts as
+beating a defender once it clears `DEFENDERS_BEATEN_METRES_THRESHOLD` -
+re-tuned from an initial draft value of 8, which turned out to NEVER fire
+under this engine's real edge range, even for a heavily boosted attack,
+down to 5, the value the engine's own distribution actually reaches -
+verified live, not guessed); `turnovers_conceded`/`rucks_lost` (the
+mirror of the existing `turnovers_won`/`rucks_won`, credited on the exact
+same breakdown-turnover/handling-error/scrum-against-the-head/lineout-
+steal/box-kick-charge-down branches that already credit the other side);
+`kicks_attempted`/`kicks_successful`/`kicking_metres` (territorial box
+kicks only - a cross-field kick is a try-scoring play, not a territorial
+exchange, so it's deliberately excluded here; `kicking_metres` uses
+`KICKING_METRES_PER_ZONE_STEP` (22), the real distance one zone-step
+already implies given the 5-zone model's own real span, not an invented
+number); `red_zone_possessions`/`red_zone_tries` (did this drive ever
+reach the defending team's 22/tryline, and did it finish with a try -
+tracked at drive granularity in the open-play phase loop, plus directly
+in the two zone-gated set-piece-try sub-scenarios where it's always true
+by construction; an early-exit drive outcome before reaching the phase
+loop - a card, a scrum/lineout penalty/turnover - doesn't update it, a
+documented, scoped simplification).
+
+**New `PlayerMatchStats.performance_score`**: a single documented
+weighted blend of every real per-player stat already collected (scoring
+weighted heaviest, carrying/tackling/turnover involvement contributing a
+smaller real amount) - so a non-scoring prop who put in a heavy shift can
+post a real, non-zero number, not "performance" meaning only "did you
+score." Verified live: a non-scoring player with real carries/tackles
+posts a positive `performance_score`.
+
+**Derived percentages** (`webapp.py`'s new `_team_stats_json`, computed
+from the real counts above, never a separately invented number):
+`possession_pct` (needs both teams' raw `possessions` at once - a team's
+share of the match total), `scrum_success_rate`/`lineout_success_rate`
+(won/contested), `kicking_accuracy` (successful/attempted box kicks),
+`try_conversion_rate` (conversions/tries), `red_zone_efficiency`
+(red_zone_tries/red_zone_possessions) - each `None` (shown as "-" in the
+UI) rather than a divide-by-zero or a fabricated 0% when the denominator
+is genuinely zero. New `tests/test_match_stats_system.py` (5 tests,
+including a direct check that `turnovers_won`/`turnovers_conceded` match
+EXACTLY between the two sides, not just "both non-zero").
+
 ## Per-drive flow (`_advance_one_drive`)
 
 1. `_pick_attacking_team` runs one territory-weighted coin flip to decide who
