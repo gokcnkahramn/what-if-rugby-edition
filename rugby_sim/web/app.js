@@ -249,7 +249,8 @@ class TeamBuilder {
         <div class="row">
           <select id="${this.side}-hist-comp">
             <option value="rwc">Rugby World Cup (1995-2023)</option>
-            <option value="sn">Six Nations Championship (2009-2021)</option>
+            <option value="sn">Six Nations Championship (2000-2021)</option>
+            <option value="rc">Rugby Championship / Tri Nations (1996-2025)</option>
           </select>
           <select id="${this.side}-hist-year"></select>
           <select id="${this.side}-hist-team"><option>(load a year first)</option></select>
@@ -269,16 +270,14 @@ class TeamBuilder {
 
       const updateHistLogo = () => { histLogoSpan.innerHTML = logoImgHtml(teamSel.value, 24); };
       const loadYears = async () => {
-        const path = compSel.value === "rwc" ? "/api/historical_rwc/years" : "/api/historical_six_nations/years";
-        const res = await api(path);
+        const res = await api(`${HISTORICAL_COMPETITION_API_PATHS[compSel.value]}/years`);
         yearSel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
         await loadYearData();
       };
       const loadYearData = async () => {
         const year = yearSel.value;
         setStatus(status, "loading real squads (first time is network-heavy - cached after)...");
-        const path = compSel.value === "rwc" ? `/api/historical_rwc/${year}` : `/api/historical_six_nations/${year}`;
-        const res = await api(path);
+        const res = await api(`${HISTORICAL_COMPETITION_API_PATHS[compSel.value]}/${year}`);
         yearData = res;
         const teamNames = Object.keys(res.squads).sort();
         teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
@@ -489,6 +488,8 @@ function updateRunButton() {
   const btn = document.getElementById("run-match");
   const ready = homeBuilder.teamId && awayBuilder.teamId;
   btn.disabled = !ready;
+  const mcBtn = document.getElementById("mc-run");
+  if (mcBtn) mcBtn.disabled = !ready;
   const hint = document.getElementById("run-hint");
   if (ready) {
     setStatus(hint, "");
@@ -559,6 +560,29 @@ async function enterFriendlyMode() {
   document.getElementById("friendly-tactics-row").innerHTML =
     tacticsPickerHtml("home-tac", "Home") + tacticsPickerHtml("away-tac", "Away");
   updateRunButton();
+
+  document.getElementById("mc-run").onclick = async () => {
+    const status = document.getElementById("mc-status");
+    const n = parseInt(document.getElementById("mc-runs").value, 10) || 100;
+    const tactics = {
+      [homeBuilder.name]: readTactics("home-tac"),
+      [awayBuilder.name]: readTactics("away-tac"),
+    };
+    setStatus(status, `${n} maç simüle ediliyor...`);
+    document.getElementById("mc-report").innerHTML = "";
+    try {
+      const data = await api("/api/match/monte_carlo", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({home_team_id: homeBuilder.teamId, away_team_id: awayBuilder.teamId, n, tactics}),
+      });
+      const mcBox = document.getElementById("mc-report");
+      mcBox.innerHTML = monteCarloReportHtml(data, homeBuilder.name, awayBuilder.name);
+      wireCollapsibles(mcBox);
+      setStatus(status, "");
+    } catch (e) {
+      showError(status, "Error: " + e.message);
+    }
+  };
 }
 
 async function enterTournamentMode() {
@@ -615,6 +639,13 @@ function randomizeBackground() {
 // match_engine.py). "Auto (squad decides)" is the default and preserves
 // every prior match's exact behavior - nothing changes unless the manager
 // actually picks something. Keyed to TACTIC_CHOICES server-side.
+// Shared by every "historical squad" picker (TeamBuilder's own + Draft
+// mode's) - one real base path per competition code, so adding a new
+// historical competition only means one new entry here.
+const HISTORICAL_COMPETITION_API_PATHS = {
+  rwc: "/api/historical_rwc", sn: "/api/historical_six_nations", rc: "/api/historical_rugby_championship",
+};
+
 function tacticsPickerHtml(prefix, label) {
   const axis = (id, title, options) => `
     <label class="muted">${title}:
@@ -778,6 +809,70 @@ const liveRevealProgress = {};
 // (previously only computed at full time) - so a manager can read real
 // running totals (possession/territory/carries/tackles/set-piece/kicking)
 // while a live match is paused, not just after the final whistle.
+// Monte Carlo "what-if" comparison: the SAME two lineups run many times
+// (`/api/match/monte_carlo`, `rugby_sim/tournament/monte_carlo.py`),
+// rendered here as real percentage-bar distributions - never collapsed
+// into one single mean/median number. Every bar's width/pct comes
+// straight from the server's own real tally of simulated outcomes.
+function mcBarRowsHtml(entries, labelFn) {
+  return entries.map(e => `
+    <div class="mc-bar-row">
+      <span class="mc-bar-label" title="${labelFn ? labelFn(e) : e.label}">${labelFn ? labelFn(e) : e.label}</span>
+      <div class="mc-bar-track"><div class="mc-bar-fill" style="width:${e.pct}%"></div></div>
+      <span class="mc-bar-pct">${e.pct}%</span>
+    </div>`).join("");
+}
+
+function mcStatLabel(name) {
+  return name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function monteCarloReportHtml(data, homeName, awayName) {
+  const outcomeEntries = [
+    {label: `${homeName} kazanır`, pct: data.outcome_pct.home_win},
+    {label: "Berabere", pct: data.outcome_pct.draw},
+    {label: `${awayName} kazanır`, pct: data.outcome_pct.away_win},
+  ];
+  const pomEntries = (data.player_of_the_match_distribution || []).slice(0, 10)
+    .map(e => ({label: `${e.name} (${e.team})`, pct: e.pct}));
+
+  const scoreCols = [homeName, awayName].map(name => `
+    <div>
+      <h5>${name} skoru</h5>
+      ${mcBarRowsHtml((data.score_distribution[name] || []).map(e => ({label: `${e.label} sayı`, pct: e.pct})))}
+    </div>`).join("");
+
+  const statNames = Object.keys(data.team_stats_distribution[homeName] || {});
+  const statBlocks = statNames.map(statName => `
+    <div class="mc-stat-block">
+      <h5>${mcStatLabel(statName)}</h5>
+      <div class="mc-two-col">
+        <div>
+          <div class="muted">${homeName}</div>
+          ${mcBarRowsHtml(data.team_stats_distribution[homeName][statName] || [])}
+        </div>
+        <div>
+          <div class="muted">${awayName}</div>
+          ${mcBarRowsHtml(data.team_stats_distribution[awayName][statName] || [])}
+        </div>
+      </div>
+    </div>`).join("");
+
+  return `
+    <h3>Monte Carlo sonucu (${data.runs} maç simüle edildi)</h3>
+    <div class="mc-stat-block">
+      <h5>Maç sonucu dağılımı</h5>
+      ${mcBarRowsHtml(outcomeEntries)}
+    </div>
+    <div class="mc-two-col">${scoreCols}</div>
+    <div class="mc-stat-block">
+      <h5>Maçın en iyi oyuncusu (Player of the Match) dağılımı</h5>
+      ${mcBarRowsHtml(pomEntries)}
+    </div>
+    ${collapsibleHtml("mc-all-stats", "Tüm istatistiklerin yüzdesel dağılımı", statBlocks, false)}
+  `;
+}
+
 function liveStatsTableHtml(stats) {
   const entries = Object.entries(stats || {});
   if (!entries.length) return "";
@@ -823,7 +918,7 @@ function penaltyDecisionHtml(pending) {
     </div>`;
 }
 
-function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId) {
+function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview) {
   const boxKey = boxId || "live-match-area";
   const box = document.getElementById(boxKey);
 
@@ -881,6 +976,12 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
       ${sortToggleHtml("live-bench-sort")}
       <span class="muted" id="live-status"></span>
     </div>
+    ${allowMonteCarloPreview === false ? "" : `
+    <div class="row">
+      <button id="live-mc-preview">Bu maç nasıl biterdi? (Monte Carlo önizleme)</button>
+      <span class="muted" id="live-mc-status"></span>
+    </div>
+    <div id="live-mc-report"></div>`}
     <div id="live-sub-picker"></div>`;
 
   const eventsEl = document.getElementById(`${playbackId}-events`);
@@ -895,7 +996,7 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
   liveRevealProgress[boxKey].shown = state.events.length;
 
   wireSortToggle("live-bench-sort", () => liveBenchSortDir, (d) => { liveBenchSortDir = d; },
-    () => renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId));
+    () => renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview));
 
   box.querySelectorAll(".live-sub-btn").forEach(btn => {
     btn.onclick = () => renderLiveSubPicker(state, btn.dataset.side, btn.dataset.pos, boxId, onFinished, allowSubsFor, reportTargetId);
@@ -912,12 +1013,31 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({choice: btn.dataset.choice}),
         });
-        renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+        renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview);
       } catch (e) {
         showError(status, "Error: " + e.message);
       }
     };
   });
+
+  const mcPreviewBtn = document.getElementById("live-mc-preview");
+  if (mcPreviewBtn) {
+    mcPreviewBtn.onclick = async () => {
+      const status = document.getElementById("live-mc-status");
+      setStatus(status, "simüle ediliyor...");
+      try {
+        const data = await api(`/api/match/live/${state.session_id}/monte_carlo_preview`, {
+          method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({n: 100}),
+        });
+        const mcBox = document.getElementById("live-mc-report");
+        mcBox.innerHTML = monteCarloReportHtml(data, state.home.name, state.away.name);
+        wireCollapsibles(mcBox);
+        setStatus(status, "");
+      } catch (e) {
+        showError(status, "Error: " + e.message);
+      }
+    };
+  }
 
   const continueBtn = document.getElementById("live-continue");
   continueBtn.onclick = async () => {
@@ -927,7 +1047,7 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
       const next = await api(`/api/match/live/${state.session_id}/continue`, {
         method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
       });
-      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview);
     } catch (e) {
       showError(status, "Error: " + e.message);
     }
@@ -948,7 +1068,7 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
       const next = await api(`/api/match/live/${state.session_id}/continue`, {
         method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
       });
-      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview);
     } catch (e) {
       showError(status, "Error: " + e.message);
     }
@@ -970,7 +1090,7 @@ function renderLiveMatchState(state, onFinished, boxId, allowSubsFor, reportTarg
           method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
         });
       }
-      renderLiveMatchState(current, onFinished, boxId, allowSubsFor, reportTargetId);
+      renderLiveMatchState(current, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview);
     } catch (e) {
       showError(status, "Error: " + e.message);
     }
@@ -1024,7 +1144,7 @@ async function renderLiveSubPicker(state, side, position, boxId, onFinished, all
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({team: side, position, bench_player_id: parseInt(btn.dataset.id, 10)}),
         });
-        renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+        renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview);
       } catch (e) {
         alert("Could not make that substitution: " + e.message);
       }
@@ -1059,7 +1179,7 @@ function handleSwapClick(state, side, position, boxId, onFinished, allowSubsFor,
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({team: side, position_a: positionA, position_b: positionB}),
       });
-      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId);
+      renderLiveMatchState(next, onFinished, boxId, allowSubsFor, reportTargetId, allowMonteCarloPreview);
     } catch (e) {
       alert("Could not make that swap: " + e.message);
     }
@@ -1893,7 +2013,8 @@ const TOURNAMENT_TYPE_CARDS = [
   {ttype: "real", title: "Real fixture replay", desc: "Replay the actual fixture list for a real competition (Six Nations, Rugby Championship, Nations Championship, Autumn Nations Series) and season."},
   {ttype: "wc2027", title: "2027 Rugby World Cup", desc: "24 teams, the real pool draw - play it out before it's happened for real."},
   {ttype: "historical", title: "Historical Rugby World Cup", desc: "Every real edition, 1995-2023, with that year's real squads."},
-  {ttype: "historical_sn", title: "Historical Six Nations", desc: "2009-2021, with that year's real squads."},
+  {ttype: "historical_sn", title: "Historical Six Nations", desc: "2000-2021, with that year's real squads (real fixture order for 2000-2008)."},
+  {ttype: "historical_rc", title: "Historical Rugby Championship", desc: "1996-2025 (Tri Nations before 2012), real squads + real fixture order."},
   {ttype: "custom", title: "Custom tournament", desc: "Pick any teams yourself - round robin, home & away, or pool + knockout."},
 ];
 
@@ -2040,10 +2161,11 @@ function renderTournamentConfig(ttype) {
         <button id="t-hsn-load">Load this edition's real squads</button>
         <span class="muted" id="t-hsn-status"></span>
       </div>
-      <p class="muted">Real squads from that edition's Wikipedia squads page (pre-rugbydata era,
-      archetype-based ratings where no real stats cross-reference - see README). Fixture order
-      is a synthetic round-robin, not the real historical match order (not recoverable from this
-      page). Pick which team(s) you want to draft yourself; the rest auto-draft their best XV.</p>`;
+      <p class="muted">Real squads (pre-rugbydata era, archetype-based ratings where no real stats
+      cross-reference - see README). 2000-2008 replays the REAL chronological fixture order
+      (parsed off that year's own season article); 2009-2021 still uses a synthetic round-robin
+      order (no fixture list survives on the squads page those years read from). Pick which
+      team(s) you want to draft yourself; the rest auto-draft their best XV.</p>`;
     api("/api/historical_six_nations/years").then(res => {
       const sel = document.getElementById("t-hsn-year");
       if (!sel) return;
@@ -2060,6 +2182,37 @@ function renderTournamentConfig(ttype) {
         const entries = teamNames.map(name => ({name, fixedPool: res.squads[name]}));
         buildTournamentTeamPanels(entries);
         renderTournamentRunArea({type: "historical_six_nations", year: parseInt(year, 10)});
+      } catch (e) {
+        showError(status, "Error: " + e.message);
+      }
+    };
+  } else if (ttype === "historical_rc") {
+    cfg.innerHTML = `
+      <div class="row">
+        <select id="t-hrc-year"></select>
+        <button id="t-hrc-load">Load this edition's real squads</button>
+        <span class="muted" id="t-hrc-status"></span>
+      </div>
+      <p class="muted">Real squads AND the real chronological fixture order, both parsed straight
+      off that year's own season article (Tri Nations before 2012, Rugby Championship from 2012
+      on - Argentina joined that year). Pick which team(s) you want to draft yourself; the rest
+      auto-draft their best XV.</p>`;
+    api("/api/historical_rugby_championship/years").then(res => {
+      const sel = document.getElementById("t-hrc-year");
+      if (!sel) return;
+      sel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
+    });
+    document.getElementById("t-hrc-load").onclick = async () => {
+      const year = document.getElementById("t-hrc-year").value;
+      const status = document.getElementById("t-hrc-status");
+      setStatus(status, "loading real squads from Wikipedia (first time is network-heavy - cached after)...");
+      try {
+        const res = await api(`/api/historical_rugby_championship/${year}`);
+        const teamNames = Object.keys(res.squads);
+        setStatus(status, `${teamNames.length} teams loaded.`);
+        const entries = teamNames.map(name => ({name, fixedPool: res.squads[name]}));
+        buildTournamentTeamPanels(entries);
+        renderTournamentRunArea({type: "historical_rugby_championship", year: parseInt(year, 10)});
       } catch (e) {
         showError(status, "Error: " + e.message);
       }
@@ -2350,6 +2503,7 @@ function tournamentRunBody(params) {
   if (params.type === "world_cup_2027") { body.fixture_mode = document.getElementById("t-wc-mode").value; }
   if (params.type === "historical_world_cup") { body.year = params.year; }
   if (params.type === "historical_six_nations") { body.year = params.year; }
+  if (params.type === "historical_rugby_championship") { body.year = params.year; }
   if (params.type === "custom") {
     body.format = document.getElementById("t-custom-format").value;
     body.pool_count = parseInt(document.getElementById("t-custom-pools").value || "2", 10);
@@ -2778,6 +2932,7 @@ let draftShowFitRatings = false; // toggle: show each player's natural-position 
 let draftPoolPlayers = []; // [{code, players}] chosen so far, just for the running count
 let draftHumanBuilder = null;
 let draftAiTeamId = null;
+let draftAiTeamName = "AI";
 let draftSortDir = "desc"; // shared by the remaining-pool list and the protect/poach selects
 
 async function refreshDraftDepthChart(area) {
@@ -2853,7 +3008,8 @@ function renderDraftPoolScreen() {
   histArea.innerHTML = `
     <select id="draft-hist-comp">
       <option value="rwc">Rugby World Cup (1995-2023)</option>
-      <option value="sn">Six Nations Championship (2009-2021)</option>
+      <option value="sn">Six Nations Championship (2000-2021)</option>
+      <option value="rc">Rugby Championship / Tri Nations (1996-2025)</option>
     </select>
     <select id="draft-hist-year"></select>
     <select id="draft-hist-team"><option>(load a year first)</option></select>
@@ -2870,16 +3026,14 @@ function renderDraftPoolScreen() {
       : "";
   };
   const loadYears = async () => {
-    const path = compSel.value === "rwc" ? "/api/historical_rwc/years" : "/api/historical_six_nations/years";
-    const res = await api(path);
+    const res = await api(`${HISTORICAL_COMPETITION_API_PATHS[compSel.value]}/years`);
     yearSel.innerHTML = res.years.map(y => `<option value="${y}">${y}</option>`).join("");
     await loadYearData();
   };
   const loadYearData = async () => {
     const year = yearSel.value;
     setStatus(histStatus, "loading real squads...");
-    const path = compSel.value === "rwc" ? `/api/historical_rwc/${year}` : `/api/historical_six_nations/${year}`;
-    const res = await api(path);
+    const res = await api(`${HISTORICAL_COMPETITION_API_PATHS[compSel.value]}/${year}`);
     yearData = res;
     const teamNames = Object.keys(res.squads).sort();
     teamSel.innerHTML = teamNames.map(n => `<option value="${n}">${n}</option>`).join("");
@@ -3070,6 +3224,7 @@ function renderDraftProtect(state) {
 async function finishDraftIntoBuild(state) {
   const finalized = await api(`/api/draft/${draftSessionId}/finalize_ai`, {method: "POST"});
   draftAiTeamId = finalized.team_id;
+  draftAiTeamName = finalized.name;
   navTo("screen-draft-build", "Build your XV", () => showScreen("screen-draft-build"));
   draftHumanBuilder = new TeamBuilder("draft-human", {
     title: "Your drafted XV", fixedPool: finalized.human_roster,
@@ -3110,6 +3265,26 @@ async function finishDraftIntoBuild(state) {
       showError(status, "Error: " + e.message);
     }
   };
+
+  document.getElementById("draft-mc-run").onclick = async () => {
+    const status = document.getElementById("draft-mc-status");
+    const n = parseInt(document.getElementById("draft-mc-runs").value, 10) || 100;
+    const tactics = {[draftHumanBuilder.name]: readTactics("draft-tac")};
+    setStatus(status, `${n} maç simüle ediliyor...`);
+    document.getElementById("draft-mc-report").innerHTML = "";
+    try {
+      const data = await api("/api/match/monte_carlo", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({home_team_id: draftHumanBuilder.teamId, away_team_id: draftAiTeamId, n, tactics}),
+      });
+      const mcBox = document.getElementById("draft-mc-report");
+      mcBox.innerHTML = monteCarloReportHtml(data, draftHumanBuilder.name, draftAiTeamName);
+      wireCollapsibles(mcBox);
+      setStatus(status, "");
+    } catch (e) {
+      showError(status, "Error: " + e.message);
+    }
+  };
 }
 
 function updateDraftRunButton() {
@@ -3117,6 +3292,8 @@ function updateDraftRunButton() {
   const ready = !!(draftHumanBuilder && draftHumanBuilder.teamId && draftAiTeamId);
   btn.disabled = !ready;
   setStatus(document.getElementById("draft-run-hint"), ready ? "" : "Click \"Save team\" on your drafted XV first.", !ready);
+  const mcBtn = document.getElementById("draft-mc-run");
+  if (mcBtn) mcBtn.disabled = !ready;
 }
 
 // `TeamBuilder.renderFinish`'s "Save team" handler calls the global
@@ -3550,7 +3727,7 @@ function renderClassicMatchDraft(startRes) {
       setStatus(status, "");
       renderLiveMatchState(state, (finishedState) => {
         completeClassicMatch(match.id, finishedState.session_id);
-      }, "classic-live-area", focusIsHome ? "home" : "away", "classic-live-area");
+      }, "classic-live-area", focusIsHome ? "home" : "away", "classic-live-area", false);
     } catch (e) {
       showError(status, "Error: " + e.message);
     }

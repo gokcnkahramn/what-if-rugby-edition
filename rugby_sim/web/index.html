@@ -150,6 +150,13 @@
     <span id="draft-run-hint" class="muted"></span>
     <span id="draft-run-status" class="muted"></span>
   </div>
+  <div class="match-controls">
+    <label class="muted">Monte Carlo - kaç kez simüle edilsin: <input type="number" id="draft-mc-runs" value="100" min="1" max="300" style="width:90px"></label>
+    <button id="draft-mc-run" disabled>Monte Carlo çalıştır</button>
+    <span class="muted" id="draft-mc-status"></span>
+  </div>
+  <div id="draft-mc-report"></div>
+
   <div id="draft-live-match-area"></div>
   <div id="draft-report"></div>
 </div>
@@ -168,6 +175,13 @@
     <span id="run-hint" class="muted"></span>
     <span id="run-status" class="muted"></span>
   </div>
+
+  <div class="match-controls">
+    <label class="muted">Monte Carlo - kaç kez simüle edilsin: <input type="number" id="mc-runs" value="100" min="1" max="300" style="width:90px"></label>
+    <button id="mc-run" disabled>Monte Carlo çalıştır</button>
+    <span class="muted" id="mc-status"></span>
+  </div>
+  <div id="mc-report"></div>
 
   <div id="live-match-area"></div>
 

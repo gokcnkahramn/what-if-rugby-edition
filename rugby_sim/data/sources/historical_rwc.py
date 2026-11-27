@@ -272,13 +272,14 @@ def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[P
             continue
         full_name = f"{entry['first']} {entry['last']}"
         attrs, source = _cross_reference_attributes(
-            full_name, peer_proxies=peer_proxies_by_position.get(position)
+            full_name, peer_proxies=peer_proxies_by_position.get(position),
+            position=position, nation=nation,
         )
         if attrs is None:
             attrs, source = _proxy_attributes(
                 position, entry.get("caps"), tournament_stats.get(full_name.lower())
             )
-        if source not in ("legends_curated", "ea_rugby08_rating"):
+        if source not in ("legends_curated", "ea_rugby08_rating", "rugby08_dataset"):
             attrs = scale_to_union_strength(attrs, strength)
         # Keep the real-vs-archetype distinction visible (same honesty
         # convention as the current-squad Wikipedia pipeline), just
@@ -286,7 +287,7 @@ def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[P
         # a curated Hall-of-Fame legend or a real EA-rated player, whose
         # provenance is tagged honestly as such rather than folded into
         # either historical bucket.
-        if source in ("legends_curated", "ea_rugby08_rating"):
+        if source in ("legends_curated", "ea_rugby08_rating", "rugby08_dataset"):
             data_source = source
         elif source == "wikipedia":
             data_source = "historical_wikipedia"
@@ -307,6 +308,10 @@ def build_historical_pool(year: int, nation: str, entries: List[dict]) -> List[P
                    "Attributes from real rugbydata career stats (cross-referenced by name) - "
                    "likely a career that extended into rugbydata's 2018+ coverage."
                    if source == "wikipedia" else
+                   "Real individual ratings from the 2007 EA Sports Rugby 08 game database "
+                   "(16 of 23 real in-game ratings mapped onto this project's attribute model; "
+                   "the rest are this position's archetype baseline) - see rugby08_dataset.py."
+                   if source == "rugby08_dataset" else
                    "No rugbydata history for this era/name, but real caps and/or this "
                    "tournament's real scoring-table stats gave a small, bounded nudge "
                    "off the generic position archetype."

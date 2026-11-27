@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](<https://img.shields.io/badge/tests-368%20passing-brightgreen.svg>)](tests/)
+[![Tests](<https://img.shields.io/badge/tests-398%20passing-brightgreen.svg>)](tests/)
 
 **What if you played Antoine Dupont at fullback? What if Jonah Lomu started
 at tighthead?** Build real squads from real players, drop anyone into any
@@ -28,7 +28,9 @@ player, run the match.
   squads from real national-team pools (or Legends, or historical World
   Cup/Six Nations squads), replay real competitions (Six Nations, Rugby
   Championship, Pacific Nations Cup, Rugby Europe Championship, the real
-  2027 World Cup draw, historical World Cups/Six Nations), or merge pools
+  2027 World Cup draw, historical World Cups (1995-2023), historical Six
+  Nations (2000-2021, real fixture order for 2000-2008), historical Rugby
+  Championship/Tri Nations (1996-2025, real fixture order throughout)), or merge pools
   into a shared draft-and-protect/poach mode. Season mode chains every
   real tournament a union played in a given year back to back, carrying
   injuries/suspensions/condition/rankings across tournament boundaries.
@@ -48,6 +50,23 @@ player, run the match.
   every match (seeded from a dated real snapshot, not a live feed), plus a
   squad-quality score kept separate from it so over/under-performance is
   visible.
+- **Monte Carlo "what-if" comparison** - run the same two lineups many times
+  (Friendly/Draft modes directly, or an opt-in "how would this likely end?"
+  preview before a Tournament/Season live match) and see real percentage
+  distributions - match outcome, each side's scoreline spread, Player of
+  the Match, and every real per-team stat - never a single collapsed
+  mean/median.
+- **Real 2007 EA Sports Rugby 08 ratings** for pre-2018 historical players -
+  sourced from the already-published `marnoux/rugby08-player-explorer`
+  fan extraction of the game's own database (1,904 players, 23 real raw
+  ratings each), overlaid on top of this project's own archetype baseline
+  for every honest 1:1 attribute match (see
+  `rugby_sim/data/sources/rugby08_dataset.py`) - a real individual game
+  rating instead of a generic estimate wherever a historical player's own
+  career overlaps that era. That source has no LICENSE file, so every
+  player built from it is tagged `data_source="rugby08_dataset"`, same
+  "no license, fan-sourced, use at own risk" transparency convention
+  `EA_RATED_PLAYERS` already uses.
 
 See the module docstrings (`rugby_sim/engine/MATCH_ENGINE_MODEL.md`,
 `rugby_sim/data/sources/ATTRIBUTE_MAPPING.md`, and the code itself) for the
@@ -64,7 +83,7 @@ documentation, not just comments.
 | `rugby_sim/tournament/`       | Real & synthetic tournament formats, standings, rankings, season   |
 | `rugby_sim/webapp.py` + `rugby_sim/web/` | The Flask API + clickable web UI (no rugby logic in JS) |
 | `rugby_sim/interactive_cli.py` | A terminal-only alternative to the web UI                          |
-| `tests/`                       | 368 tests across data, tournaments, the engine, and the web API    |
+| `tests/`                       | 398 tests across data, tournaments, the engine, and the web API    |
 
 Run the tests with `pip install pytest && pytest -q`.
 
@@ -107,6 +126,17 @@ regressions when the model changes.
   Read `rugby_sim/engine/MATCH_ENGINE_MODEL.md` first - the honest,
   per-outcome breakdown of what drives each probability and what isn't
   modeled at all.
+
+## Keeping real data fresh
+
+Every real pull (rugbydata match logs, Wikipedia squad/historical pages)
+is cached to disk forever - the simulator never needs the network once a
+union's been pulled. For unions whose real roster can change between real
+Test windows, force a refresh with `python scripts/refresh_cache.py
+--unions ENG,FRA,NZL` (or `--all`) - restart the web app afterward to pick
+it up. Historical sources (Classic Matches, historical World Cups/Six
+Nations/Rugby Championship, Legends, venues, team crests) are real,
+unchanging history and are deliberately never touched by this script.
 
 ## Playing from your phone
 

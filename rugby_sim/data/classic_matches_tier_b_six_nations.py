@@ -309,14 +309,16 @@ def _build_pool(entries: List[Tuple[str, str, bool]] | List[Tuple[str, str]], na
         if position is None:
             continue
         attrs, source = _cross_reference_attributes(
-            name, peer_proxies=peer_proxies_by_position.get(position)
+            name, peer_proxies=peer_proxies_by_position.get(position),
+            position=position, nation=nation,
         )
         if attrs is None:
             attrs = _archetype_attributes(position)
-        if source != "legends_curated":
+        if source not in ("legends_curated", "rugby08_dataset"):
             attrs = scale_to_union_strength(attrs, strength)
         data_source = (
             "legends_curated" if source == "legends_curated" else
+            "rugby08_dataset" if source == "rugby08_dataset" else
             "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
         )
         pool.append(Player(
@@ -333,6 +335,8 @@ def _build_pool(entries: List[Tuple[str, str, bool]] | List[Tuple[str, str]], na
                    "Attributes from real rugbydata career stats (cross-referenced by "
                    "name) - likely a career that extended into rugbydata's 2018+ "
                    "coverage." if source == "wikipedia" else
+                   "Real individual ratings from the 2007 EA Sports Rugby 08 game "
+                   "database (see rugby08_dataset.py)." if source == "rugby08_dataset" else
                    "No rugbydata history found for this era/name, so attributes are "
                    "a generic position-archetype estimate, not a scouted rating.")
             ),

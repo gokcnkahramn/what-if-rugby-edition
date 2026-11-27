@@ -114,7 +114,7 @@ def test_2003_world_cup_squads_resolve_to_20_real_teams():
         assert all(
             p.data_source in (
                 "historical_wikipedia", "historical_archetype", "historical_proxy",
-                "legends_curated", "ea_rugby08_rating",
+                "legends_curated", "ea_rugby08_rating", "rugby08_dataset",
             )
             for p in pool
         )

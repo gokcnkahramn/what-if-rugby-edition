@@ -508,3 +508,69 @@ def test_manager_penalty_decision_endpoint_end_to_end():
 
     decided = client.post(f"/api/match/live/{session_id}/decide_penalty", json={"choice": "touch"}).get_json()
     assert decided.get("pending_penalty") is None or decided["pending_penalty"]["team"] == "England"
+
+
+def test_monte_carlo_endpoint_returns_real_distributions():
+    client = _client()
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+
+    res = client.post("/api/match/monte_carlo", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "n": 15,
+    }).get_json()
+    assert res["runs"] == 15
+    assert abs(sum(res["outcome_pct"].values()) - 100.0) < 0.6
+    assert "England" in res["score_distribution"] and "France" in res["score_distribution"]
+    assert res["player_of_the_match_distribution"]
+    assert "tries" in res["team_stats_distribution"]["England"]
+
+    # n is clamped server-side, never trusted verbatim from the client.
+    huge = client.post("/api/match/monte_carlo", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "n": 100000,
+    }).get_json()
+    from rugby_sim.tournament.monte_carlo import MAX_MONTE_CARLO_RUNS
+    assert huge["runs"] == MAX_MONTE_CARLO_RUNS
+
+
+def test_live_match_monte_carlo_preview_endpoint_uses_the_sessions_own_lineups():
+    client = _client()
+    home = client.post("/api/team/auto", json={"name": "England", "code": "ENG", "season": "2026"}).get_json()
+    away = client.post("/api/team/auto", json={"name": "France", "code": "FRA", "season": "2026"}).get_json()
+    start = client.post("/api/match/live/start", json={
+        "home_team_id": home["team_id"], "away_team_id": away["team_id"], "seed": 3,
+    }).get_json()
+    session_id = start["session_id"]
+
+    preview = client.post(f"/api/match/live/{session_id}/monte_carlo_preview", json={"n": 10}).get_json()
+    assert preview["runs"] == 10
+    assert "England" in preview["score_distribution"]
+    assert "France" in preview["score_distribution"]
+
+    # Unknown session is a clean 404, not a crash.
+    missing = client.post("/api/match/live/not-a-real-session/monte_carlo_preview", json={"n": 5})
+    assert missing.status_code == 404
+
+
+def test_historical_rugby_championship_endpoints_and_tournament_run():
+    client = _client()
+    years = client.get("/api/historical_rugby_championship/years").get_json()
+    assert 1996 in years["years"] and 2025 in years["years"] and 2026 not in years["years"]
+
+    year_data = client.get("/api/historical_rugby_championship/2015").get_json()
+    team_names = sorted(year_data["squads"].keys())
+    assert team_names == sorted(["New Zealand", "Australia", "South Africa", "Argentina"])
+    assert year_data["fixtures"]
+    assert all("home" in f and "away" in f for f in year_data["fixtures"])
+
+    team_ids = {}
+    for name in team_names:
+        auto = client.post("/api/team/auto_from_ids", json={
+            "name": name, "player_ids": [p["id"] for p in year_data["squads"][name]],
+        }).get_json()
+        team_ids[name] = auto["team_id"]
+
+    run = client.post("/api/tournament/run", json={
+        "type": "historical_rugby_championship", "year": 2015, "team_ids": team_ids, "seed": 2,
+    }).get_json()
+    assert "real fixture order" in run["name"] or "historical" in run["name"].lower()
+    assert len(run["results"]) == 6

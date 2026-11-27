@@ -291,18 +291,33 @@ def _curated_legend_attributes(full_name: str) -> Optional[Attributes]:
     return legend.attributes if legend is not None else None
 
 
-def _cross_reference_attributes(full_name: str, peer_proxies: Optional[dict] = None) -> tuple[Attributes, str]:
+def _cross_reference_attributes(
+    full_name: str, peer_proxies: Optional[dict] = None,
+    position: Optional[Position] = None, nation: Optional[str] = None,
+) -> tuple[Attributes, str]:
     """Looks `full_name` up, in priority order: (1) `legends.CURATED_LEGENDS`'
     hand-tuned entries (exact name match) - a real Hall-of-Famer's
     historically-justified rating always beats a generic archetype or an
-    incidental stats cross-reference; (2) rugbydata's global player
-    registry, aggregating that person's real career stats if found; (3)
-    None, meaning no usable match - caller supplies the position archetype.
+    incidental stats cross-reference; (2) `legends.EA_RATED_PLAYERS` (a
+    small, secondhand-article-sourced Rugby 08 OVR conversion); (3) the
+    much richer real `rugby08_dataset` (1,904 real players, 23 real raw
+    ratings each, see that module's own docstring) - checked AFTER the
+    hand-curated tiers above (a real Hall-of-Famer's own curated rating
+    still wins a collision) but BEFORE the generic rugbydata registry,
+    since a real, individually-attributed 2007 game rating is a stronger
+    signal for a historical (pre-2018) player than an incidental modern
+    stats cross-reference; only reachable when the caller passes
+    `position` (needed to build the archetype baseline this tier overlays
+    real ratings onto - omitted callers simply skip this tier, same as
+    before this tier existed); (4) rugbydata's global player registry,
+    aggregating that person's real career stats if found; (5) None,
+    meaning no usable match - caller supplies the position archetype.
     `peer_proxies` (see `pool_builder._global_reference_peer_proxies`) is
     passed straight through to `map_stats_to_attributes` so a registry-
     sourced rating is calibrated against the same cross-union reference
     pool as every rugbydata-sourced player, not scored in isolation -
-    curated-legends attributes are already final and skip that step."""
+    curated-legends/EA/Rugby08-dataset attributes are already final and
+    skip that step."""
     legend_attrs = _curated_legend_attributes(full_name)
     if legend_attrs is not None:
         return legend_attrs, "legends_curated"
@@ -310,6 +325,12 @@ def _cross_reference_attributes(full_name: str, peer_proxies: Optional[dict] = N
     ea_attrs = _ea_rated_attributes(full_name)
     if ea_attrs is not None:
         return ea_attrs, "ea_rugby08_rating"
+
+    if position is not None:
+        from .rugby08_dataset import rugby08_attributes
+        r08_attrs = rugby08_attributes(position, full_name, nation=nation)
+        if r08_attrs is not None:
+            return r08_attrs, "rugby08_dataset"
 
     registry = fetch_player_registry()
     if registry is None or registry.empty:

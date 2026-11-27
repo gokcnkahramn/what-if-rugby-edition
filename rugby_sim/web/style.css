@@ -437,3 +437,21 @@ table.stats::-webkit-scrollbar-thumb {
   .candidates { max-height: 160px; }
   #events, .events { max-height: 220px; }
 }
+
+/* ---------- Monte Carlo distribution bars ---------- */
+.mc-bar-row {
+  display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 0.85rem;
+}
+.mc-bar-label { min-width: 150px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-bar-track {
+  flex: 1; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px;
+  height: 14px; position: relative; min-width: 80px;
+}
+.mc-bar-fill {
+  background: var(--accent); height: 100%; border-radius: 3px 0 0 3px;
+}
+.mc-bar-pct { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+.mc-stat-block { margin-bottom: 14px; }
+.mc-stat-block h5 { margin: 4px 0; font-size: 0.9rem; }
+.mc-two-col { display: flex; gap: 24px; flex-wrap: wrap; }
+.mc-two-col > div { flex: 1; min-width: 280px; }

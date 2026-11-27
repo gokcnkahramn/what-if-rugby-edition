@@ -43,3 +43,13 @@ def test_non_ranked_sides_excluded_from_team_form():
     assert not (teams & {"Barbarians", "British & Irish Lions", "Pacific Islanders"})
     # The real opponents still show up normally.
     assert {"New Zealand", "Australia", "Wales"} <= teams
+
+
+def test_pacific_islanders_2008_pool_uses_real_rugby08_data_where_it_exists():
+    """The 2008 Pacific Islanders tour exactly overlaps EA Sports Rugby
+    08's own roster era - confirms the rugby08_dataset tier is wired in
+    here, not just the pre-2018-national-team historical pipelines."""
+    from rugby_sim.data.sources.invitational_squads import build_pacific_islanders_pool
+    pool = build_pacific_islanders_pool()
+    assert pool
+    assert any(p.data_source == "rugby08_dataset" for p in pool)

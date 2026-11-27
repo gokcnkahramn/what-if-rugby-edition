@@ -54,6 +54,9 @@ from .tournament import (
     list_tournaments,
 )
 from .data.sources.pool_builder import ALL_TEAM_IDS, build_season_pool, build_union_pool
+from .tournament.monte_carlo import (
+    DEFAULT_MONTE_CARLO_RUNS, MAX_MONTE_CARLO_RUNS, aggregate_monte_carlo, run_monte_carlo_matches,
+)
 from .tournament.rankings import TeamRankingTracker
 from .tournament.real_fixtures import TOURNAMENTS, load_real_fixtures
 from .tournament.season import SeasonFixtureBlock, SeasonPlan, SeasonSession, run_season, squad_for_team
@@ -322,6 +325,37 @@ def api_historical_six_nations_year(year: int):
     return jsonify({
         "year": year,
         "squads": {name: [_player_json(p) for p in squad] for name, squad in squads.items()},
+    })
+
+
+@app.get("/api/historical_rugby_championship/years")
+def api_historical_rugby_championship_years():
+    from .data.sources.historical_rugby_championship import AVAILABLE_RUGBY_CHAMPIONSHIP_YEARS
+    return jsonify({"years": AVAILABLE_RUGBY_CHAMPIONSHIP_YEARS})
+
+
+@app.get("/api/historical_rugby_championship/<int:year>")
+def api_historical_rugby_championship_year(year: int):
+    """Each real team's real historical squad for that Tri Nations/Rugby
+    Championship edition, plus the real chronological fixture list - same
+    registration pattern as the historical Six Nations endpoint above."""
+    from .data.sources.historical_rugby_championship import get_rugby_championship_year_data
+
+    try:
+        squads, fixtures = get_rugby_championship_year_data(year)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    for squad in squads.values():
+        _register(squad)
+
+    return jsonify({
+        "year": year,
+        "squads": {name: [_player_json(p) for p in squad] for name, squad in squads.items()},
+        "fixtures": [
+            {"home": h, "away": a, "home_score": hs, "away_score": as_}
+            for h, a, hs, as_ in fixtures
+        ],
     })
 
 
@@ -1156,6 +1190,33 @@ def api_match():
     return jsonify(_match_json(result))
 
 
+@app.post("/api/match/monte_carlo")
+def api_match_monte_carlo():
+    """Runs the SAME two lineups many times (`run_monte_carlo_matches`) and
+    returns real percentage distributions (`aggregate_monte_carlo`) instead
+    of one single simulated result - the match outcome, each side's real
+    scoreline spread, who was Player of the Match and how often, and every
+    real per-team stat's own distribution. `n` (optional, default
+    `DEFAULT_MONTE_CARLO_RUNS`) is clamped to `MAX_MONTE_CARLO_RUNS`
+    server-side regardless of what's requested."""
+    body = request.get_json(force=True)
+    home = _TEAMS.get(body["home_team_id"])
+    away = _TEAMS.get(body["away_team_id"])
+    if home is None or away is None:
+        return jsonify({"error": "unknown team_id - build both teams first"}), 400
+    n = int(body.get("n", DEFAULT_MONTE_CARLO_RUNS))
+    n = max(1, min(n, MAX_MONTE_CARLO_RUNS))
+    tactics = body.get("tactics")
+    seed_start = int(body.get("seed_start", 0))
+
+    try:
+        results = run_monte_carlo_matches(home, away, n, seed_start=seed_start, tactics=tactics)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(aggregate_monte_carlo(results, home.name, away.name))
+
+
 # -- API: a pausable "live" match, for mid-match substitutions -----------
 # Checkpoints a live match pauses at - same convention as the interactive
 # CLI's SUB_CHECKPOINTS (rugby_sim/interactive_cli.py).
@@ -1314,6 +1375,29 @@ def api_match_live_continue(session_id: str):
     return jsonify(state)
 
 
+@app.post("/api/match/live/<session_id>/monte_carlo_preview")
+def api_match_live_monte_carlo_preview(session_id: str):
+    """Opt-in "how would this likely end?" preview for an already-paused
+    live match (Friendly/Draft/Tournament/Season all funnel through the
+    same `_LIVE_MATCHES` registry - this one endpoint covers every mode
+    that calls it). Runs `n` FRESH, independent simulations of the exact
+    same two lineups (`engine.home`/`engine.away`) - never peeks at or
+    reuses the live match's own actual seed/progress, so this is purely an
+    informational side panel, not a spoiler of the specific match actually
+    being played out. The caller decides whether to show this at all (not
+    wired into Classic Matches' flow in the frontend, since that mode's
+    whole point is playing out one specific real scenario, not previewing
+    aggregate odds for it)."""
+    engine = _LIVE_MATCHES.get(session_id)
+    if engine is None:
+        return jsonify({"error": f"unknown live match session {session_id}"}), 404
+    body = request.get_json(silent=True) or {}
+    n = int(body.get("n", DEFAULT_MONTE_CARLO_RUNS))
+    n = max(1, min(n, MAX_MONTE_CARLO_RUNS))
+    results = run_monte_carlo_matches(engine.home, engine.away, n)
+    return jsonify(aggregate_monte_carlo(results, engine.home.name, engine.away.name))
+
+
 @app.post("/api/match/live/<session_id>/decide_penalty")
 def api_match_live_decide_penalty(session_id: str):
     """Manager-controls pass: applies a decision-team's choice for the
@@ -1464,6 +1548,9 @@ def api_tournament_run():
         elif kind == "historical_six_nations":
             t = Tournament(teams=teams, squads=squads)
             report = t.run_historical_six_nations(int(body["year"]), seed=seed)
+        elif kind == "historical_rugby_championship":
+            t = Tournament(teams=teams, squads=squads)
+            report = t.run_historical_rugby_championship(int(body["year"]), seed=seed)
         elif kind == "custom":
             fmt = body.get("format", "round_robin")
             pool_count = int(body.get("pool_count", 2))
@@ -1620,6 +1707,10 @@ def _build_tournament(kind: str, body: dict, teams: Dict[str, Team], squads: Dic
         t = Tournament(teams=teams, squads=squads, my_team=my_team, pause_hook=pause_hook, on_match_played=on_match_played)
         holder["instance"] = t
         return t.run_historical_six_nations(int(body["year"]), seed=seed)
+    if kind == "historical_rugby_championship":
+        t = Tournament(teams=teams, squads=squads, my_team=my_team, pause_hook=pause_hook, on_match_played=on_match_played)
+        holder["instance"] = t
+        return t.run_historical_rugby_championship(int(body["year"]), seed=seed)
     if kind == "custom":
         fmt = body.get("format", "round_robin")
         pool_count = int(body.get("pool_count", 2))
@@ -2147,6 +2238,9 @@ def api_draft_start():
             elif competition == "sn":
                 from .data.sources.historical_six_nations import get_six_nations_year_data
                 squads = get_six_nations_year_data(int(year))
+            elif competition == "rc":
+                from .data.sources.historical_rugby_championship import get_rugby_championship_year_data
+                squads, _fixtures = get_rugby_championship_year_data(int(year))
             else:
                 return jsonify({"error": f"unknown historical competition {competition}"}), 400
         except ValueError as e:

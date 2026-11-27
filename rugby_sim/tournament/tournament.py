@@ -911,12 +911,15 @@ class Tournament:
         """Replays a historical Six Nations edition with that year's real
         squads (see `historical_six_nations.get_six_nations_year_data`) -
         plain round-robin + bonus-point table, same shape as `run_real`.
-        The real match-by-match order isn't recoverable from the squads
-        page (no fixture list there), so the round-robin uses a synthetic
-        generated order, not the actual historical sequence - the final
-        table's shape (10 matches, everyone plays everyone once) is real,
-        the order they were played in isn't."""
-        from ..data.sources.historical_six_nations import get_six_nations_year_data
+        For 2000-2008, this now replays the REAL chronological fixture
+        order (`get_six_nations_year_fixtures` - parsed straight off the
+        season's own article, see `season_match_pages.py`); for 2009-2021
+        the real match-by-match order still isn't recoverable (the squads
+        page it reads has no fixture list), so those years fall back to a
+        synthetic generated order - the final table's shape (10 matches,
+        everyone plays everyone once) is real either way, only the PLAYED
+        ORDER differs by year range."""
+        from ..data.sources.historical_six_nations import get_six_nations_year_data, get_six_nations_year_fixtures
 
         squads = get_six_nations_year_data(year)
         known = self.known_names()
@@ -931,11 +934,53 @@ class Tournament:
         self.current_stage = f"{year} Six Nations"
         self.current_standings = standings
         results: List[MatchResult] = []
-        for i, fx in enumerate(round_robin(team_names)):
-            result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
+
+        real_fixtures = get_six_nations_year_fixtures(year)
+        if real_fixtures:
+            order_note = "real fixture order"
+            for i, (home, away, _hs, _as) in enumerate(real_fixtures):
+                result = self._play(home, away, seed=None if seed is None else seed + i)
+                standings.add_result(result)
+                results.append(result)
+        else:
+            order_note = "synthetic fixture order"
+            for i, fx in enumerate(round_robin(team_names)):
+                result = self._play(fx.home, fx.away, seed=None if seed is None else seed + i)
+                standings.add_result(result)
+                results.append(result)
+        return attach_tournament_awards(TournamentReport(
+            name=f"{year} Six Nations Championship (historical squads, {order_note})",
+            standings=standings, results=results,
+        ))
+
+    # -- historical Rugby Championship / Tri Nations (1996-2025) --------
+    def run_historical_rugby_championship(self, year: int, seed: Optional[int] = None) -> TournamentReport:
+        """Replays a historical Tri Nations (1996-2011)/Rugby Championship
+        (2012+) edition with that year's real squads AND real chronological
+        fixture order - both parsed straight off the season's own article
+        (see `historical_rugby_championship.get_rugby_championship_year_data`/
+        `season_match_pages.py`), same shape as `run_historical_six_nations`."""
+        from ..data.sources.historical_rugby_championship import get_rugby_championship_year_data
+
+        squads, fixtures = get_rugby_championship_year_data(year)
+        known = self.known_names()
+        missing = [name for name in squads if name not in known]
+        if missing:
+            raise ValueError(
+                f"Missing a Team for: {', '.join(sorted(missing))} - "
+                f"draft every {year} Rugby Championship/Tri Nations side before running it."
+            )
+        team_names = list(squads.keys())
+        standings = Standings(team_names)
+        competition = "Tri Nations Series" if year < 2012 else "Rugby Championship"
+        self.current_stage = f"{year} {competition}"
+        self.current_standings = standings
+        results: List[MatchResult] = []
+        for i, (home, away, _hs, _as) in enumerate(fixtures):
+            result = self._play(home, away, seed=None if seed is None else seed + i)
             standings.add_result(result)
             results.append(result)
         return attach_tournament_awards(TournamentReport(
-            name=f"{year} Six Nations Championship (historical squads, synthetic fixture order)",
+            name=f"{year} {competition} (historical squads, real fixture order)",
             standings=standings, results=results,
         ))

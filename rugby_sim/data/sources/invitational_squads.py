@@ -259,14 +259,17 @@ def build_pacific_islanders_pool() -> List[Player]:
     for entry in entries:
         position = entry["position"]
         full_name = entry["name"]
-        attrs, source = _cross_reference_attributes(full_name)
+        nation_code = entry.get("nation_code")
+        nation_for_lookup = NATION_DISPLAY.get(nation_code, nation_code or None)
+        attrs, source = _cross_reference_attributes(full_name, position=position, nation=nation_for_lookup)
         if attrs is None:
             attrs, source = _proxy_attributes(position, None)
         note = (
             "2008 Pacific Islanders tour squad (last real season before the "
             "alliance folded in 2009) - real Wikipedia tour-squad listing."
+            + (" Real individual ratings from the 2007 EA Sports Rugby 08 game "
+               "database (see rugby08_dataset.py)." if source == "rugby08_dataset" else "")
         )
-        nation_code = entry.get("nation_code")
         pool.append(Player(
             full_name, NATION_DISPLAY.get(nation_code, nation_code or "Unknown"),
             position, attrs, era="'08", notes=note, data_source=source,

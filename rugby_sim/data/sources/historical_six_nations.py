@@ -1,5 +1,11 @@
 """Historical Six Nations Championship squads (2009-2021) from Wikipedia's
-dedicated "`<year>` Six Nations Championship squads" pages.
+dedicated "`<year>` Six Nations Championship squads" pages, PLUS (new,
+below) full-season real-fixture-order replay for 2000-2008 via the main
+season article's own per-match `{{Rugbybox}}` + lineup-table format (see
+`season_match_pages.py`) - a genuinely richer real source for those years:
+real chronological match order (this module's own 2009-2021 path has no
+real order at all, since the separate squads page it reads has no
+fixture list), not just a synthetic round-robin shape.
 
 Why this range: pages for this competition exist back further, but earlier
 ones (checked live: 2000-2008) list players as a bare numbered wikilink
@@ -28,10 +34,12 @@ stats via name cross-reference into rugbydata wherever a career overlaps
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from ...models.player import Player
+from ...models.position import Position
 from .attribute_mapping import DEFAULT_UNION_STRENGTH, UNION_STRENGTH, scale_to_union_strength
+from .season_match_pages import MATCH_POS_CODE_MAP, parse_season_matches
 from .wikipedia_squad import (
     POS_CODE_MAP,
     _archetype_attributes,
@@ -47,7 +55,7 @@ _NATION_TO_STRENGTH_CODE = {
 # Verified live: 2009-2025 all use the `{{nat rs player|pos=...}}` template
 # throughout; 2022+ is already covered by the current-season pipeline (real
 # rugbydata stats), so only the pre-rugbydata years are exposed here.
-AVAILABLE_SIX_NATIONS_YEARS = list(range(2009, 2022))
+AVAILABLE_SIX_NATIONS_YEARS = list(range(2000, 2022))
 
 _SIX_NATIONS_TEAMS = ("England", "France", "Ireland", "Italy", "Scotland", "Wales")
 _CODE_TO_TEAM = {"ENG": "England", "FRA": "France", "IRE": "Ireland", "ITA": "Italy", "SCO": "Scotland", "WAL": "Wales"}
@@ -134,12 +142,19 @@ def build_historical_six_nations_pool(year: int, nation: str, entries: List[dict
             continue
         full_name = entry["name"]
         attrs, source = _cross_reference_attributes(
-            full_name, peer_proxies=peer_proxies_by_position.get(position)
+            full_name, peer_proxies=peer_proxies_by_position.get(position),
+            position=position, nation=nation,
         )
         if attrs is None:
             attrs = _archetype_attributes(position)
-        attrs = scale_to_union_strength(attrs, strength)
-        data_source = "historical_wikipedia" if source == "wikipedia" else "historical_archetype"
+        if source != "rugby08_dataset":
+            attrs = scale_to_union_strength(attrs, strength)
+        if source == "rugby08_dataset":
+            data_source = source
+        elif source == "wikipedia":
+            data_source = "historical_wikipedia"
+        else:
+            data_source = "historical_archetype"
         pool.append(Player(
             name=full_name,
             nation=nation,
@@ -150,6 +165,9 @@ def build_historical_six_nations_pool(year: int, nation: str, entries: List[dict
                 f"{year} Six Nations Championship squad. "
                 + ("Attributes from real rugbydata career stats (cross-referenced by name)."
                    if source == "wikipedia" else
+                   "Real individual ratings from the 2007 EA Sports Rugby 08 game database "
+                   "(see rugby08_dataset.py)."
+                   if source == "rugby08_dataset" else
                    "No rugbydata history found for this era/name, so attributes are a "
                    "generic position-archetype estimate, not a scouted rating.")
             ),
@@ -164,9 +182,11 @@ _SIX_NATIONS_CACHE: Dict[int, Dict[str, List[Player]]] = {}
 def get_six_nations_year_data(year: int) -> Dict[str, List[Player]]:
     """Returns `{team_name: [Player, ...]}` for one Six Nations edition -
     all six teams, a fixed field for this competition (unlike the World
-    Cup's varying participant list). No real match order survives on this
-    page, so a tournament replay built from this data uses a synthetic
-    round-robin order, not the actual historical fixture sequence."""
+    Cup's varying participant list). For 2000-2008, this now dispatches to
+    the real-fixture-order season-page path below; for 2009-2021 it's the
+    original squads-page path (no real match order survives there)."""
+    if 2000 <= year < 2009:
+        return _get_six_nations_year_squads_from_season_page(year)
     if year in _SIX_NATIONS_CACHE:
         return _SIX_NATIONS_CACHE[year]
 
@@ -185,3 +205,120 @@ def get_six_nations_year_data(year: int) -> Dict[str, List[Player]]:
     }
     _SIX_NATIONS_CACHE[year] = squads
     return squads
+
+
+# ---------------------------------------------------------------------------
+# 2000-2008: real per-match lineup tables + real fixture order, straight off
+# the main "`<year>` Six Nations Championship" season article (NOT the
+# separate squads page above) - see `season_match_pages.py`'s own module
+# docstring for why this is both available and a strictly richer real
+# source for these years. Verified live for all of 2000-2008 (one postponed
+# fixture in 2002 aside, confirmed a real, not a parsing, gap).
+AVAILABLE_SIX_NATIONS_REAL_ORDER_YEARS = list(range(2000, 2009))
+
+_CODE_TO_SIX_NATIONS_TEAM = _CODE_TO_TEAM
+_SIX_NATIONS_SEASON_FIXTURES_CACHE: Dict[int, list] = {}
+_SIX_NATIONS_SEASON_SQUADS_CACHE: Dict[int, Dict[str, List[Player]]] = {}
+
+
+def _season_page_title(year: int) -> str:
+    return f"{year} Six Nations Championship"
+
+
+def _build_pool_from_season_entries(year: int, nation: str, entries) -> List[Player]:
+    """Same real cross-reference/archetype/union-strength pipeline as
+    `build_historical_six_nations_pool` above, just fed from
+    `season_match_pages.SeasonMatchLineupEntry` (deduped by name across
+    every match that nation played this season) instead of the squads
+    page's own entry dicts."""
+    strength_code = _NATION_TO_STRENGTH_CODE.get(nation)
+    strength = UNION_STRENGTH.get(strength_code, DEFAULT_UNION_STRENGTH) if strength_code else DEFAULT_UNION_STRENGTH
+    era = f"'{str(year)[-2:]}"
+    pool: List[Player] = []
+    for entry in entries:
+        position_name = MATCH_POS_CODE_MAP.get(entry.position_code)
+        if position_name is None:
+            continue
+        position = Position(position_name)
+        attrs, source = _cross_reference_attributes(entry.name, position=position, nation=nation)
+        if attrs is None:
+            attrs = _archetype_attributes(position)
+        if source != "rugby08_dataset":
+            attrs = scale_to_union_strength(attrs, strength)
+        if source == "rugby08_dataset":
+            data_source = source
+        elif source == "wikipedia":
+            data_source = "historical_wikipedia"
+        else:
+            data_source = "historical_archetype"
+        pool.append(Player(
+            name=entry.name, nation=nation, natural_position=position, attributes=attrs, era=era,
+            notes=(
+                f"{year} Six Nations Championship - real match-day lineup (season article). "
+                + ("Attributes from real rugbydata career stats (cross-referenced by name)."
+                   if source == "wikipedia" else
+                   "Real individual ratings from the 2007 EA Sports Rugby 08 game database "
+                   "(see rugby08_dataset.py)."
+                   if source == "rugby08_dataset" else
+                   "No rugbydata history found for this era/name, so attributes are a "
+                   "generic position-archetype estimate, not a scouted rating.")
+            ),
+            data_source=data_source,
+        ))
+    return pool
+
+
+def _get_six_nations_season_matches(year: int):
+    if year not in _SIX_NATIONS_SEASON_FIXTURES_CACHE:
+        wikitext = fetch_wikitext(_season_page_title(year))
+        matches = parse_season_matches(wikitext)
+        if not matches:
+            raise ValueError(f"{_season_page_title(year)} didn't parse into any real matches.")
+        _SIX_NATIONS_SEASON_FIXTURES_CACHE[year] = matches
+    return _SIX_NATIONS_SEASON_FIXTURES_CACHE[year]
+
+
+def _get_six_nations_year_squads_from_season_page(year: int) -> Dict[str, List[Player]]:
+    if year in _SIX_NATIONS_SEASON_SQUADS_CACHE:
+        return _SIX_NATIONS_SEASON_SQUADS_CACHE[year]
+    matches = _get_six_nations_season_matches(year)
+    entries_by_nation: Dict[str, dict] = {}
+    for m in matches:
+        for code, lineup in ((m.home_code, m.home_lineup), (m.away_code, m.away_lineup)):
+            nation = _CODE_TO_SIX_NATIONS_TEAM.get(code)
+            if nation is None:
+                continue
+            bucket = entries_by_nation.setdefault(nation, {})
+            for e in lineup:
+                bucket.setdefault(e.name, e)  # first real sighting wins, no duplicate players
+    squads = {
+        nation: _build_pool_from_season_entries(year, nation, entries.values())
+        for nation, entries in entries_by_nation.items()
+    }
+    if len(squads) < 6 or any(len(p) < 15 for p in squads.values()):
+        raise ValueError(
+            f"{_season_page_title(year)} didn't parse into all six teams' full real lineups - format may differ."
+        )
+    _SIX_NATIONS_SEASON_SQUADS_CACHE[year] = squads
+    return squads
+
+
+def get_six_nations_year_fixtures(year: int) -> Optional[List[Tuple[str, str, int, int]]]:
+    """The REAL chronological fixture list for a 2000-2008 edition -
+    `(home_nation, away_nation, home_score, away_score)` in real page
+    order - or `None` for a year that only has the squads-page path (no
+    real order recoverable there, see `get_six_nations_year_data`'s own
+    docstring). A match this project's own simulation doesn't need the
+    REAL score for (only the real pairing/order matters for replay), kept
+    here anyway since it's free and useful for display."""
+    if not (2000 <= year < 2009):
+        return None
+    matches = _get_six_nations_season_matches(year)
+    fixtures = []
+    for m in matches:
+        home = _CODE_TO_SIX_NATIONS_TEAM.get(m.home_code)
+        away = _CODE_TO_SIX_NATIONS_TEAM.get(m.away_code)
+        if home is None or away is None or m.home_score is None or m.away_score is None:
+            continue
+        fixtures.append((home, away, m.home_score, m.away_score))
+    return fixtures
